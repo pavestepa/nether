@@ -575,52 +575,42 @@ impl Resolver<'_> {
             return;
         }
 
-        let Some((base_index, id)) = path
-            .segments
-            .iter()
-            .enumerate()
-            .find_map(|(index, segment)| {
-                self.defs
-                    .lookup_in(path.span.file, &segment.name)
-                    .map(|id| (index, id))
-            })
-        else {
-            let name = path.segments.last().unwrap_or(first);
-            self.error(name.span, format!("cannot find `{}` in this scope", name.name));
+        let Some(id) = self.defs.lookup_in(path.span.file, &first.name) else {
+            self.unresolved_value(first);
             self.path_res.insert(path.id, PathResolution { base: Resolution::Error, consumed: path.segments.len() });
             return;
         };
 
         let def = self.defs.get(id);
-        if base_index + 1 == path.segments.len() {
-            self.path_res.insert(path.id, PathResolution { base: Resolution::Def(id), consumed: base_index + 1 });
+        if path.segments.len() == 1 {
+            self.path_res.insert(path.id, PathResolution { base: Resolution::Def(id), consumed: 1 });
             return;
         }
 
-        let second = &path.segments[base_index + 1];
+        let second = &path.segments[1];
         match def.kind {
             DefKind::Enum => {
                 if let Some(idx) = variant_index(def, &second.name) {
                     self.path_res
-                        .insert(path.id, PathResolution { base: Resolution::EnumVariant(id, idx), consumed: base_index + 2 });
+                        .insert(path.id, PathResolution { base: Resolution::EnumVariant(id, idx), consumed: 2 });
                 } else if let Some(idx) = method_index(def, &second.name) {
                     self.path_res
-                        .insert(path.id, PathResolution { base: Resolution::StaticMember(id, idx), consumed: base_index + 2 });
+                        .insert(path.id, PathResolution { base: Resolution::StaticMember(id, idx), consumed: 2 });
                 } else {
                     self.error(
                         second.span,
                         format!("enum `{}` has no variant or method named `{}`", first.name, second.name),
                     );
-                    self.path_res.insert(path.id, PathResolution { base: Resolution::Error, consumed: base_index + 2 });
+                    self.path_res.insert(path.id, PathResolution { base: Resolution::Error, consumed: 2 });
                 }
             }
             DefKind::Type => {
                 if let Some(idx) = method_index(def, &second.name) {
                     self.path_res
-                        .insert(path.id, PathResolution { base: Resolution::StaticMember(id, idx), consumed: base_index + 2 });
+                        .insert(path.id, PathResolution { base: Resolution::StaticMember(id, idx), consumed: 2 });
                 } else {
                     self.error(second.span, format!("type `{}` has no method named `{}`", first.name, second.name));
-                    self.path_res.insert(path.id, PathResolution { base: Resolution::Error, consumed: base_index + 2 });
+                    self.path_res.insert(path.id, PathResolution { base: Resolution::Error, consumed: 2 });
                 }
             }
             DefKind::Interface | DefKind::Fn | DefKind::Primitive => {
@@ -635,6 +625,73 @@ impl Resolver<'_> {
             }
         }
     }
+
+    fn unresolved_value(&mut self, name: &nether_ast::Ident) {
+        let mut candidates = self.scopes.visible_names();
+        candidates.extend(
+            self.defs
+                .visible_in(name.span.file)
+                .into_iter()
+                .map(|id| self.defs.get(id).name.clone()),
+        );
+        candidates.sort();
+        candidates.dedup();
+
+        let mut diagnostic =
+            Diagnostic::error(format!("cannot find `{}` in this scope", name.name))
+                .with_label(name.span, "unknown name");
+        if let Some(candidate) = closest_name(&name.name, &candidates) {
+            diagnostic = diagnostic.with_suggestion(
+                name.span,
+                candidate.to_string(),
+                format!("did you mean `{candidate}`?"),
+            );
+        }
+        self.diagnostics.push(diagnostic);
+    }
+}
+
+fn closest_name<'a>(needle: &Symbol, candidates: &'a [Symbol]) -> Option<&'a Symbol> {
+    let needle_len = needle.as_str().chars().count();
+    let max_distance = match needle_len {
+        0..=3 => 1,
+        4..=7 => 2,
+        _ => 3,
+    };
+    candidates
+        .iter()
+        .filter(|candidate| *candidate != needle)
+        .map(|candidate| {
+            (
+                edit_distance(needle.as_str(), candidate.as_str()),
+                candidate,
+            )
+        })
+        .filter(|(distance, _)| *distance <= max_distance)
+        .min_by(|(left_distance, left), (right_distance, right)| {
+            left_distance
+                .cmp(right_distance)
+                .then_with(|| left.cmp(right))
+        })
+        .map(|(_, candidate)| candidate)
+}
+
+fn edit_distance(left: &str, right: &str) -> usize {
+    let right = right.chars().collect::<Vec<_>>();
+    let mut previous = (0..=right.len()).collect::<Vec<_>>();
+    for (left_index, left_char) in left.chars().enumerate() {
+        let mut current = Vec::with_capacity(right.len() + 1);
+        current.push(left_index + 1);
+        for (right_index, right_char) in right.iter().enumerate() {
+            let substitution = previous[right_index]
+                + usize::from(left_char != *right_char);
+            let insertion = current[right_index] + 1;
+            let deletion = previous[right_index + 1] + 1;
+            current.push(substitution.min(insertion).min(deletion));
+        }
+        previous = current;
+    }
+    previous[right.len()]
 }
 
 fn variant_index(def: &def::Def, name: &Symbol) -> Option<u32> {

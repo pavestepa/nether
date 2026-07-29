@@ -1,0 +1,24 @@
+fn main() {
+    let cat_kikki = Cat.new("Kikki");
+    println(cat_kikki);
+    println(cat_kikky.into_i32());
+}
+
+type Cat {
+    name: String,
+}
+
+impl Cat {
+    new(_name: String): Cat {
+        Cat { name: _name }
+    }
+    into_i32(self): i32 {
+        1
+    }
+}
+
+impl Cat: Into<String> {
+    into_string(self): String {
+        self.name
+    }
+}

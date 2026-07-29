@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use nether_ast::Symbol;
 
@@ -48,5 +48,22 @@ impl Scopes {
 
     pub(crate) fn lookup(&self, name: &Symbol) -> Option<LocalId> {
         self.stack.iter().rev().find_map(|scope| scope.get(name).copied())
+    }
+
+    /// Every name currently visible at a value-path use site. Inner
+    /// bindings win when a name is shadowed; sorting makes typo
+    /// suggestions deterministic despite `HashMap` iteration order.
+    pub(crate) fn visible_names(&self) -> Vec<Symbol> {
+        let mut seen = HashSet::new();
+        let mut names = Vec::new();
+        for scope in self.stack.iter().rev() {
+            for name in scope.keys() {
+                if seen.insert(name.clone()) {
+                    names.push(name.clone());
+                }
+            }
+        }
+        names.sort();
+        names
     }
 }

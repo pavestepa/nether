@@ -387,7 +387,7 @@ fn compile_options_control_output_optimization_and_linking() {
 fn every_checked_in_example_compiles_to_an_object() {
     let examples =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../examples");
+            .join("../../examples/some");
     let dir = std::env::temp_dir().join(format!(
         "nether_examples_test_{}",
         std::process::id()

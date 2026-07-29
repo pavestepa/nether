@@ -245,6 +245,30 @@ fn unresolved_name_reports_diagnostic() {
 }
 
 #[test]
+fn unresolved_dotted_path_reports_the_unknown_base_and_suggests_a_local() {
+    let (_, _, diags) = resolve_with_diagnostics(
+        r#"
+fn main() {
+    let cat_kikki = 1;
+    println(cat_kikky.into_i32());
+}
+"#,
+    );
+    assert_eq!(diags.len(), 1);
+    assert!(
+        diags[0].message.contains("cannot find `cat_kikky`"),
+        "{}",
+        messages(&diags)
+    );
+    let suggestion = diags[0]
+        .suggestions
+        .first()
+        .expect("the nearby local should be suggested");
+    assert_eq!(suggestion.replacement, "cat_kikki");
+    assert!(suggestion.message.contains("did you mean `cat_kikki`"));
+}
+
+#[test]
 fn duplicate_top_level_definition_reports_diagnostic() {
     let (_, _, diags) = resolve_with_diagnostics("type Dog { name: String }\ntype Dog { other: i32 }\n");
     assert_eq!(diags.len(), 1);

@@ -50,8 +50,8 @@ cargo build --release \
 Compile a program:
 
 ```sh
-cargo run -p nether-cli -- build examples/first_example.nt
-./examples/first_example
+cargo run -p nether-cli -- build examples/some/first_example.nt
+./examples/some/first_example
 ```
 
 Useful options:
@@ -66,7 +66,7 @@ Useful options:
 For example, emit an optimized object without linking:
 
 ```sh
-cargo run -p nether-cli -- build examples/enums.nt -O2 --emit-object
+cargo run -p nether-cli -- build examples/some/enums.nt -O2 --emit-object
 ```
 
 ## Modules and standard library
