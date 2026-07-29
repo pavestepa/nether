@@ -1,0 +1,20 @@
+[package]
+name = "nether-mir"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nether_mir"
+path = "src/lib.rs"
+
+[dependencies]
+nether-ast = { path = "../ast" }
+nether-resolver = { path = "../resolver" }
+nether-typecheck = { path = "../typecheck" }
+nether-hir = { path = "../hir" }
+nether-monomorphization = { path = "../monomorphization" }
+
+[dev-dependencies]
+nether-diagnostics = { path = "../diagnostics" }
+nether-parser = { path = "../parser" }

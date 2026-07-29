@@ -1,0 +1,18 @@
+[package]
+name = "nether-hir"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nether_hir"
+path = "src/lib.rs"
+
+[dependencies]
+nether-diagnostics = { path = "../diagnostics" }
+nether-ast = { path = "../ast" }
+nether-resolver = { path = "../resolver" }
+nether-typecheck = { path = "../typecheck" }
+
+[dev-dependencies]
+nether-parser = { path = "../parser" }

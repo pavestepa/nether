@@ -1,0 +1,38 @@
+type Dog {
+    name: String
+}
+
+impl Dog {
+    new(name: String): Dog {
+        Dog { name }
+    }
+
+    set_name(mut self, new_name: String) {
+        self.name = new_name;
+    }
+}
+
+impl Dog: Into<String> {
+    into_string(self): String {
+        `name: ${self.name}`
+    }
+}
+
+interface Sound {
+    sound(self): String {
+        "..."
+    }
+}
+
+impl Dog: Sound {
+    sound(self): String {
+        "Woof! Ruff!"
+    }
+}
+
+fn main() {
+    let dog = Dog.new("Bobby");
+    dog.set_name("Husky");
+    println(dog);
+    println(dog.sound());
+}

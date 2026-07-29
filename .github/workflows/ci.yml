@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Install LLVM 18
+        run: brew install llvm@18
+      - name: Check workspace
+        run: cargo check --workspace
+      - name: Test workspace
+        run: cargo test --workspace --no-fail-fast

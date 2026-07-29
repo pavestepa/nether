@@ -1,0 +1,9 @@
+[package]
+name = "nether-diagnostics"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nether_diagnostics"
+path = "src/lib.rs"

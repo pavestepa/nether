@@ -1,0 +1,19 @@
+[package]
+name = "nether-monomorphization"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nether_monomorphization"
+path = "src/lib.rs"
+
+[dependencies]
+nether-ast = { path = "../ast" }
+nether-resolver = { path = "../resolver" }
+nether-typecheck = { path = "../typecheck" }
+nether-hir = { path = "../hir" }
+
+[dev-dependencies]
+nether-diagnostics = { path = "../diagnostics" }
+nether-parser = { path = "../parser" }

@@ -1,0 +1,10 @@
+[package]
+name = "nether-rt-arc"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nether_rt_arc"
+path = "src/lib.rs"
+crate-type = ["staticlib", "rlib"]

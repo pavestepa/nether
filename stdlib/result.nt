@@ -1,0 +1,23 @@
+/// Returns true when `value` is the successful Result variant.
+fn result_is_ok<T, E>(value: Result<T, E>): bool {
+    match value {
+        Ok(_) => true,
+        Error(_) => false,
+    }
+}
+
+/// Extracts a successful Result payload or returns a fallback.
+fn result_unwrap_or<T, E>(value: Result<T, E>, fallback: T): T {
+    match value {
+        Ok(item) => item,
+        Error(_) => fallback,
+    }
+}
+
+/// Maps only the successful side of a Result.
+fn result_map<T, E, U>(value: Result<T, E>, mapper: (T) => U): Result<U, E> {
+    match value {
+        Ok(item) => Result.Ok(mapper(item)),
+        Error(error) => Result.Error(error),
+    }
+}

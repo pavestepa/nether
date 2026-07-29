@@ -1,0 +1,249 @@
+# Nether Compiler — Crate Reference
+
+This document describes the implemented workspace. For the pipeline, see
+[`overview.md`](./overview.md); for semantic types and ARC rules, see
+[`type-system.md`](./type-system.md) and [`arc-model.md`](./arc-model.md).
+
+## Workspace
+
+```text
+compiler/
+  ast/ diagnostics/ lexer/ parser/ resolver/ typecheck/
+  hir/ monomorphization/ mir/ llvm/ codegen/ driver/
+runtime/
+  arc/ string/ array/ io/
+stdlib/
+  option.nt result.nt
+cli/
+examples/
+```
+
+## `compiler/ast`
+
+Defines immutable source-shaped nodes for items, expressions, statements,
+patterns and type syntax. Nodes carry `NodeId` and `Span`; semantic results
+live in resolver/type-checker side tables. A combined module also records
+the exact target `FileId` for each `use` declaration.
+
+Dependencies: `diagnostics`. Consumers: parser and all front-end stages.
+
+## `compiler/diagnostics`
+
+Provides `FileId`, `SourceMap`, `Span`, structured diagnostics, labels,
+hints, suggestions and source rendering. Diagnostic construction is
+filesystem-independent; only the driver owns source loading.
+
+## `compiler/lexer`
+
+Turns UTF-8 source into spanned tokens. It handles comments, escapes,
+numeric/boolean/character/string literals and template-string
+interpolation. Invalid input produces diagnostics and recovery tokens
+instead of aborting the process.
+
+## `compiler/parser`
+
+Uses recursive descent for declarations/statements/patterns and Pratt
+parsing for expressions. It represents closures, generics, interfaces,
+enums, `match`, loops, weak types and `use` syntax without attempting name
+or type resolution.
+
+Public entry point:
+
+```rust
+pub fn parse_module(source: &str, file: FileId)
+    -> (ast::Module, Vec<Diagnostic>);
+```
+
+## `compiler/resolver`
+
+Builds built-in and per-file namespaces, lexical local scopes and
+`NodeId -> Resolution` side tables. The driver first loads the transitive
+local module graph and records every `use` edge, so imports resolve to an
+exact declaration in the target file. Equal private top-level names in
+different files do not collide.
+
+The resolver also disambiguates:
+
+- bindings from unqualified unit enum variants in patterns;
+- static functions/constructors from instance member paths;
+- declaration and function generic parameters.
+
+Current module limits are explicit imports only, no aliases/re-exports or
+package manager.
+
+## `compiler/typecheck`
+
+Collects declaration signatures and assigns a structured `Type` to every
+expression/local needed by HIR. It checks:
+
+- calls, returns, assignments and mutable-argument rules;
+- structs, tuples, arrays, enums, patterns and match exhaustiveness;
+- weak references and implicit weak reads as `Option<T>`;
+- generic inference, declaration bounds and generic interface arguments;
+- interface implementation completeness and method signatures;
+- `Into<String>` for interpolation and variadic print calls;
+- finite value layouts, legal entry-point signatures and loop control.
+
+Front-end-invalid programs stop here. In particular, mismatched pattern
+kind/arity/enum and recursively infinite stack layouts are diagnostics,
+not late MIR/codegen failures.
+
+Current generic limits: one inline bound per parameter and no where
+clauses, associated types, specialization or first-class unspecialized
+generic function values.
+
+## `compiler/hir`
+
+Lowers a successful typed AST to a smaller typed representation. It:
+
+- resolves calls to declaration IDs;
+- desugars method calls, interpolation, weak upgrades and `for`;
+- performs closure capture analysis and closure conversion;
+- copies interface default bodies into concrete implementations;
+- preserves generics for the monomorphization pass.
+
+Capturing closures carry a generated environment; non-capturing closures
+and named function values use the same callable ABI.
+
+## `compiler/monomorphization`
+
+Walks reachable code from the entry `main`, memoizes each concrete
+function/method instantiation and substitutes generic types throughout
+HIR. Generic methods infer substitutions from both their receiver type and
+ordinary arguments. The resulting `MonoModule` contains no unresolved
+generic calls.
+
+## `compiler/mir`
+
+Lowers monomorphic HIR to explicit basic blocks and terminators, then
+inserts ownership operations. MIR supports:
+
+- arbitrary nested field/index places;
+- direct and indirect closure calls;
+- enum construction, discriminants and payload projections;
+- weak upgrades and array primitives;
+- retain/release and weak-retain/weak-release instructions.
+
+`insert_arc` is mandatory before codegen. It handles scope exits, mutation,
+temporaries, call arguments, returned values, managed aggregate contents
+and mutable parameters.
+
+## `compiler/llvm`
+
+The only compiler crate that imports Inkwell/LLVM. `Codegen` creates a
+target machine for an LLVM triple and `O0`–`O3`; `ModuleCx` is the
+instruction-building facade used by codegen. It verifies, optimizes and
+emits object files.
+
+```rust
+pub fn Codegen::with_target(
+    triple: &str,
+    opt_level: u8,
+) -> Result<Codegen, String>;
+```
+
+## `compiler/codegen`
+
+Translates ARC-annotated MIR into LLVM IR. It owns:
+
+- primitive, struct, tuple, generic-instantiation and enum layouts;
+- calls to the runtime C ABI;
+- generated deep retain/drop and array element callback shims;
+- weak-storage operations and `Option<T>` construction on upgrade;
+- closure code-pointer/environment representation and indirect calls;
+- the platform C-ABI `main` wrapper.
+
+Enums currently use a simple flat tagged layout instead of an overlapping
+union. This is correct but can waste space.
+
+## `compiler/driver`
+
+Loads an entry file and its transitive local/stdlib imports, gives every
+file a namespace, sequences all compiler stages, emits an object and
+optionally links a host executable.
+
+```rust
+pub struct CompileOptions {
+    pub target_triple: String,
+    pub opt_level: u8,
+    pub output_path: Option<PathBuf>,
+    pub link: bool,
+}
+
+pub fn compile(
+    entry_file: &Path,
+    options: &CompileOptions,
+) -> io::Result<CheckResult>;
+```
+
+The driver never runs a semantic stage after an earlier error diagnostic.
+Cross-target object emission is supported; linking is intentionally
+limited to the host target. Runtime static libraries must already have
+been built for linking.
+
+## `runtime/arc`
+
+Implements the single-threaded strong/weak reference-counted allocation
+header and C ABI:
+
+- allocation with an optional generated payload-drop callback;
+- strong retain/release;
+- weak retain/release;
+- upgrade that retains only while the strong object is alive.
+
+The payload is destroyed when the strong count reaches zero; the header
+remains until the last weak observer is released.
+
+## `runtime/string`
+
+Stores valid UTF-8 strings in ARC allocations and implements creation,
+concatenation, primitive conversion and read-only byte/length accessors.
+The I/O runtime uses those accessors rather than depending on the internal
+layout.
+
+## `runtime/array`
+
+Implements growable contiguous storage through a type-erased C ABI.
+Codegen passes element size plus generated retain/drop callbacks, allowing
+arrays of primitives, heap values and managed stack aggregates to share
+one runtime implementation. `pop` transfers element ownership to the
+caller.
+
+## `runtime/io`
+
+Implements the `print` and `println` built-ins for Nether `String` values.
+
+## `stdlib`
+
+`Option` and `Result` are compiler-known generic enums, but their reusable
+operations are ordinary Nether code in `stdlib/option.nt` and
+`stdlib/result.nt`. The current modules provide predicates, `map` and
+`unwrap_or`-style functions. They compile through the same module graph as
+user code; there are no native `option` or `result` runtime crates.
+
+## `cli`
+
+The `nether` binary exposes `check`, `build` and `ast`, with:
+
+```text
+--target <llvm-triple>
+-O0 | -O1 | -O2 | -O3
+-o <output-path>
+--emit-object
+```
+
+It renders structured diagnostics and returns a nonzero status for
+front-end or toolchain failures.
+
+## Testing and remaining extension points
+
+Stage-specific tests live with their crates. Driver integration tests
+exercise parse-to-object, compile-link-run, module isolation, stdlib,
+closures, weak references, generic interfaces/types/methods, aggregates,
+arrays, mutable parameters, diagnostics, options and every checked-in
+example.
+
+Incremental compilation, package management, import aliases, a richer
+standard library, compact enum layouts and non-host linking remain future
+work. They are deliberate feature boundaries rather than parser-only
+syntax that fails in a later compiler stage.

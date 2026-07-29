@@ -1,0 +1,15 @@
+# Points `llvm-sys` (via `inkwell`, `compiler/llvm`'s one external
+# dependency — see `docs/architecture/crates.md` § `compiler/llvm`) at the
+# Homebrew-installed LLVM 18 this workspace builds against, and adds
+# Homebrew's `lib/` to the linker search path for `libzstd` (an LLVM
+# static-link dependency that isn't on the default linker path on macOS).
+#
+# These paths configure the compiler's own local build environment, not
+# Nether's output target. `nether build --target <llvm-triple>` selects
+# object-code targets independently. Install with `brew install llvm@18`
+# on ARM macOS; override this environment variable elsewhere.
+[env]
+LLVM_SYS_180_PREFIX = "/opt/homebrew/opt/llvm@18"
+
+[target.aarch64-apple-darwin]
+rustflags = ["-L", "/opt/homebrew/lib"]

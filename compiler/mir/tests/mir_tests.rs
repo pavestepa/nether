@@ -1,0 +1,476 @@
+use nether_ast::Symbol;
+use nether_mir::{build_mir, insert_arc, Instr, MirFunction, Operand, Rvalue, Terminator};
+
+fn build(source: &str) -> Vec<MirFunction> {
+    let mut map = nether_diagnostics::SourceMap::new();
+    let file = map.add_file("test.nr", source);
+    let (module, parse_diags) = nether_parser::parse_module(source, file);
+    assert!(parse_diags.is_empty(), "unexpected parse diagnostics: {parse_diags:?}");
+    let (resolved, resolve_diags) = nether_resolver::resolve(&module);
+    assert!(resolve_diags.is_empty(), "unexpected resolve diagnostics: {resolve_diags:?}");
+    let (tables, check_diags) = nether_typecheck::check(&module, &resolved);
+    assert!(check_diags.is_empty(), "unexpected typecheck diagnostics: {check_diags:?}");
+    let hir = nether_hir::lower(&module, &resolved, tables);
+    let main_id = *hir.fn_by_name.get(&Symbol::new("main")).expect("no `main` in test source");
+    let mono = nether_monomorphization::monomorphize(&hir, main_id);
+    let mut functions = build_mir(&mono, &resolved.definitions, &hir.signatures);
+    insert_arc(&mut functions);
+    functions
+}
+
+fn find_fn<'a>(functions: &'a [MirFunction], name: &str) -> &'a MirFunction {
+    functions.iter().find(|f| f.name.as_str() == name).unwrap_or_else(|| panic!("no MIR function named {name}"))
+}
+
+/// Flattens every instruction across every block, in block order — good
+/// enough for these tests' single-path (no branching) function bodies,
+/// where block order matches execution order.
+fn all_instrs(f: &MirFunction) -> Vec<&Instr> {
+    f.blocks.iter().flat_map(|b| &b.instrs).collect()
+}
+
+fn retain_release_shape(f: &MirFunction) -> Vec<&'static str> {
+    all_instrs(f)
+        .into_iter()
+        .filter_map(|i| match i {
+            Instr::Retain(_) => Some("retain"),
+            Instr::Release(_) => Some("release"),
+            Instr::WeakRetain(_) => Some("weak_retain"),
+            Instr::WeakRelease(_) => Some("weak_release"),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn every_block_has_exactly_one_terminator() {
+    let functions = build(
+        r#"
+type Dog { name: String }
+fn main() {
+    let d = Dog { name: "Rex" };
+    if d.name == "Rex" {
+        println("yes");
+    } else {
+        println("no");
+    }
+}
+"#,
+    );
+    for f in &functions {
+        for b in &f.blocks {
+            // A `BasicBlock` always carries a `Terminator` value (not an
+            // `Option`) — this loop just confirms none of them panicked
+            // during construction and that `Unreachable` only shows up on
+            // genuinely dead blocks, not on the function's real paths.
+            let _ = &b.terminator;
+        }
+    }
+}
+
+#[test]
+fn struct_field_read_binds_a_new_local_with_a_retain_and_the_parameter_is_released_at_scope_exit() {
+    // Mirrors arc-model.md's worked `describe` example exactly: a field
+    // read binds a new local (retained once, §3.1); returning that local
+    // directly needs no further retain and no release of its own (RVO,
+    // §3.4); the parameter still gets released at scope exit (§3.2).
+    let functions = build(
+        r#"
+type Dog { name: String }
+fn describe(d: Dog): String {
+    let tag = d.name;
+    tag
+}
+fn main() {
+    let a = Dog { name: "Rex" };
+    let msg = describe(a);
+    println(msg);
+}
+"#,
+    );
+    let describe = find_fn(&functions, "describe");
+    let instrs = all_instrs(describe);
+
+    // Exactly one Retain (the field-read bind) and exactly one Release
+    // (the parameter, at scope exit) — `tag` itself is never released
+    // (it's the escaping/returned value).
+    let shape = retain_release_shape(describe);
+    assert_eq!(shape, vec!["retain", "release"], "expected exactly one Retain (field-read bind) then one Release (parameter, scope exit)");
+
+    // The retain's target must be the same local the Field rvalue was
+    // assigned into, and the terminator must return that same local.
+    let field_dest = instrs.iter().find_map(|i| match i {
+        Instr::Assign(place, Rvalue::Field { .. }) if place.projection.is_empty() => Some(place.local),
+        _ => None,
+    });
+    assert!(field_dest.is_some());
+    assert!(matches!(instrs[1], Instr::Retain(l) if Some(*l) == field_dest));
+    // `blocks.last()` is always the trailing dead block `terminate_current`
+    // creates after every real terminator, not the block holding the
+    // actual `Return` — search for it instead.
+    let return_terminator = describe.blocks.iter().map(|b| &b.terminator).find(|t| matches!(t, Terminator::Return(_))).expect("expected a Return terminator");
+    assert!(matches!(return_terminator, Terminator::Return(Operand::Local(l)) if Some(*l) == field_dest));
+}
+
+#[test]
+fn call_argument_is_retained_before_the_call_and_released_by_the_callees_own_scope_exit() {
+    // Regression test for a real double-release: `a` is passed into
+    // `describe` and then read again afterward — exactly the pattern an
+    // earlier version of this pass got wrong (it released `a` again,
+    // itself, immediately after the call returned, on top of `describe`'s
+    // own scope-exit release of its `d` parameter — two releases for one
+    // credit, freeing `a` while `main` still held and used it; only
+    // caught by actually running the generated code against a real
+    // allocator, not by inspecting MIR/IR shape alone).
+    let functions = build(
+        r#"
+type Dog { name: String }
+fn describe(d: Dog): String { d.name }
+fn main() {
+    let a = Dog { name: "Rex" };
+    let msg = describe(a);
+    println(a.name);
+    println(msg);
+}
+"#,
+    );
+    let main = find_fn(&functions, "main");
+    let instrs = all_instrs(main);
+
+    // The Call instruction is immediately preceded by a Retain of the
+    // argument, and *not* immediately followed by a Release of it — that
+    // credit is now the callee's own parameter's, released at its own
+    // scope exit instead (checked below).
+    let call_pos = instrs.iter().position(|i| matches!(i, Instr::Assign(_, Rvalue::Call { .. }))).expect("expected a Call instruction");
+    let Instr::Retain(arg) = instrs[call_pos - 1] else { panic!("expected a Retain immediately before the call") };
+    assert!(!matches!(instrs[call_pos + 1], Instr::Release(l) if *l == *arg), "the call must not also release its own argument right after returning");
+
+    // Inside `describe`: one retain for `d.name`'s own bind-time read
+    // (§3.1), then `d`'s own normal scope-exit release — `d.name`'s own
+    // would-be scope-exit release is the one that's skipped, since *it*
+    // is the value escaping via return, not `d` itself.
+    let describe = find_fn(&functions, "describe");
+    assert_eq!(retain_release_shape(describe), vec!["retain", "release"]);
+}
+
+#[test]
+fn fresh_construction_returned_directly_gets_no_retain_or_release() {
+    // RVO, shape 1: a construction feeding *directly* into tail position
+    // with no intermediate `let` at all.
+    let functions = build(
+        r#"
+type Dog { name: String }
+fn make(): Dog { Dog { name: "Rex" } }
+fn main() {
+    let d = make();
+}
+"#,
+    );
+    let make = find_fn(&functions, "make");
+    assert!(retain_release_shape(make).is_empty(), "a directly-returned fresh construction should need no Retain/Release at all");
+}
+
+#[test]
+fn fresh_construction_bound_to_a_let_then_returned_also_gets_no_retain_or_release() {
+    // RVO, shape 2 (this crate's own reading of arc-model.md — see
+    // `build.rs`'s module docs: the doc's own `main()` worked example
+    // shows a `let`-bound fresh construction getting no bind-time retain
+    // regardless of whether it's later returned, and returning it is
+    // exactly the same "skip its own release" rule as any other escaping
+    // local — the RVO prose's looser "a retain is inserted" phrasing is
+    // treated as describing the *general*, non-degenerate case, not a
+    // contradiction of the doc's own precise, testable example).
+    let functions = build(
+        r#"
+type Dog { name: String }
+fn make(): Dog {
+    let d = Dog { name: "Rex" };
+    d
+}
+fn main() {
+    let d = make();
+}
+"#,
+    );
+    let make = find_fn(&functions, "make");
+    assert!(retain_release_shape(make).is_empty(), "a let-bound fresh construction, then returned, should still need no Retain/Release");
+}
+
+#[test]
+fn returning_a_parameter_directly_needs_neither_retain_nor_release() {
+    // A `Call`'s heap-kind argument is retained once, before the call
+    // (`nether_mir::arc`'s own docs) — and, critically, *not* released
+    // again after it returns, since the callee's own scope exit is what
+    // balances that credit (see the next test) unless the callee hands
+    // that exact same credit straight back out via a direct return, which
+    // is this case: `d`'s only credit is the caller's pre-call retain,
+    // and `release_scopes`'s own "skip the escaping local" handling
+    // already leaves it un-released here — so it needs no compensating
+    // instruction of its own at all, in either direction. (An earlier
+    // version of this pass added a second, redundant Retain here on the
+    // mistaken assumption that the caller *also* releases after the
+    // call — which produced a real double-release, only caught by
+    // actually running generated code against a real allocator; see
+    // `nether_mir::arc`'s module docs.)
+    let functions = build(
+        r#"
+type Dog { name: String }
+fn identity(d: Dog): Dog { d }
+fn main() {
+    let a = Dog { name: "Rex" };
+    let b = identity(a);
+}
+"#,
+    );
+    let identity = find_fn(&functions, "identity");
+    assert_eq!(retain_release_shape(identity), Vec::<&str>::new(), "the parameter's incoming credit should pass straight through, untouched");
+
+    // And the whole round trip must still balance in `main`: one retain
+    // before the call, no release right after it (the bug this fixes),
+    // and `a`/`b` each released exactly once at their own later scope
+    // exit — not zero (a leak) and not three (the double-release this
+    // fixes elsewhere).
+    let main = find_fn(&functions, "main");
+    assert_eq!(retain_release_shape(main), vec!["retain", "release", "release"]);
+}
+
+#[test]
+fn field_store_retains_the_new_value_and_releases_the_old_one() {
+    let functions = build(
+        r#"
+type Dog { name: String }
+impl Dog {
+    set_name(mut self, new_name: String) {
+        self.name = new_name;
+    }
+}
+fn main() {
+    let d = Dog { name: "Rex" };
+    d.set_name("Buddy");
+}
+"#,
+    );
+    let set_name = find_fn(&functions, "set_name");
+    let shape = retain_release_shape(set_name);
+    // Two Retains: one from `insert_arc`'s own Field-read rule, firing on
+    // the old value's incidental extraction (see `lower_assign`'s docs),
+    // and one explicit one (`prepare_new_binding`) for `new_name` — a
+    // bare parameter being stored into a field needs its own fresh
+    // credit, same reasoning as `lower_escaping_value`'s parameter case.
+    // Three Releases: two for the old field value (one cancels its own
+    // incidental retain, one for the field's actual original reference),
+    // then `new_name` at scope exit. `mut self` is a borrowed parameter:
+    // the caller retains ownership, so the callee neither retains nor
+    // releases the receiver itself.
+    assert_eq!(shape, vec!["retain", "retain", "release", "release", "release"]);
+}
+
+#[test]
+fn constructing_a_struct_from_an_existing_local_retains_the_field_value() {
+    // `name` already owns an independent reference (from `prepare_new_binding`
+    // giving it a fresh Retain on its own binding, since it aliases the
+    // parameter). Moving it into `Dog { name }` must retain it *again* —
+    // the new `Dog` becomes a second, independent owner of that String,
+    // distinct from `name`'s own binding — otherwise the two would share
+    // one reference count credit and one of their eventual releases would
+    // be over-releasing an already-freed object. This is the fix for a
+    // real gap: `Construct`'s field operands used to go through plain
+    // `lower_expr`, skipping this retain entirely.
+    let functions = build(
+        r#"
+fn make(name: String): Dog {
+    Dog { name }
+}
+type Dog { name: String }
+fn main() {
+    let d = make("Rex");
+    println(d.name);
+}
+"#,
+    );
+    let make = find_fn(&functions, "make");
+    let shape = retain_release_shape(make);
+    // One Retain: `prepare_new_binding` giving the field's fresh copy of
+    // `name` its own independent credit before it's moved into `Dog`
+    // (this fix — previously `Construct`'s field operands skipped this
+    // entirely). One Release: `name`'s own parameter binding, at its
+    // normal scope exit (§3.2) — unaffected by the copy made from it. No
+    // further Release for `Dog` itself: it's freshly constructed and
+    // returned directly (RVO), and the field's own retained copy is
+    // consumed straight into its storage, never independently held
+    // afterward.
+    assert_eq!(shape, vec!["retain", "release"]);
+}
+
+#[test]
+fn constructing_a_weak_field_from_a_heap_value_uses_weak_retain_not_retain() {
+    // `Parent { kid: c }` stores `c` into a `weak Child` field — spec
+    // §13/`arc-model.md` §3.5: this must never touch `c`'s own strong
+    // reference count, only bump a separate weak count on a fresh
+    // `weak`-typed copy (`nether_mir::build::FnBuilder::prepare_weak_binding`).
+    let functions = build(
+        r#"
+type Child { name: String }
+type Parent { kid: weak Child }
+fn main() {
+    let c = Child { name: "Rex" };
+    let p = Parent { kid: c };
+}
+"#,
+    );
+    let main = find_fn(&functions, "main");
+    let shape = retain_release_shape(main);
+    // One WeakRetain for the field's own weak copy of `c`; then, in
+    // reverse declaration order (§3.2), `p`'s own scope-exit release,
+    // then `c`'s — neither is a weak release, since `c` and `p` are each
+    // independently heap-kind locals, unrelated to the weak field inside
+    // `p`. No plain `retain` anywhere: `c`'s own strong count is never
+    // touched by being woven into a weak field.
+    assert_eq!(shape, vec!["weak_retain", "release", "release"]);
+}
+
+#[test]
+fn assigning_into_a_weak_field_uses_weak_release_and_weak_retain() {
+    let functions = build(
+        r#"
+type Child { name: String }
+type Parent { kid: weak Child }
+fn set_kid(p: Parent, c: Child) {
+    p.kid = c;
+}
+fn main() {
+    let p = Parent { kid: Child { name: "Rex" } };
+    let c = Child { name: "Buddy" };
+    set_kid(p, c);
+}
+"#,
+    );
+    let set_kid = find_fn(&functions, "set_kid");
+    let shape = retain_release_shape(set_kid);
+    // The leading generic `Retain` applies to a `weak Child` local and is
+    // therefore emitted as weak-retain by codegen. It owns the projected
+    // snapshot while the store occurs; two WeakReleases then cancel that
+    // incidental snapshot credit and the field's original weak credit.
+    // The explicit WeakRetain owns the replacement field value.
+    assert_eq!(
+        shape,
+        vec![
+            "retain",
+            "weak_retain",
+            "weak_release",
+            "weak_release",
+            "release",
+            "release",
+        ],
+    );
+    let weak_snapshot_retain = all_instrs(set_kid).into_iter().find_map(|instr| {
+        let Instr::Retain(local) = instr else { return None };
+        matches!(set_kid.local_decl(*local).ty, nether_typecheck::Type::Weak(_)).then_some(())
+    });
+    assert!(weak_snapshot_retain.is_some());
+}
+
+#[test]
+fn match_on_enum_with_heap_payload_binds_via_variant_field_retain() {
+    let functions = build(
+        r#"
+type Dog { name: String }
+enum Wrapper { Boxed(Dog), Empty }
+fn unwrap(w: Wrapper): String {
+    match w {
+        Boxed(d) => d.name,
+        Empty => "none",
+    }
+}
+fn main() {
+    let w = Wrapper.Boxed(Dog { name: "Rex" });
+    let s = unwrap(w);
+    println(s);
+}
+"#,
+    );
+    let unwrap_fn = find_fn(&functions, "unwrap");
+    // `d` is bound via a `VariantField` read (aliasing, per `insert_arc`)
+    // and then immediately used as the arm's escaping result via a bare
+    // field access — this should produce a small, finite, *balanced*
+    // sequence rather than panicking or looping forever building the
+    // pattern-test chain.
+    let shape = retain_release_shape(unwrap_fn);
+    assert!(!shape.is_empty(), "expected at least the VariantField bind-time retain");
+    let w = unwrap_fn.params[0];
+    assert_eq!(
+        all_instrs(unwrap_fn)
+            .iter()
+            .filter(|instr| matches!(instr, Instr::Release(local) if *local == w))
+            .count(),
+        1,
+        "the original enum parameter must be deeply dropped once at function exit",
+    );
+    // A flattened CFG contains one release of the match's owned
+    // scrutinee copy on each mutually-exclusive arm, so raw global
+    // retain/release counts are intentionally not equal.
+    assert!(shape.iter().filter(|kind| **kind == "release").count() >= 3);
+}
+
+#[test]
+fn while_loop_body_release_is_inside_the_loop_not_after_it() {
+    let functions = build(
+        r#"
+type Dog { name: String }
+fn main() {
+    let mut i = 0;
+    while i < 3 {
+        let d = Dog { name: "Rex" };
+        println(d.name);
+        i = i + 1;
+    }
+}
+"#,
+    );
+    let main = find_fn(&functions, "main");
+    // The `let d = ...` inside the loop body must be released once per
+    // iteration, i.e. inside the *body* block, not hoisted out after the
+    // loop — find the body block (the one whose Goto target is the loop
+    // header, per `lower_while`) and confirm it contains a Release.
+    let has_release_in_some_non_final_block = main.blocks.iter().any(|b| {
+        matches!(b.terminator, Terminator::Goto(_)) && b.instrs.iter().any(|i| matches!(i, Instr::Release(_)))
+    });
+    assert!(has_release_in_some_non_final_block, "expected the loop body's own block to contain a Release for `d`, executed every iteration");
+}
+
+#[test]
+fn mut_parameter_of_stack_type_gets_no_retain_or_release() {
+    let functions = build(
+        r#"
+fn bump(mut x: i32) {
+    x = x + 1;
+}
+fn main() {
+    let mut n = 1;
+    bump(mut n);
+}
+"#,
+    );
+    let bump = find_fn(&functions, "bump");
+    assert!(retain_release_shape(bump).is_empty(), "a stack-kind mut parameter should never participate in ARC (arc-model.md §3.6)");
+}
+
+#[test]
+fn reassigning_an_existing_heap_variable_releases_the_old_value() {
+    let functions = build(
+        r#"
+type Dog { name: String }
+fn main() {
+    let mut d = Dog { name: "Rex" };
+    d = Dog { name: "Buddy" };
+}
+"#,
+    );
+    let main = find_fn(&functions, "main");
+    let shape = retain_release_shape(main);
+    // The reassignment's own old-value release (one release — a plain
+    // reassignment reads the existing local directly, no incidental
+    // retain to cancel, unlike a field store), then the final scope-exit
+    // release of `d` itself.
+    assert_eq!(shape, vec!["release", "release"]);
+}

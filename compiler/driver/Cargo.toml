@@ -1,0 +1,22 @@
+[package]
+name = "nether-driver"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nether_driver"
+path = "src/lib.rs"
+
+[dependencies]
+nether-diagnostics = { path = "../diagnostics" }
+nether-ast = { path = "../ast" }
+nether-lexer = { path = "../lexer" }
+nether-parser = { path = "../parser" }
+nether-resolver = { path = "../resolver" }
+nether-typecheck = { path = "../typecheck" }
+nether-hir = { path = "../hir" }
+nether-monomorphization = { path = "../monomorphization" }
+nether-mir = { path = "../mir" }
+nether-llvm = { path = "../llvm" }
+nether-codegen = { path = "../codegen" }

@@ -1,0 +1,22 @@
+[package]
+name = "nether-codegen"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nether_codegen"
+path = "src/lib.rs"
+
+[dependencies]
+nether-ast = { path = "../ast" }
+nether-resolver = { path = "../resolver" }
+nether-typecheck = { path = "../typecheck" }
+nether-monomorphization = { path = "../monomorphization" }
+nether-mir = { path = "../mir" }
+nether-llvm = { path = "../llvm" }
+
+[dev-dependencies]
+nether-diagnostics = { path = "../diagnostics" }
+nether-parser = { path = "../parser" }
+nether-hir = { path = "../hir" }

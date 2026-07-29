@@ -1,0 +1,14 @@
+[package]
+name = "nether-parser"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nether_parser"
+path = "src/lib.rs"
+
+[dependencies]
+nether-diagnostics = { path = "../diagnostics" }
+nether-ast = { path = "../ast" }
+nether-lexer = { path = "../lexer" }

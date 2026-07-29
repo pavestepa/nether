@@ -1,0 +1,12 @@
+[package]
+name = "nether-llvm"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nether_llvm"
+path = "src/lib.rs"
+
+[dependencies]
+inkwell = { version = "0.5", features = ["llvm18-0"] }

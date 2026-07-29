@@ -1,0 +1,12 @@
+[package]
+name = "nether-lexer"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nether_lexer"
+path = "src/lib.rs"
+
+[dependencies]
+nether-diagnostics = { path = "../diagnostics" }

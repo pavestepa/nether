@@ -1,0 +1,13 @@
+[package]
+name = "nether-cli"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "nether"
+path = "src/main.rs"
+
+[dependencies]
+nether-diagnostics = { path = "../compiler/diagnostics" }
+nether-driver = { path = "../compiler/driver" }

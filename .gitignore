@@ -1,0 +1,10 @@
+/target/
+/.claude/
+.DS_Store
+*.o
+
+# Native binaries emitted next to the bundled examples.
+/examples/enums
+/examples/example_2
+/examples/first_example
+/examples/second_example

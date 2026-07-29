@@ -1,0 +1,13 @@
+[package]
+name = "nether-rt-string"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nether_rt_string"
+path = "src/lib.rs"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+nether-rt-arc = { path = "../arc" }

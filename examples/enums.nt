@@ -1,0 +1,20 @@
+enum Color {
+    Red,
+    Green,
+    Blue,
+    Custom(String),
+}
+
+fn describe(color: Color): String {
+    match color {
+        Color.Red => "is red",
+        Color.Green => "is green",
+        Color.Blue => "is blue",
+        Color.Custom(name) => `custom: ${name}`,
+    }
+}
+
+fn main() {
+    println(describe(Color.Red));
+    println(describe(Color.Custom("violet")));
+}

@@ -1,0 +1,17 @@
+[package]
+name = "nether-typecheck"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nether_typecheck"
+path = "src/lib.rs"
+
+[dependencies]
+nether-diagnostics = { path = "../diagnostics" }
+nether-ast = { path = "../ast" }
+nether-resolver = { path = "../resolver" }
+
+[dev-dependencies]
+nether-parser = { path = "../parser" }

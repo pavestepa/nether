@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = [
+    "compiler/diagnostics",
+    "compiler/ast",
+    "compiler/lexer",
+    "compiler/parser",
+    "compiler/resolver",
+    "compiler/typecheck",
+    "compiler/hir",
+    "compiler/monomorphization",
+    "compiler/mir",
+    "compiler/llvm",
+    "compiler/codegen",
+    "compiler/driver",
+    "runtime/arc",
+    "runtime/string",
+    "runtime/array",
+    "runtime/io",
+    "cli",
+]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+publish = false
+
+[profile.dev]
+debug = true
+
+[profile.release]
+opt-level = 3

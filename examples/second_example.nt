@@ -1,0 +1,43 @@
+type Lang {
+    name: String
+}
+
+impl Lang {
+    new(name: String): Lang {
+        Lang { name }
+    }
+
+    set_name(mut self, new_name: String) {
+        self._check(new_name);
+        self.name = new_name;
+    }
+
+    _check(self, new_name: String) {
+        println("changed from: ", self.name, " to: ", new_name);
+    }
+}
+
+type SomeType(String);
+
+impl SomeType {
+    new(data: String): SomeType {
+        SomeType(data)
+    }
+}
+
+type EmptyType;
+
+impl EmptyType {
+    message(): String {
+        "empty"
+    }
+}
+
+fn main() {
+    let lang = Lang.new("Nether");
+    lang.set_name("Nether 0.1");
+    println(lang.name);
+    let wrapped = SomeType.new("tuple struct");
+    println(wrapped.0);
+    println(EmptyType.message());
+}

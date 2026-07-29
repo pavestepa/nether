@@ -1,0 +1,16 @@
+[package]
+name = "nether-resolver"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "nether_resolver"
+path = "src/lib.rs"
+
+[dependencies]
+nether-diagnostics = { path = "../diagnostics" }
+nether-ast = { path = "../ast" }
+
+[dev-dependencies]
+nether-parser = { path = "../parser" }
