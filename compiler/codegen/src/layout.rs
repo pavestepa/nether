@@ -51,7 +51,13 @@ pub struct Layout<'m, 'ctx> {
 
 impl<'m, 'ctx> Layout<'m, 'ctx> {
     pub fn new(m: &'m ModuleCx<'ctx>, defs: &'m Definitions, sigs: &'m Signatures) -> Self {
-        Layout { m, defs, sigs, structs: RefCell::new(HashMap::new()), enums: RefCell::new(HashMap::new()) }
+        Layout {
+            m,
+            defs,
+            sigs,
+            structs: RefCell::new(HashMap::new()),
+            enums: RefCell::new(HashMap::new()),
+        }
     }
 
     /// The LLVM type a MIR local/value of `ty` is held as — always a
@@ -64,7 +70,9 @@ impl<'m, 'ctx> Layout<'m, 'ctx> {
     pub fn llvm_type(&self, ty: &Type) -> Ty<'ctx> {
         match ty {
             Type::Primitive(p) => self.primitive_type(*p),
-            Type::String | Type::Array(_) | Type::Function(_, _) | Type::Weak(_) => self.m.ptr_type(),
+            Type::String | Type::Array(_) | Type::Function(_, _) | Type::Weak(_) => {
+                self.m.ptr_type()
+            }
             Type::Struct(_, _) | Type::TupleStruct(_, _) => match alloc_kind(ty, self.defs) {
                 AllocKind::Heap => self.m.ptr_type(),
                 AllocKind::Stack => self.struct_layout(ty).ty.into(),
@@ -96,7 +104,14 @@ impl<'m, 'ctx> Layout<'m, 'ctx> {
     }
 
     pub fn is_signed(p: PrimitiveKind) -> bool {
-        matches!(p, PrimitiveKind::I8 | PrimitiveKind::I16 | PrimitiveKind::I32 | PrimitiveKind::I64 | PrimitiveKind::Isize)
+        matches!(
+            p,
+            PrimitiveKind::I8
+                | PrimitiveKind::I16
+                | PrimitiveKind::I32
+                | PrimitiveKind::I64
+                | PrimitiveKind::Isize
+        )
     }
 
     pub fn is_float(p: PrimitiveKind) -> bool {
@@ -111,7 +126,10 @@ impl<'m, 'ctx> Layout<'m, 'ctx> {
     /// matters for `struct_gep`).
     pub fn struct_layout(&self, struct_ty: &Type) -> StructLayout<'ctx> {
         if let Some((ty, field_tys)) = self.structs.borrow().get(struct_ty) {
-            return StructLayout { ty: *ty, field_tys: field_tys.clone() };
+            return StructLayout {
+                ty: *ty,
+                field_tys: field_tys.clone(),
+            };
         }
         let field_tys: Vec<Ty<'ctx>> = self
             .sigs
@@ -134,22 +152,33 @@ impl<'m, 'ctx> Layout<'m, 'ctx> {
             panic!("enum_layout called with non-enum type {enum_ty:?}");
         };
         if let Some((ty, field_offsets)) = self.enums.borrow().get(enum_ty) {
-            return EnumLayout { ty: *ty, field_offsets: field_offsets.clone() };
+            return EnumLayout {
+                ty: *ty,
+                field_offsets: field_offsets.clone(),
+            };
         }
         let tag_ty = self.m.int_type(64);
         let mut field_tys = vec![tag_ty];
         let mut field_offsets = HashMap::new();
         if let Some(sig) = self.sigs.enum_sigs.get(id) {
             for (variant_idx, _) in sig.variants.iter().enumerate() {
-                let payload = self.sigs.enum_payload(enum_ty, variant_idx as u32).unwrap_or_default();
+                let payload = self
+                    .sigs
+                    .enum_payload(enum_ty, variant_idx as u32)
+                    .unwrap_or_default();
                 for (field_idx, field_ty) in payload.iter().enumerate() {
-                    field_offsets.insert((variant_idx as u32, field_idx as u32), field_tys.len() as u32);
+                    field_offsets.insert(
+                        (variant_idx as u32, field_idx as u32),
+                        field_tys.len() as u32,
+                    );
                     field_tys.push(self.llvm_type(field_ty));
                 }
             }
         }
         let ty = self.m.struct_type(&field_tys);
-        self.enums.borrow_mut().insert(enum_ty.clone(), (ty, field_offsets.clone()));
+        self.enums
+            .borrow_mut()
+            .insert(enum_ty.clone(), (ty, field_offsets.clone()));
         EnumLayout { ty, field_offsets }
     }
 

@@ -93,20 +93,38 @@ impl<'ctx> Runtime<'ctx> {
             release: m.declare_function("nether_rt_arc_release", void_fn(&[ptr])),
             weak_retain: m.declare_function("nether_rt_arc_weak_retain", void_fn(&[ptr])),
             weak_release: m.declare_function("nether_rt_arc_weak_release", void_fn(&[ptr])),
-            weak_upgrade: m.declare_function("nether_rt_arc_weak_upgrade", m.fn_type(&[ptr, ptr], Some(i8_ty))),
+            weak_upgrade: m.declare_function(
+                "nether_rt_arc_weak_upgrade",
+                m.fn_type(&[ptr, ptr], Some(i8_ty)),
+            ),
             println: m.declare_function("nether_rt_io_println", void_fn(&[ptr])),
             print: m.declare_function("nether_rt_io_print", void_fn(&[ptr])),
-            string_from_bytes: m.declare_function("nether_rt_string_from_utf8", m.fn_type(&[ptr, i64_ty], Some(ptr))),
-            string_concat: m.declare_function("nether_rt_string_concat", m.fn_type(&[ptr, ptr], Some(ptr))),
-            i64_to_string: m.declare_function("nether_rt_i64_to_string", m.fn_type(&[i64_ty], Some(ptr))),
-            f64_to_string: m.declare_function("nether_rt_f64_to_string", m.fn_type(&[f64_ty], Some(ptr))),
-            bool_to_string: m.declare_function("nether_rt_bool_to_string", m.fn_type(&[i8_ty], Some(ptr))),
-            char_to_string: m.declare_function("nether_rt_char_to_string", m.fn_type(&[m.int_type(32)], Some(ptr))),
-            array_new: m.declare_function("nether_rt_array_new", m.fn_type(&[i64_ty, i64_ty, ptr, ptr], Some(ptr))),
+            string_from_bytes: m.declare_function(
+                "nether_rt_string_from_utf8",
+                m.fn_type(&[ptr, i64_ty], Some(ptr)),
+            ),
+            string_concat: m
+                .declare_function("nether_rt_string_concat", m.fn_type(&[ptr, ptr], Some(ptr))),
+            i64_to_string: m
+                .declare_function("nether_rt_i64_to_string", m.fn_type(&[i64_ty], Some(ptr))),
+            f64_to_string: m
+                .declare_function("nether_rt_f64_to_string", m.fn_type(&[f64_ty], Some(ptr))),
+            bool_to_string: m
+                .declare_function("nether_rt_bool_to_string", m.fn_type(&[i8_ty], Some(ptr))),
+            char_to_string: m.declare_function(
+                "nether_rt_char_to_string",
+                m.fn_type(&[m.int_type(32)], Some(ptr)),
+            ),
+            array_new: m.declare_function(
+                "nether_rt_array_new",
+                m.fn_type(&[i64_ty, i64_ty, ptr, ptr], Some(ptr)),
+            ),
             array_push: m.declare_function("nether_rt_array_push", void_fn(&[ptr, ptr])),
             array_len: m.declare_function("nether_rt_array_len", m.fn_type(&[ptr], Some(i64_ty))),
-            array_get: m.declare_function("nether_rt_array_get", m.fn_type(&[ptr, i64_ty], Some(ptr))),
-            array_pop: m.declare_function("nether_rt_array_pop", m.fn_type(&[ptr, ptr], Some(i8_ty))),
+            array_get: m
+                .declare_function("nether_rt_array_get", m.fn_type(&[ptr, i64_ty], Some(ptr))),
+            array_pop: m
+                .declare_function("nether_rt_array_pop", m.fn_type(&[ptr, ptr], Some(i8_ty))),
         }
     }
 }

@@ -39,7 +39,11 @@ struct StringRepr {
 extern "C" fn drop_buffer(payload: *mut u8) {
     unsafe {
         let repr = payload.cast::<StringRepr>();
-        drop(Vec::from_raw_parts((*repr).ptr, (*repr).len as usize, (*repr).len as usize));
+        drop(Vec::from_raw_parts(
+            (*repr).ptr,
+            (*repr).len as usize,
+            (*repr).len as usize,
+        ));
     }
 }
 
@@ -50,7 +54,10 @@ fn alloc_string(bytes: &[u8]) -> *mut u8 {
     std::mem::forget(buf);
     let payload = nether_rt_arc_alloc(std::mem::size_of::<StringRepr>() as i64, Some(drop_buffer));
     unsafe {
-        payload.cast::<StringRepr>().write(StringRepr { ptr, len: len as i64 });
+        payload.cast::<StringRepr>().write(StringRepr {
+            ptr,
+            len: len as i64,
+        });
     }
     payload
 }
@@ -168,7 +175,11 @@ mod tests {
             let b = nether_rt_string_from_utf8(b"bar".as_ptr(), 3);
             let joined = nether_rt_string_concat(a, b);
             assert_eq!(as_str(joined), "foobar");
-            assert_eq!(as_str(a), "foo", "concat must not consume/release its inputs");
+            assert_eq!(
+                as_str(a),
+                "foo",
+                "concat must not consume/release its inputs"
+            );
             nether_rt_arc_release(joined);
             nether_rt_arc_release(a);
             nether_rt_arc_release(b);

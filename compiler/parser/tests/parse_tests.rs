@@ -1,4 +1,6 @@
-use nether_ast::{BinaryOp, EnumVariant, Expr, ExprKind, Item, Pattern, SelfParam, Stmt, TypeDeclKind};
+use nether_ast::{
+    BinaryOp, EnumVariant, Expr, ExprKind, Item, Pattern, SelfParam, Stmt, TypeDeclKind,
+};
 use nether_diagnostics::{Diagnostic, SourceMap};
 use nether_parser::parse_module;
 
@@ -8,7 +10,11 @@ fn parse_ok(source: &str) -> nether_ast::Module {
     let mut map = SourceMap::new();
     let file = map.add_file("test.nr", source);
     let (module, diags) = parse_module(source, file);
-    assert!(diags.is_empty(), "unexpected diagnostics: {}", render_all(&diags, &map));
+    assert!(
+        diags.is_empty(),
+        "unexpected diagnostics: {}",
+        render_all(&diags, &map)
+    );
     module
 }
 
@@ -19,7 +25,11 @@ fn parse_with_diagnostics(source: &str) -> (nether_ast::Module, Vec<Diagnostic>)
 }
 
 fn render_all(diags: &[Diagnostic], map: &SourceMap) -> String {
-    diags.iter().map(|d| nether_diagnostics::render(d, map)).collect::<Vec<_>>().join("\n")
+    diags
+        .iter()
+        .map(|d| nether_diagnostics::render(d, map))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[test]
@@ -78,17 +88,46 @@ impl Lang: Sound {
     assert!(matches!(module.items[5], Item::Interface(_)));
     assert!(matches!(module.items[6], Item::Impl(_)));
 
-    let Item::Impl(into_string_impl) = &module.items[4] else { unreachable!() };
-    assert!(into_string_impl.interface.is_some());
+    let Item::Impl(into_string_impl) = &module.items[4] else {
+        unreachable!()
+    };
+    assert_eq!(into_string_impl.interfaces.len(), 1);
+}
+
+#[test]
+fn module_declarations_and_relative_use_roots_parse() {
+    let module = parse_ok(
+        r#"
+mod child;
+use self.child.make;
+use super.Parent;
+use crate.Root;
+"#,
+    );
+    assert_eq!(module.items.len(), 4);
+    let Item::Mod(child) = &module.items[0] else {
+        panic!("expected ModDecl")
+    };
+    assert_eq!(child.name.name.as_str(), "child");
+    for (item, root) in module.items[1..].iter().zip(["self", "super", "crate"]) {
+        let Item::Use(use_decl) = item else {
+            panic!("expected UseDecl")
+        };
+        assert_eq!(use_decl.path.segments[0].name.as_str(), root);
+    }
 }
 
 #[test]
 fn tuple_struct_and_unit_type() {
     let module = parse_ok("type Point(i32, i32);\ntype EmptyType;\n");
     assert_eq!(module.items.len(), 2);
-    let Item::Type(point) = &module.items[0] else { panic!("expected TypeDecl") };
+    let Item::Type(point) = &module.items[0] else {
+        panic!("expected TypeDecl")
+    };
     assert!(matches!(point.kind, TypeDeclKind::TupleStruct(ref tys) if tys.len() == 2));
-    let Item::Type(empty) = &module.items[1] else { panic!("expected TypeDecl") };
+    let Item::Type(empty) = &module.items[1] else {
+        panic!("expected TypeDecl")
+    };
     assert!(matches!(empty.kind, TypeDeclKind::Unit));
 }
 
@@ -103,8 +142,12 @@ type Config {
 }
 "#,
     );
-    let Item::Type(decl) = &module.items[0] else { panic!("expected TypeDecl") };
-    let TypeDeclKind::Struct(fields) = &decl.kind else { panic!("expected Struct") };
+    let Item::Type(decl) = &module.items[0] else {
+        panic!("expected TypeDecl")
+    };
+    let TypeDeclKind::Struct(fields) = &decl.kind else {
+        panic!("expected Struct")
+    };
     assert!(!fields[0].private);
     assert!(fields[1].private);
     assert!(fields[2].private);
@@ -124,12 +167,16 @@ enum Result<T, E> {
 }
 "#,
     );
-    let Item::Enum(color) = &module.items[0] else { panic!("expected EnumDecl") };
+    let Item::Enum(color) = &module.items[0] else {
+        panic!("expected EnumDecl")
+    };
     assert_eq!(color.variants.len(), 2);
     let EnumVariant { payload, .. } = &color.variants[1];
     assert_eq!(payload.len(), 1);
 
-    let Item::Enum(result) = &module.items[1] else { panic!("expected EnumDecl") };
+    let Item::Enum(result) = &module.items[1] else {
+        panic!("expected EnumDecl")
+    };
     assert_eq!(result.generics.len(), 2);
     assert_eq!(result.generics[0].name.name.as_str(), "T");
     assert!(result.generics[0].bound.is_none());
@@ -138,10 +185,14 @@ enum Result<T, E> {
 #[test]
 fn generic_bound_on_fn() {
     let module = parse_ok("fn f<T: Sound>(x: T) {\n    println(x);\n}\n");
-    let Item::Fn(f) = &module.items[0] else { panic!("expected FnDecl") };
+    let Item::Fn(f) = &module.items[0] else {
+        panic!("expected FnDecl")
+    };
     assert_eq!(f.generics.len(), 1);
     let bound = f.generics[0].bound.as_ref().expect("expected a bound");
-    let nether_ast::TypeExpr::Named { path, .. } = bound else { panic!("expected a Named bound") };
+    let nether_ast::TypeExpr::Named { path, .. } = bound else {
+        panic!("expected a Named bound")
+    };
     assert_eq!(path.segments[0].name.as_str(), "Sound");
 }
 
@@ -149,9 +200,13 @@ fn generic_bound_on_fn() {
 fn generic_bound_can_itself_be_generic() {
     // `T: Into<String>` — the bound interface is itself parameterized.
     let module = parse_ok("fn f<T: Into<String>>(x: T) {\n    println(x);\n}\n");
-    let Item::Fn(f) = &module.items[0] else { panic!("expected FnDecl") };
+    let Item::Fn(f) = &module.items[0] else {
+        panic!("expected FnDecl")
+    };
     let bound = f.generics[0].bound.as_ref().expect("expected a bound");
-    let nether_ast::TypeExpr::Named { path, generics, .. } = bound else { panic!("expected a Named bound") };
+    let nether_ast::TypeExpr::Named { path, generics, .. } = bound else {
+        panic!("expected a Named bound")
+    };
     assert_eq!(path.segments[0].name.as_str(), "Into");
     assert_eq!(generics.len(), 1);
 }
@@ -168,7 +223,9 @@ interface Sound {
 }
 "#,
     );
-    let Item::Interface(decl) = &module.items[0] else { panic!("expected InterfaceDecl") };
+    let Item::Interface(decl) = &module.items[0] else {
+        panic!("expected InterfaceDecl")
+    };
     assert!(decl.methods[0].body.is_some());
     assert!(decl.methods[1].body.is_none());
     assert_eq!(decl.methods[1].self_param, Some(SelfParam::ByRef));
@@ -187,12 +244,16 @@ fn describe(color: Color) {
 }
 "#,
     );
-    let Item::Fn(f) = &module.items[0] else { panic!("expected FnDecl") };
+    let Item::Fn(f) = &module.items[0] else {
+        panic!("expected FnDecl")
+    };
     let body = f.body.as_ref().unwrap();
     // The match has no trailing `;` and is the last thing in the block, so
     // it is the block's tail expression, not a `Stmt` (language-spec §2.4).
     let match_expr = body.tail.as_ref().expect("expected a tail expression");
-    let ExprKind::Match { arms, .. } = &match_expr.kind else { panic!("expected Match") };
+    let ExprKind::Match { arms, .. } = &match_expr.kind else {
+        panic!("expected Match")
+    };
     assert_eq!(arms.len(), 3);
     assert!(matches!(arms[0].pattern, Pattern::Variant { .. }));
     assert!(matches!(
@@ -217,30 +278,96 @@ fn main() {
 }
 "#,
     );
-    let Item::Fn(increment) = &module.items[0] else { panic!("expected FnDecl") };
+    let Item::Fn(increment) = &module.items[0] else {
+        panic!("expected FnDecl")
+    };
     assert!(increment.params[0].mutable);
 
-    let Item::Fn(main_fn) = &module.items[1] else { panic!("expected FnDecl") };
+    let Item::Fn(main_fn) = &module.items[1] else {
+        panic!("expected FnDecl")
+    };
     let body = main_fn.body.as_ref().unwrap();
-    let Stmt::Expr(call) = &body.stmts[1] else { panic!("expected call statement") };
-    let ExprKind::Call { args, .. } = &call.kind else { panic!("expected Call") };
+    let Stmt::Expr(call) = &body.stmts[1] else {
+        panic!("expected call statement")
+    };
+    let ExprKind::Call { args, .. } = &call.kind else {
+        panic!("expected Call")
+    };
     assert!(matches!(args[0].kind, ExprKind::MutArg(_)));
 
-    let Stmt::Let(let_stmt) = &body.stmts[2] else { panic!("expected let statement") };
+    let Stmt::Let(let_stmt) = &body.stmts[2] else {
+        panic!("expected let statement")
+    };
     assert!(matches!(let_stmt.value.kind, ExprKind::Closure { .. }));
+}
+
+#[test]
+fn explicit_generic_call_arguments_are_postfix_not_comparisons() {
+    let module = parse_ok(
+        r#"
+fn main() {
+    let value = foo<u32>(2);
+    let mapped = make().map<Array<u32>, String>([1], "ready");
+    let comparison = 1 < 2;
+}
+"#,
+    );
+    let Item::Fn(main) = &module.items[0] else {
+        panic!("expected main")
+    };
+    let body = main.body.as_ref().unwrap();
+
+    let Stmt::Let(value) = &body.stmts[0] else {
+        panic!("expected let")
+    };
+    let ExprKind::Call { generic_args, .. } = &value.value.kind else {
+        panic!("expected explicit generic call")
+    };
+    assert_eq!(generic_args.len(), 1);
+
+    let Stmt::Let(mapped) = &body.stmts[1] else {
+        panic!("expected let")
+    };
+    let ExprKind::MethodCall { generic_args, .. } = &mapped.value.kind else {
+        panic!("expected explicit generic method call")
+    };
+    assert_eq!(generic_args.len(), 2);
+
+    let Stmt::Let(comparison) = &body.stmts[2] else {
+        panic!("expected let")
+    };
+    assert!(matches!(
+        comparison.value.kind,
+        ExprKind::Binary {
+            op: BinaryOp::Lt,
+            ..
+        }
+    ));
 }
 
 #[test]
 fn string_template_produces_literal_and_expr_parts() {
     let module = parse_ok(r#"fn main() { let s = `hi ${1 + 2}!`; }"#);
-    let Item::Fn(f) = &module.items[0] else { panic!("expected FnDecl") };
+    let Item::Fn(f) = &module.items[0] else {
+        panic!("expected FnDecl")
+    };
     let body = f.body.as_ref().unwrap();
-    let Stmt::Let(let_stmt) = &body.stmts[0] else { panic!("expected let statement") };
-    let ExprKind::StringTemplate(parts) = &let_stmt.value.kind else { panic!("expected StringTemplate") };
+    let Stmt::Let(let_stmt) = &body.stmts[0] else {
+        panic!("expected let statement")
+    };
+    let ExprKind::StringTemplate(parts) = &let_stmt.value.kind else {
+        panic!("expected StringTemplate")
+    };
     assert_eq!(parts.len(), 3);
     match &parts[1] {
         nether_ast::TemplatePart::Expr(e) => {
-            assert!(matches!(e.kind, ExprKind::Binary { op: BinaryOp::Add, .. }));
+            assert!(matches!(
+                e.kind,
+                ExprKind::Binary {
+                    op: BinaryOp::Add,
+                    ..
+                }
+            ));
         }
         other => panic!("expected an Expr part, got {other:?}"),
     }
@@ -250,12 +377,27 @@ fn string_template_produces_literal_and_expr_parts() {
 fn binary_operator_precedence() {
     // `1 + 2 * 3` must parse as `1 + (2 * 3)`.
     let module = parse_ok("fn main() { let x = 1 + 2 * 3; }");
-    let Item::Fn(f) = &module.items[0] else { panic!("expected FnDecl") };
-    let Stmt::Let(let_stmt) = &f.body.as_ref().unwrap().stmts[0] else { panic!("expected let") };
-    let ExprKind::Binary { op: BinaryOp::Add, rhs, .. } = &let_stmt.value.kind else {
+    let Item::Fn(f) = &module.items[0] else {
+        panic!("expected FnDecl")
+    };
+    let Stmt::Let(let_stmt) = &f.body.as_ref().unwrap().stmts[0] else {
+        panic!("expected let")
+    };
+    let ExprKind::Binary {
+        op: BinaryOp::Add,
+        rhs,
+        ..
+    } = &let_stmt.value.kind
+    else {
         panic!("expected a top-level Add");
     };
-    assert!(matches!(rhs.kind, ExprKind::Binary { op: BinaryOp::Mul, .. }));
+    assert!(matches!(
+        rhs.kind,
+        ExprKind::Binary {
+            op: BinaryOp::Mul,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -270,7 +412,9 @@ fn main() {
 }
 "#,
     );
-    let Item::Fn(f) = &module.items[0] else { panic!("expected FnDecl") };
+    let Item::Fn(f) = &module.items[0] else {
+        panic!("expected FnDecl")
+    };
     let body = f.body.as_ref().unwrap();
     // last thing in the block with no trailing `;` => tail, not a Stmt.
     let if_expr = body.tail.as_ref().expect("expected a tail expression");
@@ -280,19 +424,29 @@ fn main() {
 #[test]
 fn struct_literal_parses_outside_condition_position() {
     let module = parse_ok(r#"fn main() { let d = Dog { name }; }"#);
-    let Item::Fn(f) = &module.items[0] else { panic!("expected FnDecl") };
-    let Stmt::Let(let_stmt) = &f.body.as_ref().unwrap().stmts[0] else { panic!("expected let") };
+    let Item::Fn(f) = &module.items[0] else {
+        panic!("expected FnDecl")
+    };
+    let Stmt::Let(let_stmt) = &f.body.as_ref().unwrap().stmts[0] else {
+        panic!("expected let")
+    };
     assert!(matches!(let_stmt.value.kind, ExprKind::StructLit { .. }));
 }
 
 #[test]
 fn tuple_literal_and_index_access() {
     let module = parse_ok("fn main() { let t = (1, \"a\"); let x = t.0; }");
-    let Item::Fn(f) = &module.items[0] else { panic!("expected FnDecl") };
+    let Item::Fn(f) = &module.items[0] else {
+        panic!("expected FnDecl")
+    };
     let stmts = &f.body.as_ref().unwrap().stmts;
-    let Stmt::Let(first) = &stmts[0] else { panic!("expected let") };
+    let Stmt::Let(first) = &stmts[0] else {
+        panic!("expected let")
+    };
     assert!(matches!(first.value.kind, ExprKind::Tuple(ref elems) if elems.len() == 2));
-    let Stmt::Let(second) = &stmts[1] else { panic!("expected let") };
+    let Stmt::Let(second) = &stmts[1] else {
+        panic!("expected let")
+    };
     assert!(matches!(second.value.kind, ExprKind::Field { .. }));
 }
 
@@ -314,10 +468,24 @@ fn main() {
 }
 "#,
     );
-    let Item::Fn(f) = &module.items[0] else { panic!("expected FnDecl") };
+    let Item::Fn(f) = &module.items[0] else {
+        panic!("expected FnDecl")
+    };
     let body = f.body.as_ref().unwrap();
-    assert!(matches!(body.stmts[1], Stmt::Expr(Expr { kind: ExprKind::While { .. }, .. })));
-    assert!(matches!(body.stmts[2], Stmt::Expr(Expr { kind: ExprKind::ForIn { .. }, .. })));
+    assert!(matches!(
+        body.stmts[1],
+        Stmt::Expr(Expr {
+            kind: ExprKind::While { .. },
+            ..
+        })
+    ));
+    assert!(matches!(
+        body.stmts[2],
+        Stmt::Expr(Expr {
+            kind: ExprKind::ForIn { .. },
+            ..
+        })
+    ));
     // `loop { break; }` is last with no trailing `;` => tail, not a Stmt.
     let tail = body.tail.as_ref().expect("expected a tail expression");
     assert!(matches!(tail.kind, ExprKind::Loop { .. }));
@@ -333,8 +501,12 @@ type Node {
 }
 "#,
     );
-    let Item::Type(decl) = &module.items[0] else { panic!("expected TypeDecl") };
-    let TypeDeclKind::Struct(fields) = &decl.kind else { panic!("expected Struct") };
+    let Item::Type(decl) = &module.items[0] else {
+        panic!("expected TypeDecl")
+    };
+    let TypeDeclKind::Struct(fields) = &decl.kind else {
+        panic!("expected Struct")
+    };
     assert!(matches!(fields[0].ty, nether_ast::TypeExpr::Weak(_, _)));
     assert!(matches!(fields[1].ty, nether_ast::TypeExpr::Array(_, _)));
 }
@@ -345,5 +517,8 @@ fn malformed_item_reports_diagnostic_and_recovers() {
     let (module, diags) = parse_with_diagnostics(source);
     assert!(!diags.is_empty());
     // recovery should still find the second, well-formed type declaration
-    assert!(module.items.iter().any(|item| matches!(item, Item::Type(t) if t.name.name.as_str() == "Dog")));
+    assert!(module
+        .items
+        .iter()
+        .any(|item| matches!(item, Item::Type(t) if t.name.name.as_str() == "Dog")));
 }

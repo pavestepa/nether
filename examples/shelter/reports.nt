@@ -1,0 +1,33 @@
+use super.model.Adoption;
+use super.model.Pet;
+use super.model.Shelter;
+
+fn adoption_text(state: Adoption): String {
+    match state {
+        Adoption.Available => "available now",
+        Adoption.Reserved(day) => `reserved until ${day}`,
+        Adoption.Adopted(owner) => `adopted by ${owner}`,
+    }
+}
+
+fn featured_name(shelter: Shelter): String {
+    match shelter.featured {
+        Some(pet) => pet.name,
+        None => "no featured pet",
+    }
+}
+
+fn option_pet_name(value: Option<Pet>): String {
+    match value {
+        Some(pet) => pet.name,
+        None => "no pet selected",
+    }
+}
+
+fn print_roster(pets: [Pet]) {
+    let mut index = 1;
+    for pet in pets {
+        println(`${index}. ${pet}`);
+        index = index + 1;
+    }
+}

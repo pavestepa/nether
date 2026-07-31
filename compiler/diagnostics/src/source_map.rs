@@ -36,8 +36,15 @@ impl Span {
     /// Panics (in debug builds) if the two spans are not in the same file —
     /// combining spans across files is never meaningful.
     pub fn to(self, other: Span) -> Span {
-        debug_assert_eq!(self.file, other.file, "cannot merge spans from different files");
-        Span::new(self.file, self.start.min(other.start), self.end.max(other.end))
+        debug_assert_eq!(
+            self.file, other.file,
+            "cannot merge spans from different files"
+        );
+        Span::new(
+            self.file,
+            self.start.min(other.start),
+            self.end.max(other.end),
+        )
     }
 
     pub fn len(self) -> u32 {
@@ -87,7 +94,11 @@ impl SourceMap {
         let source = source.into();
         let line_starts = compute_line_starts(&source);
         let id = FileId(self.files.len() as u32);
-        self.files.push(FileEntry { name: name.into(), source, line_starts });
+        self.files.push(FileEntry {
+            name: name.into(),
+            source,
+            line_starts,
+        });
         id
     }
 
@@ -114,7 +125,10 @@ impl SourceMap {
             Err(i) => i - 1,
         };
         let line_start = entry.line_starts[line_idx];
-        LineCol { line: (line_idx + 1) as u32, column: offset - line_start + 1 }
+        LineCol {
+            line: (line_idx + 1) as u32,
+            column: offset - line_start + 1,
+        }
     }
 
     /// The full text of the (0-based) line index, without its trailing
@@ -158,7 +172,10 @@ mod tests {
         let mut map = SourceMap::new();
         let f = map.add_file("a.nr", "let a = 1;\nlet b = 2;\n");
         let second_line_start = 11; // byte offset of 'l' in "let b"
-        assert_eq!(map.line_col(f, second_line_start), LineCol { line: 2, column: 1 });
+        assert_eq!(
+            map.line_col(f, second_line_start),
+            LineCol { line: 2, column: 1 }
+        );
     }
 
     #[test]

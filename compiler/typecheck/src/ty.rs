@@ -127,7 +127,9 @@ impl Type {
             | Type::Tuple(args)
             | Type::Enum(_, args) => args.iter().any(Type::contains_error),
             Type::Array(inner) | Type::Weak(inner) => inner.contains_error(),
-            Type::Function(params, ret) => params.iter().any(Type::contains_error) || ret.contains_error(),
+            Type::Function(params, ret) => {
+                params.iter().any(Type::contains_error) || ret.contains_error()
+            }
             _ => false,
         }
     }
@@ -142,7 +144,9 @@ impl Type {
             | Type::Tuple(args)
             | Type::Enum(_, args) => args.iter().any(Type::contains_generic),
             Type::Array(inner) | Type::Weak(inner) => inner.contains_generic(),
-            Type::Function(params, ret) => params.iter().any(Type::contains_generic) || ret.contains_generic(),
+            Type::Function(params, ret) => {
+                params.iter().any(Type::contains_generic) || ret.contains_generic()
+            }
             _ => false,
         }
     }
@@ -163,7 +167,10 @@ impl Type {
     /// `check::TypeChecker::upgrade_weak`) — so there is no matching case
     /// for `self` being `Weak`.
     pub fn compatible(&self, other: &Type) -> bool {
-        if matches!(self, Type::Error | Type::Never) || matches!(other, Type::Error | Type::Never) || self == other {
+        if matches!(self, Type::Error | Type::Never)
+            || matches!(other, Type::Error | Type::Never)
+            || self == other
+        {
             return true;
         }
         match (self, other) {

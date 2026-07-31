@@ -68,6 +68,6 @@ mod node;
 
 pub use lower::lower;
 pub use node::{
-    HirCapture, HirExpr, HirExprKind, HirFnId, HirFunction, HirLocalId, HirMatchArm, HirModule, HirParam,
-    HirPattern, HirStmt, HirStmtKind,
+    HirCapture, HirExpr, HirExprKind, HirFnId, HirFunction, HirLocalId, HirMatchArm, HirModule,
+    HirParam, HirPattern, HirStmt, HirStmtKind,
 };

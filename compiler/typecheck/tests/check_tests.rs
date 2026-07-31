@@ -5,16 +5,26 @@ fn check_source(source: &str) -> Vec<Diagnostic> {
     let mut map = SourceMap::new();
     let file = map.add_file("test.nr", source);
     let (module, parse_diags) = nether_parser::parse_module(source, file);
-    assert!(parse_diags.is_empty(), "unexpected parse diagnostics: {parse_diags:?}");
+    assert!(
+        parse_diags.is_empty(),
+        "unexpected parse diagnostics: {parse_diags:?}"
+    );
     let (resolved, resolve_diags) = nether_resolver::resolve(&module);
-    assert!(resolve_diags.is_empty(), "unexpected resolve diagnostics: {resolve_diags:?}");
+    assert!(
+        resolve_diags.is_empty(),
+        "unexpected resolve diagnostics: {resolve_diags:?}"
+    );
     let (_tables, check_diags) = check(&module, &resolved);
     check_diags
 }
 
 fn assert_ok(source: &str) {
     let diags = check_source(source);
-    assert!(diags.is_empty(), "unexpected typecheck diagnostics: {}", messages(&diags));
+    assert!(
+        diags.is_empty(),
+        "unexpected typecheck diagnostics: {}",
+        messages(&diags)
+    );
 }
 
 fn assert_err(source: &str, needle: &str) {
@@ -27,7 +37,11 @@ fn assert_err(source: &str, needle: &str) {
 }
 
 fn messages(diags: &[Diagnostic]) -> String {
-    diags.iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("; ")
+    diags
+        .iter()
+        .map(|d| d.message.clone())
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 #[test]
@@ -84,7 +98,10 @@ fn let_infers_type_from_initializer() {
 
 #[test]
 fn let_annotation_mismatch_reports_diagnostic() {
-    assert_err("fn main() { let x: bool = 5; }", "expected `bool`, found `i32`");
+    assert_err(
+        "fn main() { let x: bool = 5; }",
+        "expected `bool`, found `i32`",
+    );
 }
 
 #[test]
@@ -217,8 +234,14 @@ fn main() {
 #[test]
 fn tuple_struct_construction_checks_arity_and_types() {
     assert_ok("type Point(i32, i32);\nfn main() { let p = Point(1, 2); }");
-    assert_err("type Point(i32, i32);\nfn main() { let p = Point(1); }", "expected 2 argument(s), found 1");
-    assert_err("type Point(i32, i32);\nfn main() { let p = Point(1, \"x\"); }", "found `String`");
+    assert_err(
+        "type Point(i32, i32);\nfn main() { let p = Point(1); }",
+        "expected 2 argument(s), found 1",
+    );
+    assert_err(
+        "type Point(i32, i32);\nfn main() { let p = Point(1, \"x\"); }",
+        "found `String`",
+    );
 }
 
 #[test]
@@ -424,6 +447,67 @@ fn main() { let f = identity; }
 }
 
 #[test]
+fn explicit_generic_call_arguments_control_specialization() {
+    assert_ok(
+        r#"
+fn opaque<T>(value: i32): i32 { value }
+fn pair<T, U>(left: T, right: U): (T, U) { (left, right) }
+
+type Boxed<T> { value: T }
+impl Boxed {
+    replace<U>(self, value: U): Boxed<U> { Boxed { value } }
+}
+
+fn main() {
+    let value: i32 = opaque<String>(2);
+    let both: (u32, String) = pair<u32, String>(2, "ready");
+    let number = Boxed { value: 1 };
+    let text: Boxed<String> = number.replace<String>("one");
+}
+"#,
+    );
+    assert_ok(
+        r#"
+interface Transform {
+    transform<U>(self, value: U): U;
+}
+type Boxed<T> { value: T }
+impl Boxed: Transform {
+    transform<U>(self, value: U): U { value }
+}
+fn apply<T: Transform>(value: T): String {
+    value.transform<String>("ready")
+}
+fn main() {
+    let result: String = apply(Boxed { value: 1 });
+}
+"#,
+    );
+    assert_err(
+        r#"
+fn identity<T>(value: T): T { value }
+fn main() { identity<u32, String>(2); }
+"#,
+        "expected 1 explicit generic argument(s), found 2",
+    );
+    assert_err(
+        r#"
+fn identity<T>(value: T): T { value }
+fn main() { identity<String>(2); }
+"#,
+        "expected `String`, found `i32`",
+    );
+    assert_err(
+        r#"
+interface Sound { sound(self): String; }
+fn make_noise<T: Sound>(value: T): String { value.sound() }
+fn main() { make_noise<u32>(2); }
+"#,
+        "does not implement `Sound`",
+    );
+}
+
+#[test]
 fn into_string_bound_is_checked_inside_generic_bodies() {
     assert_ok(
         r#"
@@ -456,11 +540,10 @@ interface Convert<T> {
 interface Identity<T> {
     identity(self, value: T): T { value }
 }
-type Dog { name: String }
+type Dog: Identity<String> { name: String }
 impl Dog: Convert<String> {
     convert(self): String { self.name }
 }
-impl Dog: Identity<String> {}
 fn convert<U: Convert<String>>(value: U): String {
     value.convert()
 }
@@ -503,6 +586,127 @@ fn main() {
     println(read_text(text));
 }
 "#,
+    );
+}
+
+#[test]
+fn static_methods_can_be_called_through_values() {
+    assert_ok(
+        r#"
+type Animal { name: String }
+impl Animal {
+    new(name: String): Animal { Animal { name } }
+    static_method(): String { "A" }
+}
+fn main() {
+    let animal = Animal.new("Cat");
+    let value: String = animal.static_method();
+}
+"#,
+    );
+    assert_ok(
+        r#"
+interface Static { value(): String; }
+type Animal;
+impl Animal: Static {
+    value(): String { "A" }
+}
+fn read<T: Static>(animal: T): String {
+    animal.value()
+}
+fn main() {
+    let value: String = read(Animal);
+}
+"#,
+    );
+}
+
+#[test]
+fn interface_implementations_can_be_mixed_across_blocks() {
+    assert_ok(
+        r#"
+interface B { b(self): String; }
+interface C { c(self): String; }
+type A;
+impl A: B, C {}
+impl A { b(self): String { "b" } }
+impl A { c(self): String { "c" } }
+fn use_b<T: B>(value: T): String { value.b() }
+fn use_c<T: C>(value: T): String { value.c() }
+fn main() {
+    use_b(A);
+    use_c(A);
+}
+"#,
+    );
+    assert_err(
+        r#"
+interface Sound { sound(self): String { "default" } }
+type Animal;
+impl Animal: Sound {}
+"#,
+        "must explicitly implement method",
+    );
+}
+
+#[test]
+fn declarations_opt_into_defaults_for_types_and_enums() {
+    assert_ok(
+        r#"
+interface Sound { sound(self): String { "default" } }
+type Animal: Sound { name: String }
+enum State: Sound { Ready }
+fn main() {
+    Animal { name: "Cat" }.sound();
+    State.Ready.sound();
+}
+"#,
+    );
+}
+
+#[test]
+fn interface_inheritance_is_transitive_and_requires_parent_methods() {
+    assert_ok(
+        r#"
+interface Parent { parent(self): String; }
+interface Child: Parent { child(self): String; }
+type A;
+impl A: Child {}
+impl A {
+    parent(self): String { "parent" }
+    child(self): String { "child" }
+}
+fn use_parent<T: Parent>(value: T): String { value.parent() }
+fn main() { use_parent(A); }
+"#,
+    );
+    assert_err(
+        r#"
+interface Parent { parent(self): String; }
+interface Child: Parent { child(self): String; }
+type A;
+impl A: Child { child(self): String { "child" } }
+"#,
+        "must explicitly implement method `parent`",
+    );
+}
+
+#[test]
+fn conflicting_defaults_and_interface_cycles_are_diagnostics() {
+    assert_err(
+        r#"
+interface B { value(self): String { "b" } }
+interface C { value(self): String { "c" } }
+type A: B, C;
+"#,
+        "multiple default implementations",
+    );
+    assert_err(
+        r#"
+interface A: B {}
+interface B: A {}
+"#,
+        "interface inheritance cycle",
     );
 }
 
@@ -576,9 +780,7 @@ fn invalid_control_flow_and_entry_signatures_stop_before_mir() {
         "interface Sound { sound(self): String; }\nfn use_it(value: Sound) {}\nfn main() {}",
         "cannot be used as a value type",
     );
-    assert_ok(
-        "fn main() { loop { break; } while false { continue; } }",
-    );
+    assert_ok("fn main() { loop { break; } while false { continue; } }");
 }
 
 #[test]
@@ -628,14 +830,17 @@ type Dog { name: String }
 impl Dog: Sound {
 }
 "#,
-        "does not implement required method",
+        "must explicitly implement method",
     );
 }
 
 #[test]
 fn weak_must_wrap_a_heap_type() {
     assert_ok("type Node { next: weak Node }");
-    assert_err("type point { x: i32 }\ntype Node { p: weak point }", "can only wrap a heap-allocated type");
+    assert_err(
+        "type point { x: i32 }\ntype Node { p: weak point }",
+        "can only wrap a heap-allocated type",
+    );
 }
 
 #[test]
@@ -694,7 +899,10 @@ fn main() {}
 fn arithmetic_requires_matching_numeric_operands() {
     assert_ok("fn main() { let x = 1 + 2; }");
     assert_err("fn main() { let x = 1 + true; }", "must have the same type");
-    assert_err("fn main() { let x = true + false; }", "require numeric operands");
+    assert_err(
+        "fn main() { let x = true + false; }",
+        "require numeric operands",
+    );
 }
 
 #[test]
@@ -715,7 +923,10 @@ fn f(): i32 {
 
 #[test]
 fn assigning_to_immutable_binding_is_rejected() {
-    assert_err("fn main() { let x = 1; x = 2; }", "declare it with `let mut`");
+    assert_err(
+        "fn main() { let x = 1; x = 2; }",
+        "declare it with `let mut`",
+    );
     assert_ok("fn main() { let mut x = 1; x = 2; }");
 }
 
@@ -727,12 +938,20 @@ fn return_type_mismatch_is_reported() {
 #[test]
 fn array_and_index_type_checks() {
     assert_ok("fn main() { let a = [1, 2, 3]; let x = a[0]; }");
-    assert_err("fn main() { let a: [i32] = []; let x = a[\"no\"]; }", "must be an integer type");
+    assert_err(
+        "fn main() { let a: [i32] = []; let x = a[\"no\"]; }",
+        "must be an integer type",
+    );
     assert_err("fn main() { let a = []; }", "cannot infer");
 }
 
 #[test]
 fn array_builtin_methods_type_check() {
-    assert_ok("fn main() { let mut a = [1, 2]; a.push(3); let n: usize = a.len(); let p = a.pop(); }");
-    assert_err("fn main() { let mut a = [1, 2]; a.push(\"x\"); }", "found `String`");
+    assert_ok(
+        "fn main() { let mut a = [1, 2]; a.push(3); let n: usize = a.len(); let p = a.pop(); }",
+    );
+    assert_err(
+        "fn main() { let mut a = [1, 2]; a.push(\"x\"); }",
+        "found `String`",
+    );
 }

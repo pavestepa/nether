@@ -1,6 +1,6 @@
 use nether_ast::{FileId, Ident, NodeId, NodeIdGen, Path};
 use nether_diagnostics::{Diagnostic, Span};
-use nether_lexer::{Punct, SpannedToken, Token};
+use nether_lexer::{Keyword, Punct, SpannedToken, Token};
 
 /// Holds all mutable parsing state: the token buffer/cursor, the shared
 /// [`NodeIdGen`], and accumulated diagnostics.
@@ -74,7 +74,8 @@ impl Parser {
     }
 
     pub(crate) fn error(&mut self, span: Span, message: impl Into<String>) {
-        self.diagnostics.push(Diagnostic::error(message).with_label(span, "here"));
+        self.diagnostics
+            .push(Diagnostic::error(message).with_label(span, "here"));
     }
 
     pub(crate) fn eat_punct(&mut self, p: Punct) -> bool {
@@ -91,7 +92,10 @@ impl Parser {
             return self.bump().span;
         }
         let span = self.peek_span();
-        self.error(span, format!("expected `{}` {ctx}, found {:?}", punct_str(p), self.peek()));
+        self.error(
+            span,
+            format!("expected `{}` {ctx}, found {:?}", punct_str(p), self.peek()),
+        );
         span
     }
 
@@ -119,7 +123,10 @@ impl Parser {
             return Ident::new(name, span);
         }
         let span = self.peek_span();
-        self.error(span, format!("expected an identifier, found {:?}", self.peek()));
+        self.error(
+            span,
+            format!("expected an identifier, found {:?}", self.peek()),
+        );
         Ident::new("<error>", span)
     }
 
@@ -159,9 +166,40 @@ impl Parser {
         let id = self.next_id();
         let first = self.expect_ident();
         let mut segments = vec![first];
-        while matches!(self.peek(), Token::Punct(Punct::Dot)) && matches!(self.peek_at(1), Token::Ident(_)) {
+        while matches!(self.peek(), Token::Punct(Punct::Dot))
+            && matches!(self.peek_at(1), Token::Ident(_))
+        {
             self.bump();
             segments.push(self.expect_ident());
+        }
+        let span = segments[0].span.to(segments.last().unwrap().span);
+        Path { id, segments, span }
+    }
+
+    /// Import paths additionally allow the `self` keyword as their first
+    /// segment (`use self.child.Name;`). `super` and `crate` are ordinary
+    /// identifiers in Nether and therefore already work here.
+    pub(crate) fn parse_use_path(&mut self) -> Path {
+        let id = self.next_id();
+        let first = if matches!(self.peek(), Token::Keyword(Keyword::SelfLower)) {
+            let span = self.bump().span;
+            Ident::new("self", span)
+        } else {
+            self.expect_ident()
+        };
+        let mut segments = vec![first];
+        while matches!(self.peek(), Token::Punct(Punct::Dot))
+            && (matches!(self.peek_at(1), Token::Ident(_))
+                || matches!(self.peek_at(1), Token::Keyword(Keyword::SelfLower)))
+        {
+            self.bump();
+            let segment = if matches!(self.peek(), Token::Keyword(Keyword::SelfLower)) {
+                let span = self.bump().span;
+                Ident::new("self", span)
+            } else {
+                self.expect_ident()
+            };
+            segments.push(segment);
         }
         let span = segments[0].span.to(segments.last().unwrap().span);
         Path { id, segments, span }

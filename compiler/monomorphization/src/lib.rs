@@ -57,11 +57,16 @@ mod node;
 use std::collections::HashMap;
 
 use nether_ast::Symbol;
-use nether_hir::{HirCapture, HirExpr, HirExprKind, HirFnId, HirFunction, HirModule, HirParam, HirStmtKind};
+use nether_hir::{
+    HirCapture, HirExpr, HirExprKind, HirFnId, HirFunction, HirModule, HirParam, HirStmtKind,
+};
 use nether_resolver::DefId;
 use nether_typecheck::Type;
 
-pub use node::{MonoCapture, MonoExpr, MonoExprKind, MonoFnId, MonoFunction, MonoMatchArm, MonoModule, MonoParam, MonoStmt, MonoStmtKind};
+pub use node::{
+    MonoCapture, MonoExpr, MonoExprKind, MonoFnId, MonoFunction, MonoMatchArm, MonoModule,
+    MonoParam, MonoStmt, MonoStmtKind,
+};
 
 /// Runs monomorphization starting from `entry` (the program's `main`).
 ///
@@ -81,7 +86,10 @@ pub fn monomorphize(module: &HirModule, entry: HirFnId) -> MonoModule {
         adapters: HashMap::new(),
     };
     let entry_id = ctx.instantiate_plain(entry);
-    MonoModule { functions: ctx.functions, entry: entry_id }
+    MonoModule {
+        functions: ctx.functions,
+        entry: entry_id,
+    }
 }
 
 struct Mono<'a> {
@@ -112,7 +120,10 @@ impl<'a> Mono<'a> {
             return id;
         }
         let hir_fn = self.hir.get(hir_id);
-        debug_assert!(hir_fn.generics.is_empty(), "instantiate_plain called on a generic function");
+        debug_assert!(
+            hir_fn.generics.is_empty(),
+            "instantiate_plain called on a generic function"
+        );
         let id = self.reserve_slot(placeholder_for(hir_fn));
         self.plain.insert(hir_id, id);
         self.finish_instantiation(id, hir_fn, &HashMap::new());
@@ -121,8 +132,11 @@ impl<'a> Mono<'a> {
 
     fn instantiate_generic(&mut self, hir_id: HirFnId, subst: &HashMap<Symbol, Type>) -> MonoFnId {
         let hir_fn = self.hir.get(hir_id);
-        let key_types: Vec<Type> =
-            hir_fn.generics.iter().map(|(name, _)| subst.get(name).cloned().unwrap_or(Type::Error)).collect();
+        let key_types: Vec<Type> = hir_fn
+            .generics
+            .iter()
+            .map(|(name, _)| subst.get(name).cloned().unwrap_or(Type::Error))
+            .collect();
         let key = (hir_id, key_types);
         if let Some(&id) = self.generic.get(&key) {
             return id;
@@ -133,42 +147,58 @@ impl<'a> Mono<'a> {
         id
     }
 
-    fn finish_instantiation(&mut self, id: MonoFnId, hir_fn: &'a HirFunction, subst: &HashMap<Symbol, Type>) {
+    fn finish_instantiation(
+        &mut self,
+        id: MonoFnId,
+        hir_fn: &'a HirFunction,
+        subst: &HashMap<Symbol, Type>,
+    ) {
         let params = hir_fn
             .params
             .iter()
-            .map(|p| MonoParam { local: p.local, name: p.name.clone(), mutable: p.mutable, ty: subst_type(&p.ty, subst) })
+            .map(|p| MonoParam {
+                local: p.local,
+                name: p.name.clone(),
+                mutable: p.mutable,
+                ty: subst_type(&p.ty, subst),
+            })
             .collect();
         let ret = subst_type(&hir_fn.ret, subst);
         let body = self.subst_expr(&hir_fn.body, subst);
-        self.functions[id.0 as usize] =
-            MonoFunction {
-                id,
-                name: hir_fn.name.clone(),
-                owner: hir_fn.owner,
-                is_closure: false,
-                self_param: hir_fn.self_param,
-                self_ty: hir_fn
-                    .self_ty
-                    .as_ref()
-                    .map(|ty| subst_type(ty, subst)),
-                self_local: hir_fn.self_local,
-                captures: Vec::new(),
-                params,
-                ret,
-                body,
-            };
+        self.functions[id.0 as usize] = MonoFunction {
+            id,
+            name: hir_fn.name.clone(),
+            owner: hir_fn.owner,
+            is_closure: false,
+            self_param: hir_fn.self_param,
+            self_ty: hir_fn.self_ty.as_ref().map(|ty| subst_type(ty, subst)),
+            self_local: hir_fn.self_local,
+            captures: Vec::new(),
+            params,
+            ret,
+            body,
+        };
     }
 
     /// Calls (whether to a generic or non-generic target) always route
     /// through here so a generic callee's substitution is derived
     /// uniformly from its already-substituted argument types.
-    fn resolve_call(&mut self, hir_id: HirFnId, args: &[MonoExpr]) -> MonoFnId {
+    fn resolve_call(
+        &mut self,
+        hir_id: HirFnId,
+        args: &[MonoExpr],
+        generic_args: &[Type],
+    ) -> MonoFnId {
         let hir_fn = self.hir.get(hir_id);
         if hir_fn.generics.is_empty() {
             return self.instantiate_plain(hir_id);
         }
-        let mut subst = HashMap::new();
+        let mut subst: HashMap<Symbol, Type> = hir_fn
+            .generics
+            .iter()
+            .map(|(name, _)| name.clone())
+            .zip(generic_args.iter().cloned())
+            .collect();
         let self_offset = usize::from(hir_fn.self_param.is_some());
         if let (Some(self_ty), Some(receiver)) =
             (&hir_fn.self_ty, args.first().filter(|_| self_offset == 1))
@@ -190,53 +220,128 @@ impl<'a> Mono<'a> {
                 let hir_fn = self.hir.get(*fn_id);
                 assert!(hir_fn.generics.is_empty(), "monomorphization: cannot take a bare reference to generic function `{}` without a call site to infer its type arguments from (see this crate's module docs)", hir_fn.name);
                 let target = self.instantiate_plain(*fn_id);
-                MonoExprKind::Closure { function: self.instantiate_adapter(target), captures: Vec::new() }
+                MonoExprKind::Closure {
+                    function: self.instantiate_adapter(target),
+                    captures: Vec::new(),
+                }
             }
             HirExprKind::Unit => MonoExprKind::Unit,
             HirExprKind::Tuple(items) => MonoExprKind::Tuple(self.subst_exprs(items, subst)),
             HirExprKind::Array(items) => MonoExprKind::Array(self.subst_exprs(items, subst)),
             HirExprKind::Concat(items) => MonoExprKind::Concat(self.subst_exprs(items, subst)),
-            HirExprKind::ToString(inner) => MonoExprKind::ToString(Box::new(self.subst_expr(inner, subst))),
-            HirExprKind::Unary { op, expr } => MonoExprKind::Unary { op: *op, expr: Box::new(self.subst_expr(expr, subst)) },
-            HirExprKind::Binary { op, lhs, rhs } => {
-                MonoExprKind::Binary { op: *op, lhs: Box::new(self.subst_expr(lhs, subst)), rhs: Box::new(self.subst_expr(rhs, subst)) }
+            HirExprKind::ToString(inner) => {
+                MonoExprKind::ToString(Box::new(self.subst_expr(inner, subst)))
             }
-            HirExprKind::Assign { target, value } => {
-                MonoExprKind::Assign { target: Box::new(self.subst_expr(target, subst)), value: Box::new(self.subst_expr(value, subst)) }
-            }
-            HirExprKind::Call { callee, args } => {
-                MonoExprKind::Call { callee: Box::new(self.subst_expr(callee, subst)), args: self.subst_exprs(args, subst) }
-            }
-            HirExprKind::CallStatic { fn_id, args } => {
+            HirExprKind::Unary { op, expr } => MonoExprKind::Unary {
+                op: *op,
+                expr: Box::new(self.subst_expr(expr, subst)),
+            },
+            HirExprKind::Binary { op, lhs, rhs } => MonoExprKind::Binary {
+                op: *op,
+                lhs: Box::new(self.subst_expr(lhs, subst)),
+                rhs: Box::new(self.subst_expr(rhs, subst)),
+            },
+            HirExprKind::Assign { target, value } => MonoExprKind::Assign {
+                target: Box::new(self.subst_expr(target, subst)),
+                value: Box::new(self.subst_expr(value, subst)),
+            },
+            HirExprKind::Call { callee, args } => MonoExprKind::Call {
+                callee: Box::new(self.subst_expr(callee, subst)),
+                args: self.subst_exprs(args, subst),
+            },
+            HirExprKind::CallStatic {
+                fn_id,
+                generic_args,
+                args,
+            } => {
                 let args = self.subst_exprs(args, subst);
-                let mono_id = self.resolve_call(*fn_id, &args);
-                MonoExprKind::CallStatic { fn_id: mono_id, args }
+                let generic_args: Vec<Type> = generic_args
+                    .iter()
+                    .map(|ty| subst_type(ty, subst))
+                    .collect();
+                let mono_id = self.resolve_call(*fn_id, &args, &generic_args);
+                MonoExprKind::CallStatic {
+                    fn_id: mono_id,
+                    args,
+                }
             }
-            HirExprKind::CallBuiltin { name, args } => MonoExprKind::CallBuiltin { name: name.clone(), args: self.subst_exprs(args, subst) },
-            HirExprKind::Field { base, index } => MonoExprKind::Field { base: Box::new(self.subst_expr(base, subst)), index: *index },
-            HirExprKind::Index { base, index } => {
-                MonoExprKind::Index { base: Box::new(self.subst_expr(base, subst)), index: Box::new(self.subst_expr(index, subst)) }
-            }
-            HirExprKind::Construct { ty, fields } => MonoExprKind::Construct { ty: *ty, fields: self.subst_exprs(fields, subst) },
-            HirExprKind::ConstructVariant { enum_id, variant, payload } => {
-                MonoExprKind::ConstructVariant { enum_id: *enum_id, variant: *variant, payload: self.subst_exprs(payload, subst) }
-            }
-            HirExprKind::CallGenericMethod { receiver, method_name, args, .. } => {
+            HirExprKind::CallBuiltin { name, args } => MonoExprKind::CallBuiltin {
+                name: name.clone(),
+                args: self.subst_exprs(args, subst),
+            },
+            HirExprKind::Field { base, index } => MonoExprKind::Field {
+                base: Box::new(self.subst_expr(base, subst)),
+                index: *index,
+            },
+            HirExprKind::Index { base, index } => MonoExprKind::Index {
+                base: Box::new(self.subst_expr(base, subst)),
+                index: Box::new(self.subst_expr(index, subst)),
+            },
+            HirExprKind::Construct { ty, fields } => MonoExprKind::Construct {
+                ty: *ty,
+                fields: self.subst_exprs(fields, subst),
+            },
+            HirExprKind::ConstructVariant {
+                enum_id,
+                variant,
+                payload,
+            } => MonoExprKind::ConstructVariant {
+                enum_id: *enum_id,
+                variant: *variant,
+                payload: self.subst_exprs(payload, subst),
+            },
+            HirExprKind::CallGenericMethod {
+                receiver,
+                method_name,
+                is_static,
+                generic_args,
+                args,
+                ..
+            } => {
                 let receiver = self.subst_expr(receiver, subst);
                 let args = self.subst_exprs(args, subst);
-                self.resolve_generic_method_call(receiver, method_name, args)
+                let generic_args: Vec<Type> = generic_args
+                    .iter()
+                    .map(|ty| subst_type(ty, subst))
+                    .collect();
+                self.resolve_generic_method_call(
+                    receiver,
+                    method_name,
+                    *is_static,
+                    args,
+                    &generic_args,
+                    ty.clone(),
+                )
             }
-            HirExprKind::CallArrayMethod { receiver, method, args } => {
-                MonoExprKind::CallArrayMethod { receiver: Box::new(self.subst_expr(receiver, subst)), method: method.clone(), args: self.subst_exprs(args, subst) }
-            }
-            HirExprKind::If { cond, then_branch, else_branch } => MonoExprKind::If {
+            HirExprKind::CallArrayMethod {
+                receiver,
+                method,
+                args,
+            } => MonoExprKind::CallArrayMethod {
+                receiver: Box::new(self.subst_expr(receiver, subst)),
+                method: method.clone(),
+                args: self.subst_exprs(args, subst),
+            },
+            HirExprKind::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => MonoExprKind::If {
                 cond: Box::new(self.subst_expr(cond, subst)),
                 then_branch: Box::new(self.subst_expr(then_branch, subst)),
-                else_branch: else_branch.as_ref().map(|e| Box::new(self.subst_expr(e, subst))),
+                else_branch: else_branch
+                    .as_ref()
+                    .map(|e| Box::new(self.subst_expr(e, subst))),
             },
             HirExprKind::Match { scrutinee, arms } => MonoExprKind::Match {
                 scrutinee: Box::new(self.subst_expr(scrutinee, subst)),
-                arms: arms.iter().map(|arm| MonoMatchArm { pattern: arm.pattern.clone(), body: self.subst_expr(&arm.body, subst) }).collect(),
+                arms: arms
+                    .iter()
+                    .map(|arm| MonoMatchArm {
+                        pattern: arm.pattern.clone(),
+                        body: self.subst_expr(&arm.body, subst),
+                    })
+                    .collect(),
             },
             HirExprKind::Block(stmts, tail) => {
                 let stmts = stmts
@@ -252,16 +357,30 @@ impl<'a> Mono<'a> {
                         },
                     })
                     .collect();
-                MonoExprKind::Block(stmts, tail.as_ref().map(|t| Box::new(self.subst_expr(t, subst))))
+                MonoExprKind::Block(
+                    stmts,
+                    tail.as_ref().map(|t| Box::new(self.subst_expr(t, subst))),
+                )
             }
-            HirExprKind::While { cond, body } => {
-                MonoExprKind::While { cond: Box::new(self.subst_expr(cond, subst)), body: Box::new(self.subst_expr(body, subst)) }
+            HirExprKind::While { cond, body } => MonoExprKind::While {
+                cond: Box::new(self.subst_expr(cond, subst)),
+                body: Box::new(self.subst_expr(body, subst)),
+            },
+            HirExprKind::Loop { body } => MonoExprKind::Loop {
+                body: Box::new(self.subst_expr(body, subst)),
+            },
+            HirExprKind::Break(v) => {
+                MonoExprKind::Break(v.as_ref().map(|e| Box::new(self.subst_expr(e, subst))))
             }
-            HirExprKind::Loop { body } => MonoExprKind::Loop { body: Box::new(self.subst_expr(body, subst)) },
-            HirExprKind::Break(v) => MonoExprKind::Break(v.as_ref().map(|e| Box::new(self.subst_expr(e, subst)))),
             HirExprKind::Continue => MonoExprKind::Continue,
-            HirExprKind::Return(v) => MonoExprKind::Return(v.as_ref().map(|e| Box::new(self.subst_expr(e, subst)))),
-            HirExprKind::Closure { params, captures, body } => {
+            HirExprKind::Return(v) => {
+                MonoExprKind::Return(v.as_ref().map(|e| Box::new(self.subst_expr(e, subst))))
+            }
+            HirExprKind::Closure {
+                params,
+                captures,
+                body,
+            } => {
                 let function = self.instantiate_closure(params, captures, body, &ty, subst);
                 let captures = captures
                     .iter()
@@ -317,7 +436,10 @@ impl<'a> Mono<'a> {
             captures: mono_captures,
             params: mono_params,
             ret: ret.clone(),
-            body: MonoExpr { kind: MonoExprKind::Unit, ty: ret },
+            body: MonoExpr {
+                kind: MonoExprKind::Unit,
+                ty: ret,
+            },
         });
         let mono_body = self.subst_expr(body, subst);
         self.functions[id.0 as usize].body = mono_body;
@@ -333,7 +455,10 @@ impl<'a> Mono<'a> {
         let ret = target_fn.ret.clone();
         let args = params
             .iter()
-            .map(|param| MonoExpr { kind: MonoExprKind::Local(param.local), ty: param.ty.clone() })
+            .map(|param| MonoExpr {
+                kind: MonoExprKind::Local(param.local),
+                ty: param.ty.clone(),
+            })
             .collect();
         let id = MonoFnId(self.functions.len() as u32);
         self.functions.push(MonoFunction {
@@ -347,7 +472,13 @@ impl<'a> Mono<'a> {
             captures: Vec::new(),
             params,
             ret: ret.clone(),
-            body: MonoExpr { kind: MonoExprKind::CallStatic { fn_id: target, args }, ty: ret },
+            body: MonoExpr {
+                kind: MonoExprKind::CallStatic {
+                    fn_id: target,
+                    args,
+                },
+                ty: ret,
+            },
         });
         self.adapters.insert(target, id);
         id
@@ -359,8 +490,16 @@ impl<'a> Mono<'a> {
 
     /// `receiver`/`args` are already substituted; only the target method
     /// still needs resolving now that `receiver.ty` is concrete.
-    fn resolve_generic_method_call(&mut self, receiver: MonoExpr, method_name: &Symbol, args: Vec<MonoExpr>) -> MonoExprKind {
-        if method_name.as_str() == "into_string" && args.is_empty() {
+    fn resolve_generic_method_call(
+        &mut self,
+        receiver: MonoExpr,
+        method_name: &Symbol,
+        is_static: bool,
+        args: Vec<MonoExpr>,
+        generic_args: &[Type],
+        result_ty: Type,
+    ) -> MonoExprKind {
+        if !is_static && method_name.as_str() == "into_string" && args.is_empty() {
             match &receiver.ty {
                 Type::Primitive(_) => return MonoExprKind::ToString(Box::new(receiver)),
                 Type::String => return receiver.kind,
@@ -375,11 +514,36 @@ impl<'a> Mono<'a> {
             .methods
             .get(&(owner, method_name.clone()))
             .unwrap_or_else(|| panic!("monomorphization: no impl of method `{method_name}` found for the substituted receiver type (typecheck should have rejected this earlier)"));
-        let mut full_args = Vec::with_capacity(args.len() + 1);
-        full_args.push(receiver);
+        let mut target_generic_args = match &receiver.ty {
+            Type::Struct(_, args) | Type::TupleStruct(_, args) | Type::Enum(_, args) => {
+                args.clone()
+            }
+            _ => Vec::new(),
+        };
+        target_generic_args.extend_from_slice(generic_args);
+        let mut full_args = Vec::with_capacity(args.len() + usize::from(!is_static));
+        if !is_static {
+            full_args.push(receiver.clone());
+        }
         full_args.extend(args);
-        let mono_id = self.resolve_call(target_hir_id, &full_args);
-        MonoExprKind::CallStatic { fn_id: mono_id, args: full_args }
+        let mono_id = self.resolve_call(target_hir_id, &full_args, &target_generic_args);
+        let call = MonoExprKind::CallStatic {
+            fn_id: mono_id,
+            args: full_args,
+        };
+        if is_static {
+            MonoExprKind::Block(
+                vec![MonoStmt {
+                    kind: MonoStmtKind::Expr(receiver),
+                }],
+                Some(Box::new(MonoExpr {
+                    kind: call,
+                    ty: result_ty,
+                })),
+            )
+        } else {
+            call
+        }
     }
 }
 
@@ -395,7 +559,10 @@ fn placeholder_for(hir_fn: &HirFunction) -> MonoFunction {
         captures: Vec::new(),
         params: Vec::new(),
         ret: Type::Error,
-        body: MonoExpr { kind: MonoExprKind::Unit, ty: Type::unit() },
+        body: MonoExpr {
+            kind: MonoExprKind::Unit,
+            ty: Type::unit(),
+        },
     }
 }
 
@@ -423,13 +590,18 @@ fn subst_type(ty: &Type, subst: &HashMap<Symbol, Type>) -> Type {
             Type::TupleStruct(*id, args.iter().map(|t| subst_type(t, subst)).collect())
         }
         Type::Tuple(items) => Type::Tuple(items.iter().map(|t| subst_type(t, subst)).collect()),
-        Type::Enum(id, args) => Type::Enum(*id, args.iter().map(|t| subst_type(t, subst)).collect()),
-        Type::Array(elem) => Type::Array(Box::new(subst_type(elem, subst))),
-        Type::Function(params, ret) => {
-            Type::Function(params.iter().map(|t| subst_type(t, subst)).collect(), Box::new(subst_type(ret, subst)))
+        Type::Enum(id, args) => {
+            Type::Enum(*id, args.iter().map(|t| subst_type(t, subst)).collect())
         }
+        Type::Array(elem) => Type::Array(Box::new(subst_type(elem, subst))),
+        Type::Function(params, ret) => Type::Function(
+            params.iter().map(|t| subst_type(t, subst)).collect(),
+            Box::new(subst_type(ret, subst)),
+        ),
         Type::Weak(inner) => Type::Weak(Box::new(subst_type(inner, subst))),
-        Type::Primitive(_) | Type::String | Type::Interface(_) | Type::Never | Type::Error => ty.clone(),
+        Type::Primitive(_) | Type::String | Type::Interface(_) | Type::Never | Type::Error => {
+            ty.clone()
+        }
     }
 }
 
@@ -442,7 +614,7 @@ fn subst_type(ty: &Type, subst: &HashMap<Symbol, Type>) -> Type {
 fn collect_generic_bindings(declared: &Type, concrete: &Type, out: &mut HashMap<Symbol, Type>) {
     match declared {
         Type::Generic(name) => {
-            out.insert(name.clone(), concrete.clone());
+            out.entry(name.clone()).or_insert_with(|| concrete.clone());
         }
         Type::Tuple(items) => {
             if let Type::Tuple(concrete_items) = concrete {

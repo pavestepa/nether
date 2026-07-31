@@ -13,7 +13,12 @@ use std::process::Command;
 /// The `runtime/*` static libraries every emitted object needs, in link
 /// order (a library must come *after* whatever references its symbols —
 /// `io` calls into `string`, `string`/`array` call into `arc`).
-const RUNTIME_LIBS: [&str; 4] = ["nether_rt_io", "nether_rt_string", "nether_rt_array", "nether_rt_arc"];
+const RUNTIME_LIBS: [&str; 4] = [
+    "nether_rt_io",
+    "nether_rt_string",
+    "nether_rt_array",
+    "nether_rt_arc",
+];
 
 /// This crate's own workspace root, computed from its compiled-in
 /// manifest directory (`compiler/driver`) rather than the current working
@@ -37,7 +42,10 @@ fn locate_runtime_libs() -> Option<Vec<PathBuf>> {
     let root = workspace_root();
     for profile in ["release", "debug"] {
         let dir = root.join("target").join(profile);
-        let paths: Vec<PathBuf> = RUNTIME_LIBS.iter().map(|name| dir.join(format!("lib{name}.a"))).collect();
+        let paths: Vec<PathBuf> = RUNTIME_LIBS
+            .iter()
+            .map(|name| dir.join(format!("lib{name}.a")))
+            .collect();
         if paths.iter().all(|p| p.is_file()) {
             return Some(paths);
         }
@@ -62,9 +70,17 @@ pub fn link(object: &Path, out: &Path) -> std::io::Result<Option<PathBuf>> {
     let Some(libs) = locate_runtime_libs() else {
         return Ok(None);
     };
-    let status = Command::new("cc").arg(object).args(&libs).arg("-o").arg(out).status()?;
+    let status = Command::new("cc")
+        .arg(object)
+        .args(&libs)
+        .arg("-o")
+        .arg(out)
+        .status()?;
     if !status.success() {
-        return Err(std::io::Error::new(std::io::ErrorKind::Other, format!("cc exited with {status} linking {}", object.display())));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("cc exited with {status} linking {}", object.display()),
+        ));
     }
     Ok(Some(out.to_path_buf()))
 }

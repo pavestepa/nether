@@ -1,0 +1,35 @@
+mod stats;
+mod transforms;
+
+use self.stats.describe;
+use self.stats.summarize;
+use self.transforms.identity;
+use self.transforms.increment;
+use self.transforms.map_values;
+use self.transforms.square;
+
+fn main() {
+    let values = [2, 4, 6, 8];
+    let report = summarize(values);
+    println(describe(report));
+
+    let factor = 3;
+    let scaled = map_values(values, (value: i32) => {
+        value * factor
+    });
+    println(describe(summarize(scaled)));
+
+    let operation = square;
+    let squared = map_values([1, 2, 3], operation);
+    println(describe(summarize(squared)));
+
+    let mut counter = 10;
+    increment(mut counter);
+    println(`counter=${counter}`);
+
+    let label = identity("metrics complete");
+    println(label);
+
+    let pair = (report.total, report.max);
+    println(`total=${pair.0}, max=${pair.1}`);
+}

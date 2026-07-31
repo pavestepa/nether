@@ -52,12 +52,19 @@ use std::path::Path;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::{Linkage, Module};
-use inkwell::targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine, TargetTriple};
+use inkwell::targets::{
+    CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine, TargetTriple,
+};
 use inkwell::AddressSpace;
 
 pub use inkwell::passes::PassBuilderOptions;
-pub use inkwell::types::{BasicMetadataTypeEnum as ParamTy, BasicTypeEnum as Ty, FunctionType as FnTy, StructType as StructTy};
-pub use inkwell::values::{BasicMetadataValueEnum as ArgValue, BasicValueEnum as Value, FunctionValue as Func};
+pub use inkwell::types::{
+    BasicMetadataTypeEnum as ParamTy, BasicTypeEnum as Ty, FunctionType as FnTy,
+    StructType as StructTy,
+};
+pub use inkwell::values::{
+    BasicMetadataValueEnum as ArgValue, BasicValueEnum as Value, FunctionValue as Func,
+};
 pub use inkwell::{FloatPredicate, IntPredicate};
 pub type Block<'ctx> = inkwell::basic_block::BasicBlock<'ctx>;
 
@@ -84,12 +91,17 @@ impl Codegen {
     }
 
     pub fn host_triple() -> String {
-        TargetMachine::get_default_triple().as_str().to_string_lossy().into_owned()
+        TargetMachine::get_default_triple()
+            .as_str()
+            .to_string_lossy()
+            .into_owned()
     }
 
     pub fn with_target(target_triple: &str, opt_level: u8) -> Result<Self, String> {
         if opt_level > 3 {
-            return Err(format!("unsupported optimization level O{opt_level}; expected O0..O3"));
+            return Err(format!(
+                "unsupported optimization level O{opt_level}; expected O0..O3"
+            ));
         }
         Target::initialize_all(&InitializationConfig::default());
         let triple = TargetTriple::create(target_triple);
@@ -193,7 +205,9 @@ impl<'ctx> ModuleCx<'ctx> {
     /// ever calls (never defines; `docs/architecture/crates.md` §
     /// `compiler/codegen`'s "declare, never define" invariant).
     pub fn declare_function(&self, name: &str, ty: FnTy<'ctx>) -> Func<'ctx> {
-        self.module.get_function(name).unwrap_or_else(|| self.module.add_function(name, ty, Some(Linkage::External)))
+        self.module
+            .get_function(name)
+            .unwrap_or_else(|| self.module.add_function(name, ty, Some(Linkage::External)))
     }
 
     pub fn append_block(&self, f: Func<'ctx>, name: &str) -> Block<'ctx> {
@@ -210,11 +224,14 @@ impl<'ctx> ModuleCx<'ctx> {
     /// generated on demand while another function's body is mid-build;
     /// see its `shims` module).
     pub fn current_block(&self) -> Block<'ctx> {
-        self.builder.get_insert_block().expect("builder has an active insertion point")
+        self.builder
+            .get_insert_block()
+            .expect("builder has an active insertion point")
     }
 
     pub fn param(&self, f: Func<'ctx>, index: u32) -> Value<'ctx> {
-        f.get_nth_param(index).unwrap_or_else(|| panic!("function has no parameter #{index}"))
+        f.get_nth_param(index)
+            .unwrap_or_else(|| panic!("function has no parameter #{index}"))
     }
 
     // ---- Constants -------------------------------------------------------
@@ -228,36 +245,62 @@ impl<'ctx> ModuleCx<'ctx> {
     }
 
     pub fn const_bool(&self, value: bool) -> Value<'ctx> {
-        self.context.bool_type().const_int(u64::from(value), false).into()
+        self.context
+            .bool_type()
+            .const_int(u64::from(value), false)
+            .into()
     }
 
     pub fn const_null_ptr(&self) -> Value<'ctx> {
-        self.context.ptr_type(AddressSpace::default()).const_null().into()
+        self.context
+            .ptr_type(AddressSpace::default())
+            .const_null()
+            .into()
     }
 
     /// A pointer to a private global holding `s` as a NUL-terminated byte
     /// array — the raw material `nether_codegen` hands to a `runtime`
     /// string-construction call for a string literal.
     pub fn global_string_ptr(&self, s: &str, name: &str) -> Value<'ctx> {
-        self.builder.build_global_string_ptr(s, name).expect("build_global_string_ptr").as_pointer_value().into()
+        self.builder
+            .build_global_string_ptr(s, name)
+            .expect("build_global_string_ptr")
+            .as_pointer_value()
+            .into()
     }
 
     // ---- Memory ------------------------------------------------------
 
     pub fn alloca(&self, ty: Ty<'ctx>, name: &str) -> Value<'ctx> {
-        self.builder.build_alloca(ty, name).expect("build_alloca").into()
+        self.builder
+            .build_alloca(ty, name)
+            .expect("build_alloca")
+            .into()
     }
 
     pub fn load(&self, ty: Ty<'ctx>, ptr: Value<'ctx>, name: &str) -> Value<'ctx> {
-        self.builder.build_load(ty, ptr.into_pointer_value(), name).expect("build_load")
+        self.builder
+            .build_load(ty, ptr.into_pointer_value(), name)
+            .expect("build_load")
     }
 
     pub fn store(&self, ptr: Value<'ctx>, value: Value<'ctx>) {
-        self.builder.build_store(ptr.into_pointer_value(), value).expect("build_store");
+        self.builder
+            .build_store(ptr.into_pointer_value(), value)
+            .expect("build_store");
     }
 
-    pub fn struct_gep(&self, struct_ty: StructTy<'ctx>, ptr: Value<'ctx>, index: u32, name: &str) -> Value<'ctx> {
-        self.builder.build_struct_gep(struct_ty, ptr.into_pointer_value(), index, name).expect("build_struct_gep").into()
+    pub fn struct_gep(
+        &self,
+        struct_ty: StructTy<'ctx>,
+        ptr: Value<'ctx>,
+        index: u32,
+        name: &str,
+    ) -> Value<'ctx> {
+        self.builder
+            .build_struct_gep(struct_ty, ptr.into_pointer_value(), index, name)
+            .expect("build_struct_gep")
+            .into()
     }
 
     /// Byte-offset GEP into an opaque pointer treated as `[N x i8]` — used
@@ -266,7 +309,15 @@ impl<'ctx> ModuleCx<'ctx> {
     pub fn gep_bytes(&self, ptr: Value<'ctx>, byte_offset: Value<'ctx>, name: &str) -> Value<'ctx> {
         let i8_ty = self.context.i8_type();
         unsafe {
-            self.builder.build_gep(i8_ty, ptr.into_pointer_value(), &[byte_offset.into_int_value()], name).expect("build_gep").into()
+            self.builder
+                .build_gep(
+                    i8_ty,
+                    ptr.into_pointer_value(),
+                    &[byte_offset.into_int_value()],
+                    name,
+                )
+                .expect("build_gep")
+                .into()
         }
     }
 
@@ -276,104 +327,202 @@ impl<'ctx> ModuleCx<'ctx> {
     /// aggregate SSA value — see this crate's module docs) is moved from
     /// one storage slot to another.
     pub fn memcpy(&self, dest: Value<'ctx>, src: Value<'ctx>, size: Value<'ctx>) {
-        self.builder.build_memcpy(dest.into_pointer_value(), 8, src.into_pointer_value(), 8, size.into_int_value()).expect("build_memcpy");
+        self.builder
+            .build_memcpy(
+                dest.into_pointer_value(),
+                8,
+                src.into_pointer_value(),
+                8,
+                size.into_int_value(),
+            )
+            .expect("build_memcpy");
     }
 
     // ---- Arithmetic / comparison ---------------------------------------
 
     pub fn int_add(&self, a: Value<'ctx>, b: Value<'ctx>, name: &str) -> Value<'ctx> {
-        self.builder.build_int_add(a.into_int_value(), b.into_int_value(), name).expect("build_int_add").into()
+        self.builder
+            .build_int_add(a.into_int_value(), b.into_int_value(), name)
+            .expect("build_int_add")
+            .into()
     }
 
     pub fn int_sub(&self, a: Value<'ctx>, b: Value<'ctx>, name: &str) -> Value<'ctx> {
-        self.builder.build_int_sub(a.into_int_value(), b.into_int_value(), name).expect("build_int_sub").into()
+        self.builder
+            .build_int_sub(a.into_int_value(), b.into_int_value(), name)
+            .expect("build_int_sub")
+            .into()
     }
 
     pub fn int_mul(&self, a: Value<'ctx>, b: Value<'ctx>, name: &str) -> Value<'ctx> {
-        self.builder.build_int_mul(a.into_int_value(), b.into_int_value(), name).expect("build_int_mul").into()
+        self.builder
+            .build_int_mul(a.into_int_value(), b.into_int_value(), name)
+            .expect("build_int_mul")
+            .into()
     }
 
     pub fn int_signed_div(&self, a: Value<'ctx>, b: Value<'ctx>, name: &str) -> Value<'ctx> {
-        self.builder.build_int_signed_div(a.into_int_value(), b.into_int_value(), name).expect("build_int_signed_div").into()
+        self.builder
+            .build_int_signed_div(a.into_int_value(), b.into_int_value(), name)
+            .expect("build_int_signed_div")
+            .into()
     }
 
     pub fn int_unsigned_div(&self, a: Value<'ctx>, b: Value<'ctx>, name: &str) -> Value<'ctx> {
-        self.builder.build_int_unsigned_div(a.into_int_value(), b.into_int_value(), name).expect("build_int_unsigned_div").into()
+        self.builder
+            .build_int_unsigned_div(a.into_int_value(), b.into_int_value(), name)
+            .expect("build_int_unsigned_div")
+            .into()
     }
 
     pub fn int_signed_rem(&self, a: Value<'ctx>, b: Value<'ctx>, name: &str) -> Value<'ctx> {
-        self.builder.build_int_signed_rem(a.into_int_value(), b.into_int_value(), name).expect("build_int_signed_rem").into()
+        self.builder
+            .build_int_signed_rem(a.into_int_value(), b.into_int_value(), name)
+            .expect("build_int_signed_rem")
+            .into()
     }
 
     pub fn int_unsigned_rem(&self, a: Value<'ctx>, b: Value<'ctx>, name: &str) -> Value<'ctx> {
-        self.builder.build_int_unsigned_rem(a.into_int_value(), b.into_int_value(), name).expect("build_int_unsigned_rem").into()
+        self.builder
+            .build_int_unsigned_rem(a.into_int_value(), b.into_int_value(), name)
+            .expect("build_int_unsigned_rem")
+            .into()
     }
 
     pub fn int_neg(&self, a: Value<'ctx>, name: &str) -> Value<'ctx> {
-        self.builder.build_int_neg(a.into_int_value(), name).expect("build_int_neg").into()
+        self.builder
+            .build_int_neg(a.into_int_value(), name)
+            .expect("build_int_neg")
+            .into()
     }
 
     pub fn int_not(&self, a: Value<'ctx>, name: &str) -> Value<'ctx> {
-        self.builder.build_not(a.into_int_value(), name).expect("build_not").into()
+        self.builder
+            .build_not(a.into_int_value(), name)
+            .expect("build_not")
+            .into()
     }
 
     /// Sign- or zero-extends/truncates `a` to `target: IntType` per
     /// `signed` — used to widen every integer primitive uniformly to
     /// `i64` before handing it to `runtime`'s single `nether_i64_to_string`
     /// (`ToString`'s codegen, `nether_codegen`).
-    pub fn int_cast(&self, a: Value<'ctx>, target: Ty<'ctx>, signed: bool, name: &str) -> Value<'ctx> {
-        self.builder.build_int_cast_sign_flag(a.into_int_value(), target.into_int_type(), signed, name).expect("build_int_cast_sign_flag").into()
+    pub fn int_cast(
+        &self,
+        a: Value<'ctx>,
+        target: Ty<'ctx>,
+        signed: bool,
+        name: &str,
+    ) -> Value<'ctx> {
+        self.builder
+            .build_int_cast_sign_flag(a.into_int_value(), target.into_int_type(), signed, name)
+            .expect("build_int_cast_sign_flag")
+            .into()
     }
 
     pub fn float_ext(&self, a: Value<'ctx>, target: Ty<'ctx>, name: &str) -> Value<'ctx> {
-        self.builder.build_float_ext(a.into_float_value(), target.into_float_type(), name).expect("build_float_ext").into()
+        self.builder
+            .build_float_ext(a.into_float_value(), target.into_float_type(), name)
+            .expect("build_float_ext")
+            .into()
     }
 
-    pub fn select(&self, cond: Value<'ctx>, then_val: Value<'ctx>, else_val: Value<'ctx>, name: &str) -> Value<'ctx> {
-        self.builder.build_select(cond.into_int_value(), then_val, else_val, name).expect("build_select")
+    pub fn select(
+        &self,
+        cond: Value<'ctx>,
+        then_val: Value<'ctx>,
+        else_val: Value<'ctx>,
+        name: &str,
+    ) -> Value<'ctx> {
+        self.builder
+            .build_select(cond.into_int_value(), then_val, else_val, name)
+            .expect("build_select")
     }
 
     pub fn int_and(&self, a: Value<'ctx>, b: Value<'ctx>, name: &str) -> Value<'ctx> {
-        self.builder.build_and(a.into_int_value(), b.into_int_value(), name).expect("build_and").into()
+        self.builder
+            .build_and(a.into_int_value(), b.into_int_value(), name)
+            .expect("build_and")
+            .into()
     }
 
     pub fn int_or(&self, a: Value<'ctx>, b: Value<'ctx>, name: &str) -> Value<'ctx> {
-        self.builder.build_or(a.into_int_value(), b.into_int_value(), name).expect("build_or").into()
+        self.builder
+            .build_or(a.into_int_value(), b.into_int_value(), name)
+            .expect("build_or")
+            .into()
     }
 
-    pub fn int_compare(&self, pred: IntPredicate, a: Value<'ctx>, b: Value<'ctx>, name: &str) -> Value<'ctx> {
-        self.builder.build_int_compare(pred, a.into_int_value(), b.into_int_value(), name).expect("build_int_compare").into()
+    pub fn int_compare(
+        &self,
+        pred: IntPredicate,
+        a: Value<'ctx>,
+        b: Value<'ctx>,
+        name: &str,
+    ) -> Value<'ctx> {
+        self.builder
+            .build_int_compare(pred, a.into_int_value(), b.into_int_value(), name)
+            .expect("build_int_compare")
+            .into()
     }
 
     pub fn float_add(&self, a: Value<'ctx>, b: Value<'ctx>, name: &str) -> Value<'ctx> {
-        self.builder.build_float_add(a.into_float_value(), b.into_float_value(), name).expect("build_float_add").into()
+        self.builder
+            .build_float_add(a.into_float_value(), b.into_float_value(), name)
+            .expect("build_float_add")
+            .into()
     }
 
     pub fn float_sub(&self, a: Value<'ctx>, b: Value<'ctx>, name: &str) -> Value<'ctx> {
-        self.builder.build_float_sub(a.into_float_value(), b.into_float_value(), name).expect("build_float_sub").into()
+        self.builder
+            .build_float_sub(a.into_float_value(), b.into_float_value(), name)
+            .expect("build_float_sub")
+            .into()
     }
 
     pub fn float_mul(&self, a: Value<'ctx>, b: Value<'ctx>, name: &str) -> Value<'ctx> {
-        self.builder.build_float_mul(a.into_float_value(), b.into_float_value(), name).expect("build_float_mul").into()
+        self.builder
+            .build_float_mul(a.into_float_value(), b.into_float_value(), name)
+            .expect("build_float_mul")
+            .into()
     }
 
     pub fn float_div(&self, a: Value<'ctx>, b: Value<'ctx>, name: &str) -> Value<'ctx> {
-        self.builder.build_float_div(a.into_float_value(), b.into_float_value(), name).expect("build_float_div").into()
+        self.builder
+            .build_float_div(a.into_float_value(), b.into_float_value(), name)
+            .expect("build_float_div")
+            .into()
     }
 
     pub fn float_neg(&self, a: Value<'ctx>, name: &str) -> Value<'ctx> {
-        self.builder.build_float_neg(a.into_float_value(), name).expect("build_float_neg").into()
+        self.builder
+            .build_float_neg(a.into_float_value(), name)
+            .expect("build_float_neg")
+            .into()
     }
 
-    pub fn float_compare(&self, pred: FloatPredicate, a: Value<'ctx>, b: Value<'ctx>, name: &str) -> Value<'ctx> {
-        self.builder.build_float_compare(pred, a.into_float_value(), b.into_float_value(), name).expect("build_float_compare").into()
+    pub fn float_compare(
+        &self,
+        pred: FloatPredicate,
+        a: Value<'ctx>,
+        b: Value<'ctx>,
+        name: &str,
+    ) -> Value<'ctx> {
+        self.builder
+            .build_float_compare(pred, a.into_float_value(), b.into_float_value(), name)
+            .expect("build_float_compare")
+            .into()
     }
 
     // ---- Control flow / calls ------------------------------------------
 
     pub fn call(&self, f: Func<'ctx>, args: &[Value<'ctx>], name: &str) -> Option<Value<'ctx>> {
         let args: Vec<ArgValue<'ctx>> = args.iter().map(|v| (*v).into()).collect();
-        self.builder.build_call(f, &args, name).expect("build_call").try_as_basic_value().left()
+        self.builder
+            .build_call(f, &args, name)
+            .expect("build_call")
+            .try_as_basic_value()
+            .left()
     }
 
     pub fn indirect_call(
@@ -392,11 +541,15 @@ impl<'ctx> ModuleCx<'ctx> {
     }
 
     pub fn br(&self, target: Block<'ctx>) {
-        self.builder.build_unconditional_branch(target).expect("build_unconditional_branch");
+        self.builder
+            .build_unconditional_branch(target)
+            .expect("build_unconditional_branch");
     }
 
     pub fn cond_br(&self, cond: Value<'ctx>, then_block: Block<'ctx>, else_block: Block<'ctx>) {
-        self.builder.build_conditional_branch(cond.into_int_value(), then_block, else_block).expect("build_conditional_branch");
+        self.builder
+            .build_conditional_branch(cond.into_int_value(), then_block, else_block)
+            .expect("build_conditional_branch");
     }
 
     pub fn ret(&self, value: Option<Value<'ctx>>) {
@@ -431,7 +584,11 @@ impl<'ctx> ModuleCx<'ctx> {
     pub fn optimize(&self, level: u8) {
         let machine = self.target_machine();
         self.module
-            .run_passes(&format!("default<O{level}>"), &machine, PassBuilderOptions::create())
+            .run_passes(
+                &format!("default<O{level}>"),
+                &machine,
+                PassBuilderOptions::create(),
+            )
             .expect("run_passes");
     }
 
@@ -442,7 +599,9 @@ impl<'ctx> ModuleCx<'ctx> {
             self.optimize(self.opt_level);
         }
         let machine = self.target_machine();
-        machine.write_to_file(&self.module, FileType::Object, out).map_err(|e| std::io::Error::other(e.to_string()))
+        machine
+            .write_to_file(&self.module, FileType::Object, out)
+            .map_err(|e| std::io::Error::other(e.to_string()))
     }
 
     fn target_machine(&self) -> TargetMachine {
@@ -461,7 +620,14 @@ fn create_target_machine(target_triple: &str, opt_level: u8) -> Result<TargetMac
         _ => inkwell::OptimizationLevel::Aggressive,
     };
     target
-        .create_target_machine(&triple, "generic", "", optimization, RelocMode::PIC, CodeModel::Default)
+        .create_target_machine(
+            &triple,
+            "generic",
+            "",
+            optimization,
+            RelocMode::PIC,
+            CodeModel::Default,
+        )
         .ok_or_else(|| format!("cannot create target machine for `{target_triple}`"))
 }
 

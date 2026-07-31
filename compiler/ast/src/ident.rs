@@ -11,7 +11,10 @@ pub struct Ident {
 
 impl Ident {
     pub fn new(name: impl Into<Symbol>, span: Span) -> Self {
-        Ident { name: name.into(), span }
+        Ident {
+            name: name.into(),
+            span,
+        }
     }
 
     /// Whether this name is private per language-spec §4: a leading `_`.
@@ -41,6 +44,10 @@ pub struct Path {
 impl Path {
     pub fn single(id: NodeId, ident: Ident) -> Self {
         let span = ident.span;
-        Path { id, segments: vec![ident], span }
+        Path {
+            id,
+            segments: vec![ident],
+            span,
+        }
     }
 }

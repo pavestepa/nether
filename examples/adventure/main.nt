@@ -1,0 +1,31 @@
+mod combat;
+mod world;
+
+use self.combat.encounter;
+use self.world.Hero;
+use self.world.QuestState;
+use self.world.announce;
+use self.world.apply_event;
+use self.world.quest_text;
+use self.world.events.Event;
+
+fn main() {
+    let hero = Hero.new("Arin", 20);
+    println(announce(hero));
+    println(quest_text(QuestState.Active("Ancient Gate")));
+
+    let events = encounter(hero);
+    for event in events {
+        println(apply_event(hero, event));
+    }
+
+    let bonus = 5;
+    let reward = (base: i32) => {
+        base + bonus
+    };
+    hero.add_score(reward(10));
+
+    println(hero);
+    println(quest_text(QuestState.Completed(125)));
+    println(apply_event(hero, Event.Message("The road continues")));
+}

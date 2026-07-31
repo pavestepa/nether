@@ -111,54 +111,116 @@ pub enum HirExprKind {
     /// the desugared stand-in for an implicit `Into<String>` conversion
     /// (see this crate's module docs for why it isn't bound-checked yet).
     ToString(Box<HirExpr>),
-    Unary { op: UnaryOp, expr: Box<HirExpr> },
-    Binary { op: BinaryOp, lhs: Box<HirExpr>, rhs: Box<HirExpr> },
-    Assign { target: Box<HirExpr>, value: Box<HirExpr> },
+    Unary {
+        op: UnaryOp,
+        expr: Box<HirExpr>,
+    },
+    Binary {
+        op: BinaryOp,
+        lhs: Box<HirExpr>,
+        rhs: Box<HirExpr>,
+    },
+    Assign {
+        target: Box<HirExpr>,
+        value: Box<HirExpr>,
+    },
     /// Calling a first-class function/closure value whose callee isn't
     /// statically known to be one specific `HirFnId`.
-    Call { callee: Box<HirExpr>, args: Vec<HirExpr> },
+    Call {
+        callee: Box<HirExpr>,
+        args: Vec<HirExpr>,
+    },
     /// Calling one specific, statically-known function or method — the
     /// unified desugared form of `Type.method(...)`, `value.method(...)`,
     /// and a direct call to a standalone `fn` (language-spec §10:
     /// `typecheck` already determined exactly which callable this is).
-    CallStatic { fn_id: HirFnId, args: Vec<HirExpr> },
+    CallStatic {
+        fn_id: HirFnId,
+        /// Concrete generic arguments in the target function's declared
+        /// order. Empty for non-generic calls.
+        generic_args: Vec<Type>,
+        args: Vec<HirExpr>,
+    },
     /// `println`/`print` — kept distinct since they're variadic and have
     /// no `HirFnId`/[`nether_typecheck::FnSig`] of their own.
-    CallBuiltin { name: Symbol, args: Vec<HirExpr> },
+    CallBuiltin {
+        name: Symbol,
+        args: Vec<HirExpr>,
+    },
     /// A named-field access already resolved to its position within the
     /// struct's declared field order.
-    Field { base: Box<HirExpr>, index: u32 },
-    Index { base: Box<HirExpr>, index: Box<HirExpr> },
+    Field {
+        base: Box<HirExpr>,
+        index: u32,
+    },
+    Index {
+        base: Box<HirExpr>,
+        index: Box<HirExpr>,
+    },
     /// Constructs a struct or tuple-struct. Both source syntaxes —
     /// `Dog { name }` and `Point(x, y)` — unify to this one positional
     /// -field shape (language-spec/architecture: tuple-struct construction
     /// desugars to the same shape as struct-literal construction).
-    Construct { ty: DefId, fields: Vec<HirExpr> },
-    ConstructVariant { enum_id: DefId, variant: u32, payload: Vec<HirExpr> },
+    Construct {
+        ty: DefId,
+        fields: Vec<HirExpr>,
+    },
+    ConstructVariant {
+        enum_id: DefId,
+        variant: u32,
+        payload: Vec<HirExpr>,
+    },
     /// A method call on a value whose type is still an unsubstituted
     /// generic parameter — resolvable only once `monomorphization`
     /// substitutes a concrete type for it. Kept
     /// distinct from [`HirExprKind::CallStatic`] since there is no single
     /// `HirFnId` to call until then; `bound_interface` names which
     /// interface declares `method_name`.
-    CallGenericMethod { receiver: Box<HirExpr>, bound_interface: DefId, method_name: Symbol, args: Vec<HirExpr> },
+    CallGenericMethod {
+        receiver: Box<HirExpr>,
+        bound_interface: DefId,
+        method_name: Symbol,
+        is_static: bool,
+        generic_args: Vec<Type>,
+        args: Vec<HirExpr>,
+    },
     /// `Array<T>`'s runtime methods (`push`/`pop`/`len`, language-spec
     /// §3.5) — provided by `runtime/array`, not backed by any `HirFnId`,
     /// the same reason `println`/`print` get [`HirExprKind::CallBuiltin`].
-    CallArrayMethod { receiver: Box<HirExpr>, method: Symbol, args: Vec<HirExpr> },
-    If { cond: Box<HirExpr>, then_branch: Box<HirExpr>, else_branch: Option<Box<HirExpr>> },
-    Match { scrutinee: Box<HirExpr>, arms: Vec<HirMatchArm> },
+    CallArrayMethod {
+        receiver: Box<HirExpr>,
+        method: Symbol,
+        args: Vec<HirExpr>,
+    },
+    If {
+        cond: Box<HirExpr>,
+        then_branch: Box<HirExpr>,
+        else_branch: Option<Box<HirExpr>>,
+    },
+    Match {
+        scrutinee: Box<HirExpr>,
+        arms: Vec<HirMatchArm>,
+    },
     Block(Vec<HirStmt>, Option<Box<HirExpr>>),
-    While { cond: Box<HirExpr>, body: Box<HirExpr> },
+    While {
+        cond: Box<HirExpr>,
+        body: Box<HirExpr>,
+    },
     /// `for pattern in iter { body }` is fully desugared away by this
     /// point into a `Block` around synthesized index/length temporaries
     /// and a `While` — see `lower.rs`'s `lower_for_in`. There is
     /// deliberately no `ForIn` variant left in HIR.
-    Loop { body: Box<HirExpr> },
+    Loop {
+        body: Box<HirExpr>,
+    },
     Break(Option<Box<HirExpr>>),
     Continue,
     Return(Option<Box<HirExpr>>),
-    Closure { params: Vec<HirParam>, captures: Vec<HirCapture>, body: Box<HirExpr> },
+    Closure {
+        params: Vec<HirParam>,
+        captures: Vec<HirCapture>,
+        body: Box<HirExpr>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -168,7 +230,11 @@ pub struct HirStmt {
 
 #[derive(Debug, Clone)]
 pub enum HirStmtKind {
-    Let { local: HirLocalId, ty: Type, value: HirExpr },
+    Let {
+        local: HirLocalId,
+        ty: Type,
+        value: HirExpr,
+    },
     Expr(HirExpr),
 }
 
@@ -184,5 +250,9 @@ pub enum HirPattern {
     Binding(HirLocalId),
     Literal(Literal),
     Tuple(Vec<HirPattern>),
-    Variant { enum_id: DefId, variant: u32, payload: Vec<HirPattern> },
+    Variant {
+        enum_id: DefId,
+        variant: u32,
+        payload: Vec<HirPattern>,
+    },
 }

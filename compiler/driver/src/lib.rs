@@ -150,22 +150,46 @@ pub fn compile(path: &Path, options: &CompileOptions) -> Result<CheckResult, std
                     .copied();
                 if let Some(main_id) = entry_main {
                     let m = nether_monomorphization::monomorphize(&lowered, main_id);
-                    let mut functions = nether_mir::build_mir(&m, &r.definitions, &lowered.signatures);
+                    let mut functions =
+                        nether_mir::build_mir(&m, &r.definitions, &lowered.signatures);
                     nether_mir::insert_arc(&mut functions);
 
-                    let cg = nether_llvm::Codegen::with_target(&options.target_triple, options.opt_level)
-                        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
-                    let module_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("nether_module");
-                    let llvm_module = nether_codegen::generate(&cg, module_name, &functions, &r.definitions, &lowered.signatures);
-                    llvm_module.verify().unwrap_or_else(|e| panic!("nether_codegen produced an invalid LLVM module:\n{}\n\nerror: {e}", llvm_module.print_to_string()));
+                    let cg = nether_llvm::Codegen::with_target(
+                        &options.target_triple,
+                        options.opt_level,
+                    )
+                    .map_err(|error| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidInput, error)
+                    })?;
+                    let module_name = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("nether_module");
+                    let llvm_module = nether_codegen::generate(
+                        &cg,
+                        module_name,
+                        &functions,
+                        &r.definitions,
+                        &lowered.signatures,
+                    );
+                    llvm_module.verify().unwrap_or_else(|e| {
+                        panic!(
+                            "nether_codegen produced an invalid LLVM module:\n{}\n\nerror: {e}",
+                            llvm_module.print_to_string()
+                        )
+                    });
                     let out = options
                         .output_path
                         .as_ref()
                         .map(|output| output.with_extension("o"))
                         .unwrap_or_else(|| path.with_extension("o"));
                     llvm_module.emit_object(&out)?;
-                    let executable = options.output_path.clone().unwrap_or_else(|| path.with_extension(""));
-                    if options.link && options.target_triple == nether_llvm::Codegen::host_triple() {
+                    let executable = options
+                        .output_path
+                        .clone()
+                        .unwrap_or_else(|| path.with_extension(""));
+                    if options.link && options.target_triple == nether_llvm::Codegen::host_triple()
+                    {
                         executable_path = link::link(&out, &executable)?;
                     }
                     object_path = Some(out);
@@ -179,18 +203,33 @@ pub fn compile(path: &Path, options: &CompileOptions) -> Result<CheckResult, std
         resolved = Some(r);
     }
 
-    Ok(CheckResult { module, resolved, hir, mono, mir, object_path, executable_path, source_map, diagnostics })
+    Ok(CheckResult {
+        module,
+        resolved,
+        hir,
+        mono,
+        mir,
+        object_path,
+        executable_path,
+        source_map,
+        diagnostics,
+    })
 }
 
-/// Loads the entry file and every local module named by a `use` path.
-/// Files are modules; `use user.User` looks for `user.<entry extension>`
-/// next to the importing file (with `.nt`/`.nr` fallbacks), while
-/// `use models.user.User` looks under `models/user`.
+/// Loads the entry file and its module graph. `mod user;` declares a
+/// child at `user.nt`/`user.nr` or `user/mod.nt`/`user/mod.nr`; `use`
+/// imports a declaration from a loaded relative module. `self`, `super`
+/// and `crate` may start a use path. Legacy direct `use user.User`
+/// loading remains accepted, and `stdlib.*` resolves from the workspace
+/// root.
 ///
 /// Loaded module items share one code-generation unit, while resolver
 /// namespaces remain separated by `FileId`. NodeIds are unique across the
 /// graph and every Span keeps its source file for precise diagnostics.
-fn load_module_graph(path: &Path, source_map: &mut SourceMap) -> std::io::Result<(Module, Vec<Diagnostic>)> {
+fn load_module_graph(
+    path: &Path,
+    source_map: &mut SourceMap,
+) -> std::io::Result<(Module, Vec<Diagnostic>)> {
     let mut visited = HashMap::new();
     let mut items = Vec::new();
     let mut diagnostics = Vec::new();
@@ -205,6 +244,8 @@ fn load_module_graph(path: &Path, source_map: &mut SourceMap) -> std::io::Result
         &mut diagnostics,
         &mut imports,
         &mut next_node_id,
+        None,
+        None,
     )?;
     Ok((
         Module {
@@ -224,6 +265,8 @@ fn load_module_recursive(
     diagnostics: &mut Vec<Diagnostic>,
     imports: &mut HashMap<nether_ast::NodeId, nether_diagnostics::FileId>,
     next_node_id: &mut u32,
+    parent: Option<(PathBuf, nether_diagnostics::FileId)>,
+    crate_root: Option<(PathBuf, nether_diagnostics::FileId)>,
 ) -> std::io::Result<nether_diagnostics::FileId> {
     let normalized = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     if let Some(&file) = visited.get(&normalized) {
@@ -237,8 +280,47 @@ fn load_module_recursive(
     *next_node_id = next;
     diagnostics.append(&mut parse_diagnostics);
 
+    let crate_root = crate_root.unwrap_or_else(|| (normalized.clone(), file));
+
+    // Declare children before resolving imports, matching Rust's
+    // `mod child;` model and making a child's `use super.Name;` point
+    // back at this exact file namespace.
     for item in &module.items {
-        let nether_ast::Item::Use(use_decl) = item else { continue };
+        let nether_ast::Item::Mod(mod_decl) = item else {
+            continue;
+        };
+        match resolve_child_module_file(&normalized, &mod_decl.name) {
+            Some(module_path) => {
+                load_module_recursive(
+                    &module_path,
+                    source_map,
+                    visited,
+                    all_items,
+                    diagnostics,
+                    imports,
+                    next_node_id,
+                    Some((normalized.clone(), file)),
+                    Some(crate_root.clone()),
+                )?;
+            }
+            None => diagnostics.push(
+                Diagnostic::error(format!("cannot find child module `{}`", mod_decl.name.name))
+                    .with_label(
+                        mod_decl.name.span,
+                        "expected a sibling module file or module directory",
+                    )
+                    .with_hint(format!(
+                        "create `{}.nt` or `{}/mod.nt` next to this module",
+                        mod_decl.name.name, mod_decl.name.name
+                    )),
+            ),
+        }
+    }
+
+    for item in &module.items {
+        let nether_ast::Item::Use(use_decl) = item else {
+            continue;
+        };
         if use_decl.path.segments.len() < 2 {
             diagnostics.push(
                 Diagnostic::error("a `use` path must contain a module and an imported name")
@@ -247,8 +329,20 @@ fn load_module_recursive(
             continue;
         }
         let module_segments = &use_decl.path.segments[..use_decl.path.segments.len() - 1];
-        match resolve_module_file(&normalized, module_segments) {
-            Some(module_path) => {
+        match resolve_use_module(
+            &normalized,
+            file,
+            parent.as_ref(),
+            &crate_root,
+            module_segments,
+        ) {
+            Ok(ModuleTarget::Loaded(target_file)) => {
+                imports.insert(use_decl.id, target_file);
+            }
+            Ok(ModuleTarget::File {
+                path: module_path,
+                parent: target_parent,
+            }) => {
                 let target_file = load_module_recursive(
                     &module_path,
                     source_map,
@@ -257,15 +351,22 @@ fn load_module_recursive(
                     diagnostics,
                     imports,
                     next_node_id,
+                    target_parent,
+                    Some(crate_root.clone()),
                 )?;
                 imports.insert(use_decl.id, target_file);
             }
-            None => diagnostics.push(
+            Err(message) => diagnostics.push(
                 Diagnostic::error(format!(
-                    "cannot find local module `{}`",
-                    module_segments.iter().map(|segment| segment.name.as_str()).collect::<Vec<_>>().join(".")
+                    "cannot find module `{}`",
+                    module_segments
+                        .iter()
+                        .map(|segment| segment.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(".")
                 ))
-                .with_label(use_decl.path.span, "module file not found"),
+                .with_label(use_decl.path.span, "module not found")
+                .with_hint(message),
             ),
         }
     }
@@ -273,24 +374,121 @@ fn load_module_recursive(
     Ok(file)
 }
 
+enum ModuleTarget {
+    Loaded(nether_diagnostics::FileId),
+    File {
+        path: PathBuf,
+        parent: Option<(PathBuf, nether_diagnostics::FileId)>,
+    },
+}
+
+fn resolve_use_module(
+    importer: &Path,
+    importer_file: nether_diagnostics::FileId,
+    parent: Option<&(PathBuf, nether_diagnostics::FileId)>,
+    crate_root: &(PathBuf, nether_diagnostics::FileId),
+    segments: &[nether_ast::Ident],
+) -> Result<ModuleTarget, String> {
+    let first = segments
+        .first()
+        .map(|segment| segment.name.as_str())
+        .unwrap_or("self");
+    let (base_path, base_file, remaining, target_parent) = match first {
+        "self" => (
+            importer.to_path_buf(),
+            importer_file,
+            &segments[1..],
+            Some((importer.to_path_buf(), importer_file)),
+        ),
+        "super" => {
+            let Some((parent_path, parent_file)) = parent else {
+                return Err("the crate root has no parent module".to_string());
+            };
+            (
+                parent_path.clone(),
+                *parent_file,
+                &segments[1..],
+                Some((parent_path.clone(), *parent_file)),
+            )
+        }
+        "crate" => (
+            crate_root.0.clone(),
+            crate_root.1,
+            &segments[1..],
+            Some(crate_root.clone()),
+        ),
+        _ => (
+            importer.to_path_buf(),
+            importer_file,
+            segments,
+            Some((importer.to_path_buf(), importer_file)),
+        ),
+    };
+
+    if remaining.is_empty() {
+        return Ok(ModuleTarget::Loaded(base_file));
+    }
+    if let Some(path) = resolve_module_file(&base_path, remaining) {
+        return Ok(ModuleTarget::File {
+            path,
+            parent: target_parent,
+        });
+    }
+
+    // Bundled modules are an external root rather than children that each
+    // user crate must redeclare with `mod stdlib;`.
+    if first == "stdlib" {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        if let Some(path) = resolve_module_file_from_root(&workspace, segments) {
+            return Ok(ModuleTarget::File { path, parent: None });
+        }
+    }
+    Err("declare local children with `mod name;` and check the module file path".to_string())
+}
+
+fn resolve_child_module_file(declaring_module: &Path, name: &nether_ast::Ident) -> Option<PathBuf> {
+    let segment = std::slice::from_ref(name);
+    resolve_module_file(declaring_module, segment)
+}
+
 fn resolve_module_file(importer: &Path, segments: &[nether_ast::Ident]) -> Option<PathBuf> {
-    let mut roots = vec![importer.parent()?.to_path_buf()];
-    roots.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
+    let parent = importer.parent()?;
+    let stem = importer.file_stem().and_then(|stem| stem.to_str())?;
+    let mut roots = Vec::new();
+    if !matches!(stem, "main" | "lib" | "mod") {
+        roots.push(parent.join(stem));
+    }
+    roots.push(parent.to_path_buf());
+    for root in roots {
+        if let Some(path) = resolve_module_file_from_root(&root, segments) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn resolve_module_file_from_root(root: &Path, segments: &[nether_ast::Ident]) -> Option<PathBuf> {
     let mut extensions = Vec::new();
-    if let Some(ext) = importer.extension().and_then(|ext| ext.to_str()) {
+    // Prefer the source extension used by the path's surrounding tree,
+    // then accept both Nether extensions.
+    if let Some(ext) = root.extension().and_then(|ext| ext.to_str()) {
         extensions.push(ext);
     }
     extensions.extend(["nt", "nr"]);
-    for root in roots {
-        let mut base = root;
-        for segment in segments {
-            base.push(segment.name.as_str());
+    extensions.sort();
+    extensions.dedup();
+    let mut base = root.to_path_buf();
+    for segment in segments {
+        base.push(segment.name.as_str());
+    }
+    for extension in &extensions {
+        let flat = base.with_extension(extension);
+        if flat.is_file() {
+            return Some(flat);
         }
-        for extension in &extensions {
-            let candidate = base.with_extension(extension);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
+        let nested = base.join(format!("mod.{extension}"));
+        if nested.is_file() {
+            return Some(nested);
         }
     }
     None

@@ -1,6 +1,6 @@
 use nether_ast::{
-    EnumDecl, EnumVariant, Field, FnDecl, GenericParam, ImplBlock, InterfaceDecl, Item, Param,
-    SelfParam, TypeDecl, TypeDeclKind, UseDecl,
+    EnumDecl, EnumVariant, Field, FnDecl, GenericParam, ImplBlock, InterfaceDecl, Item, ModDecl,
+    Param, SelfParam, TypeDecl, TypeDeclKind, UseDecl,
 };
 use nether_lexer::{Keyword, Punct, Token};
 
@@ -24,15 +24,18 @@ impl Parser {
             Token::Keyword(Keyword::Type) => self.parse_type_decl(doc).map(Item::Type),
             Token::Keyword(Keyword::Impl) => self.parse_impl_block().map(Item::Impl),
             Token::Keyword(Keyword::Enum) => self.parse_enum_decl(doc).map(Item::Enum),
-            Token::Keyword(Keyword::Interface) => self.parse_interface_decl(doc).map(Item::Interface),
+            Token::Keyword(Keyword::Interface) => {
+                self.parse_interface_decl(doc).map(Item::Interface)
+            }
             Token::Keyword(Keyword::Fn) => self.parse_fn_decl(doc).map(Item::Fn),
             Token::Keyword(Keyword::Use) => self.parse_use_decl().map(Item::Use),
+            Token::Keyword(Keyword::Mod) => self.parse_mod_decl().map(Item::Mod),
             other => {
                 let span = self.peek_span();
                 self.error(
                     span,
                     format!(
-                        "expected an item (`type`, `impl`, `enum`, `interface`, `fn`, `use`), found {other:?}"
+                        "expected an item (`type`, `impl`, `enum`, `interface`, `fn`, `use`, `mod`), found {other:?}"
                     ),
                 );
                 None
@@ -67,6 +70,7 @@ impl Parser {
                     | Token::Keyword(Keyword::Interface)
                     | Token::Keyword(Keyword::Fn)
                     | Token::Keyword(Keyword::Use)
+                    | Token::Keyword(Keyword::Mod)
             ) {
                 break;
             }
@@ -79,6 +83,7 @@ impl Parser {
         let id = self.next_id();
         let name = self.expect_ident();
         let generics = self.parse_optional_generic_params();
+        let interfaces = self.parse_interface_list();
         let kind = match self.peek() {
             Token::Punct(Punct::LBrace) => {
                 self.bump();
@@ -111,12 +116,23 @@ impl Parser {
             }
             other => {
                 let span = self.peek_span();
-                self.error(span, format!("expected `{{`, `(`, or `;` after a type name, found {other:?}"));
+                self.error(
+                    span,
+                    format!("expected `{{`, `(`, or `;` after a type name, found {other:?}"),
+                );
                 TypeDeclKind::Unit
             }
         };
         let end = self.prev_span();
-        Some(TypeDecl { id, name, generics, kind, doc, span: start.to(end) })
+        Some(TypeDecl {
+            id,
+            name,
+            generics,
+            interfaces,
+            kind,
+            doc,
+            span: start.to(end),
+        })
     }
 
     fn parse_field(&mut self) -> Field {
@@ -132,7 +148,7 @@ impl Parser {
         let start = self.expect_keyword(Keyword::Impl);
         let id = self.next_id();
         let target = self.expect_ident();
-        let interface = if self.eat_punct(Punct::Colon) { Some(self.parse_type_expr()) } else { None };
+        let interfaces = self.parse_interface_list();
         self.expect_punct(Punct::LBrace, "to start an impl body");
         let mut methods = Vec::new();
         while !matches!(self.peek(), Token::Punct(Punct::RBrace)) && !self.is_eof() {
@@ -145,7 +161,13 @@ impl Parser {
             }
         }
         let end = self.expect_punct(Punct::RBrace, "to close an impl body");
-        Some(ImplBlock { id, target, interface, methods, span: start.to(end) })
+        Some(ImplBlock {
+            id,
+            target,
+            interfaces,
+            methods,
+            span: start.to(end),
+        })
     }
 
     fn parse_enum_decl(&mut self, doc: Option<String>) -> Option<EnumDecl> {
@@ -153,6 +175,7 @@ impl Parser {
         let id = self.next_id();
         let name = self.expect_ident();
         let generics = self.parse_optional_generic_params();
+        let interfaces = self.parse_interface_list();
         self.expect_punct(Punct::LBrace, "to start an enum body");
         let mut variants = Vec::new();
         while !matches!(self.peek(), Token::Punct(Punct::RBrace)) && !self.is_eof() {
@@ -162,7 +185,15 @@ impl Parser {
             }
         }
         let end = self.expect_punct(Punct::RBrace, "to close an enum body");
-        Some(EnumDecl { id, name, generics, variants, doc, span: start.to(end) })
+        Some(EnumDecl {
+            id,
+            name,
+            generics,
+            interfaces,
+            variants,
+            doc,
+            span: start.to(end),
+        })
     }
 
     fn parse_enum_variant(&mut self) -> EnumVariant {
@@ -181,8 +212,15 @@ impl Parser {
         } else {
             Vec::new()
         };
-        let span = payload.last().map(|t| name.span.to(t.span())).unwrap_or(name.span);
-        EnumVariant { name, payload, span }
+        let span = payload
+            .last()
+            .map(|t| name.span.to(t.span()))
+            .unwrap_or(name.span);
+        EnumVariant {
+            name,
+            payload,
+            span,
+        }
     }
 
     fn parse_interface_decl(&mut self, doc: Option<String>) -> Option<InterfaceDecl> {
@@ -190,6 +228,7 @@ impl Parser {
         let id = self.next_id();
         let name = self.expect_ident();
         let generics = self.parse_optional_generic_params();
+        let parents = self.parse_interface_list();
         self.expect_punct(Punct::LBrace, "to start an interface body");
         let mut methods = Vec::new();
         while !matches!(self.peek(), Token::Punct(Punct::RBrace)) && !self.is_eof() {
@@ -202,15 +241,50 @@ impl Parser {
             }
         }
         let end = self.expect_punct(Punct::RBrace, "to close an interface body");
-        Some(InterfaceDecl { id, name, generics, methods, doc, span: start.to(end) })
+        Some(InterfaceDecl {
+            id,
+            name,
+            generics,
+            parents,
+            methods,
+            doc,
+            span: start.to(end),
+        })
+    }
+
+    fn parse_interface_list(&mut self) -> Vec<nether_ast::TypeExpr> {
+        if !self.eat_punct(Punct::Colon) {
+            return Vec::new();
+        }
+        let mut interfaces = vec![self.parse_type_expr()];
+        while self.eat_punct(Punct::Comma) {
+            interfaces.push(self.parse_type_expr());
+        }
+        interfaces
     }
 
     fn parse_use_decl(&mut self) -> Option<UseDecl> {
         let start = self.expect_keyword(Keyword::Use);
         let id = self.next_id();
-        let path = self.parse_path();
+        let path = self.parse_use_path();
         let end = self.expect_punct(Punct::Semi, "after a use declaration");
-        Some(UseDecl { id, path, span: start.to(end) })
+        Some(UseDecl {
+            id,
+            path,
+            span: start.to(end),
+        })
+    }
+
+    fn parse_mod_decl(&mut self) -> Option<ModDecl> {
+        let start = self.expect_keyword(Keyword::Mod);
+        let id = self.next_id();
+        let name = self.expect_ident();
+        let end = self.expect_punct(Punct::Semi, "after a module declaration");
+        Some(ModDecl {
+            id,
+            name,
+            span: start.to(end),
+        })
     }
 
     /// A standalone `fn` declaration — always has the `fn` keyword and
@@ -223,7 +297,11 @@ impl Parser {
         self.expect_punct(Punct::LParen, "to start a parameter list");
         let params = self.parse_params_list();
         self.expect_punct(Punct::RParen, "to close a parameter list");
-        let ret = if self.eat_punct(Punct::Colon) { Some(self.parse_type_expr()) } else { None };
+        let ret = if self.eat_punct(Punct::Colon) {
+            Some(self.parse_type_expr())
+        } else {
+            None
+        };
         let body = if matches!(self.peek(), Token::Punct(Punct::LBrace)) {
             Some(self.parse_block())
         } else {
@@ -236,7 +314,18 @@ impl Parser {
             .or_else(|| ret.as_ref().map(|r| r.span()))
             .unwrap_or_else(|| self.prev_span());
         let private = name.is_underscore_private();
-        Some(FnDecl { id, name, generics, self_param: None, params, ret, body, private, doc, span: start.to(end) })
+        Some(FnDecl {
+            id,
+            name,
+            generics,
+            self_param: None,
+            params,
+            ret,
+            body,
+            private,
+            doc,
+            span: start.to(end),
+        })
     }
 
     /// A method inside `impl`/`interface` — no `fn` keyword (language-spec
@@ -248,7 +337,10 @@ impl Parser {
         let is_private_kw = self.eat_keyword(Keyword::Private);
         if !matches!(self.peek(), Token::Ident(_)) {
             let span = self.peek_span();
-            self.error(span, format!("expected a method name, found {:?}", self.peek()));
+            self.error(
+                span,
+                format!("expected a method name, found {:?}", self.peek()),
+            );
             return None;
         }
         let id = self.next_id();
@@ -258,7 +350,11 @@ impl Parser {
         let self_param = self.parse_optional_self_param();
         let params = self.parse_params_list();
         self.expect_punct(Punct::RParen, "to close a parameter list");
-        let ret = if self.eat_punct(Punct::Colon) { Some(self.parse_type_expr()) } else { None };
+        let ret = if self.eat_punct(Punct::Colon) {
+            Some(self.parse_type_expr())
+        } else {
+            None
+        };
         let body = if matches!(self.peek(), Token::Punct(Punct::LBrace)) {
             Some(self.parse_block())
         } else {
@@ -271,7 +367,18 @@ impl Parser {
             .or_else(|| ret.as_ref().map(|r| r.span()))
             .unwrap_or_else(|| self.prev_span());
         let private = is_private_kw || name.is_underscore_private();
-        Some(FnDecl { id, name, generics, self_param, params, ret, body, private, doc, span: start.to(end) })
+        Some(FnDecl {
+            id,
+            name,
+            generics,
+            self_param,
+            params,
+            ret,
+            body,
+            private,
+            doc,
+            span: start.to(end),
+        })
     }
 
     fn parse_optional_self_param(&mut self) -> Option<SelfParam> {
@@ -310,7 +417,13 @@ impl Parser {
         self.expect_punct(Punct::Colon, "after a parameter name");
         let ty = self.parse_type_expr();
         let span = start.to(ty.span());
-        Param { id, name, mutable, ty, span }
+        Param {
+            id,
+            name,
+            mutable,
+            ty,
+            span,
+        }
     }
 
     fn parse_optional_generic_params(&mut self) -> Vec<GenericParam> {
@@ -320,7 +433,11 @@ impl Parser {
         let mut params = Vec::new();
         while !matches!(self.peek(), Token::Punct(Punct::Gt)) && !self.is_eof() {
             let name = self.expect_ident();
-            let bound = if self.eat_punct(Punct::Colon) { Some(self.parse_type_expr()) } else { None };
+            let bound = if self.eat_punct(Punct::Colon) {
+                Some(self.parse_type_expr())
+            } else {
+                None
+            };
             params.push(GenericParam { name, bound });
             if !self.eat_punct(Punct::Comma) {
                 break;

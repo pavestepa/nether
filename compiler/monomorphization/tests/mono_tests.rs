@@ -5,13 +5,25 @@ fn mono_source(source: &str) -> MonoModule {
     let mut map = nether_diagnostics::SourceMap::new();
     let file = map.add_file("test.nr", source);
     let (module, parse_diags) = nether_parser::parse_module(source, file);
-    assert!(parse_diags.is_empty(), "unexpected parse diagnostics: {parse_diags:?}");
+    assert!(
+        parse_diags.is_empty(),
+        "unexpected parse diagnostics: {parse_diags:?}"
+    );
     let (resolved, resolve_diags) = nether_resolver::resolve(&module);
-    assert!(resolve_diags.is_empty(), "unexpected resolve diagnostics: {resolve_diags:?}");
+    assert!(
+        resolve_diags.is_empty(),
+        "unexpected resolve diagnostics: {resolve_diags:?}"
+    );
     let (tables, check_diags) = nether_typecheck::check(&module, &resolved);
-    assert!(check_diags.is_empty(), "unexpected typecheck diagnostics: {check_diags:?}");
+    assert!(
+        check_diags.is_empty(),
+        "unexpected typecheck diagnostics: {check_diags:?}"
+    );
     let hir = nether_hir::lower(&module, &resolved, tables);
-    let main_id = *hir.fn_by_name.get(&Symbol::new("main")).expect("no `main` in test source");
+    let main_id = *hir
+        .fn_by_name
+        .get(&Symbol::new("main"))
+        .expect("no `main` in test source");
     monomorphize(&hir, main_id)
 }
 
@@ -32,15 +44,30 @@ fn find_expr<'a>(expr: &'a MonoExpr, pred: &dyn Fn(&MonoExprKind) -> bool) -> Op
             }
             tail.as_ref().and_then(|t| find_expr(t, pred))
         }
-        MonoExprKind::If { cond, then_branch, else_branch } => {
-            find_expr(cond, pred).or_else(|| find_expr(then_branch, pred)).or_else(|| else_branch.as_ref().and_then(|e| find_expr(e, pred)))
+        MonoExprKind::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => find_expr(cond, pred)
+            .or_else(|| find_expr(then_branch, pred))
+            .or_else(|| else_branch.as_ref().and_then(|e| find_expr(e, pred))),
+        MonoExprKind::While { cond, body } => {
+            find_expr(cond, pred).or_else(|| find_expr(body, pred))
         }
-        MonoExprKind::While { cond, body } => find_expr(cond, pred).or_else(|| find_expr(body, pred)),
-        MonoExprKind::Match { scrutinee, arms } => find_expr(scrutinee, pred).or_else(|| arms.iter().find_map(|a| find_expr(&a.body, pred))),
-        MonoExprKind::Call { callee, args } => find_expr(callee, pred).or_else(|| args.iter().find_map(|a| find_expr(a, pred))),
-        MonoExprKind::CallStatic { args, .. } | MonoExprKind::CallBuiltin { args, .. } => args.iter().find_map(|a| find_expr(a, pred)),
-        MonoExprKind::Binary { lhs, rhs, .. } => find_expr(lhs, pred).or_else(|| find_expr(rhs, pred)),
-        MonoExprKind::Assign { target, value } => find_expr(target, pred).or_else(|| find_expr(value, pred)),
+        MonoExprKind::Match { scrutinee, arms } => find_expr(scrutinee, pred)
+            .or_else(|| arms.iter().find_map(|a| find_expr(&a.body, pred))),
+        MonoExprKind::Call { callee, args } => {
+            find_expr(callee, pred).or_else(|| args.iter().find_map(|a| find_expr(a, pred)))
+        }
+        MonoExprKind::CallStatic { args, .. } | MonoExprKind::CallBuiltin { args, .. } => {
+            args.iter().find_map(|a| find_expr(a, pred))
+        }
+        MonoExprKind::Binary { lhs, rhs, .. } => {
+            find_expr(lhs, pred).or_else(|| find_expr(rhs, pred))
+        }
+        MonoExprKind::Assign { target, value } => {
+            find_expr(target, pred).or_else(|| find_expr(value, pred))
+        }
         _ => None,
     }
 }
@@ -59,7 +86,9 @@ fn all_calls(module: &MonoModule, from: MonoFnId, out: &mut Vec<MonoFnId>) {
             MonoExprKind::Block(stmts, tail) => {
                 for s in stmts {
                     match &s.kind {
-                        nether_monomorphization::MonoStmtKind::Let { value, .. } => walk(value, out),
+                        nether_monomorphization::MonoStmtKind::Let { value, .. } => {
+                            walk(value, out)
+                        }
                         nether_monomorphization::MonoStmtKind::Expr(e) => walk(e, out),
                     }
                 }
@@ -67,7 +96,11 @@ fn all_calls(module: &MonoModule, from: MonoFnId, out: &mut Vec<MonoFnId>) {
                     walk(t, out);
                 }
             }
-            MonoExprKind::If { cond, then_branch, else_branch } => {
+            MonoExprKind::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
                 walk(cond, out);
                 walk(then_branch, out);
                 if let Some(e) = else_branch {
@@ -136,7 +169,10 @@ impl Lang: Into<String> {
     // new/set_name/into_string are all reachable from main.
     assert!(mono.functions.iter().any(|f| f.name.as_str() == "new"));
     assert!(mono.functions.iter().any(|f| f.name.as_str() == "set_name"));
-    assert!(mono.functions.iter().any(|f| f.name.as_str() == "into_string"));
+    assert!(mono
+        .functions
+        .iter()
+        .any(|f| f.name.as_str() == "into_string"));
 }
 
 #[test]
@@ -149,7 +185,10 @@ fn main() { let x = used(); }
 "#,
     );
     assert!(mono.functions.iter().any(|f| f.name.as_str() == "used"));
-    assert!(!mono.functions.iter().any(|f| f.name.as_str() == "unused"), "dead code should not be monomorphized");
+    assert!(
+        !mono.functions.iter().any(|f| f.name.as_str() == "unused"),
+        "dead code should not be monomorphized"
+    );
 }
 
 #[test]
@@ -163,8 +202,15 @@ fn main() {
 }
 "#,
     );
-    let helper_count = mono.functions.iter().filter(|f| f.name.as_str() == "helper").count();
-    assert_eq!(helper_count, 1, "one shared non-generic function should collapse to a single MonoFunction");
+    let helper_count = mono
+        .functions
+        .iter()
+        .filter(|f| f.name.as_str() == "helper")
+        .count();
+    assert_eq!(
+        helper_count, 1,
+        "one shared non-generic function should collapse to a single MonoFunction"
+    );
 }
 
 #[test]
@@ -178,8 +224,15 @@ fn main() {
 }
 "#,
     );
-    let identity_count = mono.functions.iter().filter(|f| f.name.as_str() == "identity").count();
-    assert_eq!(identity_count, 2, "identity::<i32> and identity::<bool> should be two distinct MonoFunctions");
+    let identity_count = mono
+        .functions
+        .iter()
+        .filter(|f| f.name.as_str() == "identity")
+        .count();
+    assert_eq!(
+        identity_count, 2,
+        "identity::<i32> and identity::<bool> should be two distinct MonoFunctions"
+    );
 }
 
 #[test]
@@ -193,8 +246,15 @@ fn main() {
 }
 "#,
     );
-    let identity_count = mono.functions.iter().filter(|f| f.name.as_str() == "identity").count();
-    assert_eq!(identity_count, 1, "two calls with the same concrete type argument should memoize to one instantiation");
+    let identity_count = mono
+        .functions
+        .iter()
+        .filter(|f| f.name.as_str() == "identity")
+        .count();
+    assert_eq!(
+        identity_count, 1,
+        "two calls with the same concrete type argument should memoize to one instantiation"
+    );
 }
 
 #[test]
@@ -208,9 +268,15 @@ fn main() {
 "#,
     );
     for f in &mono.functions {
-        assert!(!matches!(f.ret, nether_typecheck::Type::Generic(_)), "no MonoFunction's return type should remain generic");
+        assert!(
+            !matches!(f.ret, nether_typecheck::Type::Generic(_)),
+            "no MonoFunction's return type should remain generic"
+        );
         for p in &f.params {
-            assert!(!matches!(p.ty, nether_typecheck::Type::Generic(_)), "no MonoFunction's param type should remain generic");
+            assert!(
+                !matches!(p.ty, nether_typecheck::Type::Generic(_)),
+                "no MonoFunction's param type should remain generic"
+            );
         }
     }
 }
@@ -225,11 +291,9 @@ interface Sound {
     }
 }
 type Dog { name: String }
-type Cat { name: String }
+type Cat: Sound { name: String }
 impl Dog: Sound {
     sound(self): String { "Woof" }
-}
-impl Cat: Sound {
 }
 fn make_noise<T: Sound>(x: T): String {
     x.sound()
@@ -243,31 +307,131 @@ fn main() {
 "#,
     );
     // Two distinct instantiations of make_noise, one per receiver type.
-    let make_noise_ids: Vec<MonoFnId> = mono.functions.iter().filter(|f| f.name.as_str() == "make_noise").map(|f| f.id).collect();
+    let make_noise_ids: Vec<MonoFnId> = mono
+        .functions
+        .iter()
+        .filter(|f| f.name.as_str() == "make_noise")
+        .map(|f| f.id)
+        .collect();
     assert_eq!(make_noise_ids.len(), 2);
 
     // Each instantiation's body must contain a CallStatic to the correct
     // owner's `sound` — not a leftover CallGenericMethod (there is no such
     // variant in MonoExprKind at all, so this also proves elimination
     // structurally).
-    let dog_sound_id = mono.functions.iter().find(|f| f.name.as_str() == "sound" && f.owner.is_some()).map(|f| f.id);
+    let dog_sound_id = mono
+        .functions
+        .iter()
+        .find(|f| f.name.as_str() == "sound" && f.owner.is_some())
+        .map(|f| f.id);
     assert!(dog_sound_id.is_some());
 
     let mut all_target_ids = Vec::new();
     for id in &make_noise_ids {
         let f = mono.get(*id);
         let found = find_expr(&f.body, &|k| matches!(k, MonoExprKind::CallStatic { .. }));
-        assert!(found.is_some(), "expected make_noise's body to contain a resolved CallStatic");
-        if let Some(MonoExpr { kind: MonoExprKind::CallStatic { fn_id, .. }, .. }) = found {
+        assert!(
+            found.is_some(),
+            "expected make_noise's body to contain a resolved CallStatic"
+        );
+        if let Some(MonoExpr {
+            kind: MonoExprKind::CallStatic { fn_id, .. },
+            ..
+        }) = found
+        {
             all_target_ids.push(*fn_id);
         }
     }
     assert_eq!(all_target_ids.len(), 2);
-    assert_ne!(all_target_ids[0], all_target_ids[1], "Dog's and Cat's `sound` are different concrete methods");
+    assert_ne!(
+        all_target_ids[0], all_target_ids[1],
+        "Dog's and Cat's `sound` are different concrete methods"
+    );
 
     let mut reached = Vec::new();
     all_calls(&mono, mono.entry, &mut reached);
     for id in &make_noise_ids {
-        assert!(reached.contains(id), "main should reach both make_noise instantiations");
+        assert!(
+            reached.contains(id),
+            "main should reach both make_noise instantiations"
+        );
     }
+}
+
+#[test]
+fn generic_static_method_call_does_not_pass_the_receiver() {
+    let mono = mono_source(
+        r#"
+interface Static { value(): String; }
+type Animal;
+impl Animal: Static {
+    value(): String { "A" }
+}
+fn read<T: Static>(animal: T): String {
+    animal.value()
+}
+fn main() {
+    let value = read(Animal);
+}
+"#,
+    );
+    let read = mono
+        .functions
+        .iter()
+        .find(|function| function.name.as_str() == "read")
+        .unwrap();
+    let call = find_expr(
+        &read.body,
+        &|kind| matches!(kind, MonoExprKind::CallStatic { args, .. } if args.is_empty()),
+    );
+    assert!(
+        call.is_some(),
+        "generic static call must not pass its receiver"
+    );
+}
+
+#[test]
+fn explicit_arguments_create_distinct_uninferable_instantiations() {
+    let mono = mono_source(
+        r#"
+fn opaque<T>(value: i32): i32 { value }
+fn main() {
+    let first = opaque<u32>(1);
+    let second = opaque<String>(2);
+}
+"#,
+    );
+    let instantiations = mono
+        .functions
+        .iter()
+        .filter(|function| function.name.as_str() == "opaque")
+        .count();
+    assert_eq!(instantiations, 2);
+}
+
+#[test]
+fn explicit_method_arguments_survive_generic_receiver_dispatch() {
+    let mono = mono_source(
+        r#"
+interface Transform {
+    transform<U>(self, value: U): U;
+}
+type Boxed<T> { value: T }
+impl Boxed: Transform {
+    transform<U>(self, value: U): U { value }
+}
+fn apply<T: Transform>(value: T): String {
+    value.transform<String>("ready")
+}
+fn main() {
+    let result = apply(Boxed { value: 1 });
+}
+"#,
+    );
+    assert!(
+        mono.functions.iter().any(|function| {
+            function.name.as_str() == "transform" && function.ret == nether_typecheck::Type::String
+        }),
+        "expected transform<Boxed<i32>, String> specialization"
+    );
 }

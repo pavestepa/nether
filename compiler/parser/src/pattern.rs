@@ -14,29 +14,44 @@ impl Parser {
             }
             Token::Ident(name) => {
                 self.bump();
-                if matches!(self.peek(), Token::Punct(Punct::Dot)) && matches!(self.peek_at(1), Token::Ident(_)) {
+                if matches!(self.peek(), Token::Punct(Punct::Dot))
+                    && matches!(self.peek_at(1), Token::Ident(_))
+                {
                     let mut segments = vec![Ident::new(name, start)];
-                    while matches!(self.peek(), Token::Punct(Punct::Dot)) && matches!(self.peek_at(1), Token::Ident(_))
+                    while matches!(self.peek(), Token::Punct(Punct::Dot))
+                        && matches!(self.peek_at(1), Token::Ident(_))
                     {
                         self.bump();
                         segments.push(self.expect_ident());
                     }
                     let path_span = segments[0].span.to(segments.last().unwrap().span);
                     let path_id = self.next_id();
-                    let path = Path { id: path_id, segments, span: path_span };
+                    let path = Path {
+                        id: path_id,
+                        segments,
+                        span: path_span,
+                    };
                     let (payload, end) = if matches!(self.peek(), Token::Punct(Punct::LParen)) {
                         self.parse_variant_payload_pattern()
                     } else {
                         (Vec::new(), path_span)
                     };
-                    Pattern::Variant { path, payload, span: path_span.to(end) }
+                    Pattern::Variant {
+                        path,
+                        payload,
+                        span: path_span.to(end),
+                    }
                 } else if matches!(self.peek(), Token::Punct(Punct::LParen)) {
                     // A single-segment variant pattern, e.g. bare `Custom(x)`
                     // without a qualifying enum name.
                     let path_id = self.next_id();
                     let path = Path::single(path_id, Ident::new(name, start));
                     let (payload, end) = self.parse_variant_payload_pattern();
-                    Pattern::Variant { path, payload, span: start.to(end) }
+                    Pattern::Variant {
+                        path,
+                        payload,
+                        span: start.to(end),
+                    }
                 } else {
                     let id = self.next_id();
                     Pattern::Binding(id, Ident::new(name, start))

@@ -30,7 +30,9 @@ pub(crate) struct Scopes {
 
 impl Scopes {
     pub(crate) fn new() -> Self {
-        Scopes { stack: vec![HashMap::new()] }
+        Scopes {
+            stack: vec![HashMap::new()],
+        }
     }
 
     pub(crate) fn push(&mut self) {
@@ -43,11 +45,17 @@ impl Scopes {
     }
 
     pub(crate) fn bind(&mut self, name: Symbol, id: LocalId) {
-        self.stack.last_mut().expect("at least one scope is always active").insert(name, id);
+        self.stack
+            .last_mut()
+            .expect("at least one scope is always active")
+            .insert(name, id);
     }
 
     pub(crate) fn lookup(&self, name: &Symbol) -> Option<LocalId> {
-        self.stack.iter().rev().find_map(|scope| scope.get(name).copied())
+        self.stack
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).copied())
     }
 
     /// Every name currently visible at a value-path use site. Inner

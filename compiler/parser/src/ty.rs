@@ -31,11 +31,18 @@ impl Parser {
                         break;
                     }
                 }
-                self.expect_punct(Punct::RParen, "to close a tuple or function parameter type list");
+                self.expect_punct(
+                    Punct::RParen,
+                    "to close a tuple or function parameter type list",
+                );
                 if self.eat_punct(Punct::FatArrow) {
                     let ret = self.parse_type_expr();
                     let span = start.to(ret.span());
-                    TypeExpr::Function { params: elems, ret: Box::new(ret), span }
+                    TypeExpr::Function {
+                        params: elems,
+                        ret: Box::new(ret),
+                        span,
+                    }
                 } else {
                     let end = self.prev_span();
                     TypeExpr::Tuple(elems, start.to(end))
@@ -44,8 +51,15 @@ impl Parser {
             Token::Ident(_) => {
                 let path = self.parse_path();
                 let generics = self.parse_optional_generic_args();
-                let span = generics.last().map(|g| path.span.to(g.span())).unwrap_or(path.span);
-                TypeExpr::Named { path, generics, span }
+                let span = generics
+                    .last()
+                    .map(|g| path.span.to(g.span()))
+                    .unwrap_or(path.span);
+                TypeExpr::Named {
+                    path,
+                    generics,
+                    span,
+                }
             }
             _ => {
                 let span = self.peek_span();

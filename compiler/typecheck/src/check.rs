@@ -1,9 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use nether_ast::{
-    BinaryOp, Block, EnumDecl, Expr, ExprKind, FnDecl, Ident, InterfaceDecl, Item, Literal,
-    Module, NodeId, Path, Pattern, Stmt, Symbol, TemplatePart, TypeDecl, TypeDeclKind, TypeExpr,
-    UnaryOp,
+    BinaryOp, Block, EnumDecl, Expr, ExprKind, FnDecl, Ident, InterfaceDecl, Item, Literal, Module,
+    NodeId, Path, Pattern, Stmt, Symbol, TemplatePart, TypeDecl, TypeDeclKind, TypeExpr, UnaryOp,
 };
 use nether_diagnostics::{Diagnostic, Span};
 use nether_resolver::{DefId, DefKind, Resolution, ResolvedNames};
@@ -23,6 +22,9 @@ pub struct TypedTables {
     /// `locals` map to look up a local's type by `LocalId` when lowering
     /// a leftover path segment (language-spec §10) whose base is a local.
     pub local_types: HashMap<NodeId, Type>,
+    /// Fully resolved generic arguments for each direct generic call,
+    /// ordered like the callee signature's generic parameter list.
+    pub call_generic_args: HashMap<NodeId, Vec<Type>>,
     pub signatures: Signatures,
 }
 
@@ -46,26 +48,17 @@ fn index_decls<'a>(module: &'a Module, resolved: &ResolvedNames) -> DeclIndex<'a
     for item in &module.items {
         match item {
             Item::Type(t) => {
-                if let Some(id) = resolved
-                    .definitions
-                    .lookup_in(t.span.file, &t.name.name)
-                {
+                if let Some(id) = resolved.definitions.lookup_in(t.span.file, &t.name.name) {
                     idx.type_decls.insert(id, t);
                 }
             }
             Item::Enum(e) => {
-                if let Some(id) = resolved
-                    .definitions
-                    .lookup_in(e.span.file, &e.name.name)
-                {
+                if let Some(id) = resolved.definitions.lookup_in(e.span.file, &e.name.name) {
                     idx.enum_decls.insert(id, e);
                 }
             }
             Item::Interface(i) => {
-                if let Some(id) = resolved
-                    .definitions
-                    .lookup_in(i.span.file, &i.name.name)
-                {
+                if let Some(id) = resolved.definitions.lookup_in(i.span.file, &i.name.name) {
                     idx.interface_decls.insert(id, i);
                 }
             }
@@ -82,16 +75,30 @@ fn index_decls<'a>(module: &'a Module, resolved: &ResolvedNames) -> DeclIndex<'a
 /// Converts a syntactic [`TypeExpr`] into a structured [`Type`], reading
 /// the [`Resolution`] `resolver` already computed for its [`Path`] rather
 /// than re-deriving name lookups itself.
-fn lower_type_expr(ty: &TypeExpr, resolved: &ResolvedNames, decls: &DeclIndex, diags: &mut Vec<Diagnostic>) -> Type {
+fn lower_type_expr(
+    ty: &TypeExpr,
+    resolved: &ResolvedNames,
+    decls: &DeclIndex,
+    diags: &mut Vec<Diagnostic>,
+) -> Type {
     match ty {
-        TypeExpr::Named { path, generics, .. } => lower_named_type(path, generics, resolved, decls, diags),
-        TypeExpr::Tuple(elems, _) => {
-            Type::Tuple(elems.iter().map(|e| lower_type_expr(e, resolved, decls, diags)).collect())
+        TypeExpr::Named { path, generics, .. } => {
+            lower_named_type(path, generics, resolved, decls, diags)
         }
-        TypeExpr::Array(inner, _) => Type::Array(Box::new(lower_type_expr(inner, resolved, decls, diags))),
+        TypeExpr::Tuple(elems, _) => Type::Tuple(
+            elems
+                .iter()
+                .map(|e| lower_type_expr(e, resolved, decls, diags))
+                .collect(),
+        ),
+        TypeExpr::Array(inner, _) => {
+            Type::Array(Box::new(lower_type_expr(inner, resolved, decls, diags)))
+        }
         TypeExpr::Weak(inner, span) => {
             let inner_ty = lower_type_expr(inner, resolved, decls, diags);
-            if !inner_ty.is_error() && crate::alloc::alloc_kind(&inner_ty, &resolved.definitions) != crate::alloc::AllocKind::Heap
+            if !inner_ty.is_error()
+                && crate::alloc::alloc_kind(&inner_ty, &resolved.definitions)
+                    != crate::alloc::AllocKind::Heap
             {
                 diags.push(
                     Diagnostic::error("`weak` can only wrap a heap-allocated type")
@@ -101,7 +108,10 @@ fn lower_type_expr(ty: &TypeExpr, resolved: &ResolvedNames, decls: &DeclIndex, d
             Type::Weak(Box::new(inner_ty))
         }
         TypeExpr::Function { params, ret, .. } => Type::Function(
-            params.iter().map(|p| lower_type_expr(p, resolved, decls, diags)).collect(),
+            params
+                .iter()
+                .map(|p| lower_type_expr(p, resolved, decls, diags))
+                .collect(),
             Box::new(lower_type_expr(ret, resolved, decls, diags)),
         ),
     }
@@ -128,9 +138,17 @@ fn lower_named_type(
             }
             if name == "Array" {
                 return if generics.len() == 1 {
-                    Type::Array(Box::new(lower_type_expr(&generics[0], resolved, decls, diags)))
+                    Type::Array(Box::new(lower_type_expr(
+                        &generics[0],
+                        resolved,
+                        decls,
+                        diags,
+                    )))
                 } else {
-                    diags.push(Diagnostic::error("`Array` takes exactly one type argument").with_label(path.span, "here"));
+                    diags.push(
+                        Diagnostic::error("`Array` takes exactly one type argument")
+                            .with_label(path.span, "here"),
+                    );
                     Type::Error
                 };
             }
@@ -158,7 +176,10 @@ fn lower_named_type(
                         );
                         return Type::Error;
                     }
-                    let args = generics.iter().map(|g| lower_type_expr(g, resolved, decls, diags)).collect();
+                    let args = generics
+                        .iter()
+                        .map(|g| lower_type_expr(g, resolved, decls, diags))
+                        .collect();
                     Type::Enum(id, args)
                 }
                 DefKind::Type => {
@@ -197,10 +218,7 @@ fn lower_named_type(
                         Diagnostic::error(format!(
                             "`{name}` is an interface and cannot be used as a value type"
                         ))
-                        .with_label(
-                            path.span,
-                            "use it as a generic bound instead",
-                        ),
+                        .with_label(path.span, "use it as a generic bound instead"),
                     );
                     Type::Error
                 }
@@ -231,7 +249,12 @@ fn lower_generic_bound(
     decls: &DeclIndex,
     diags: &mut Vec<Diagnostic>,
 ) -> Option<GenericBound> {
-    let TypeExpr::Named { path, generics, span } = ty else {
+    let TypeExpr::Named {
+        path,
+        generics,
+        span,
+    } = ty
+    else {
         diags.push(
             Diagnostic::error("a generic bound must name an interface")
                 .with_label(ty.span(), "not an interface"),
@@ -280,7 +303,12 @@ fn lower_generic_bound(
 // Signature collection
 // ---------------------------------------------------------------------
 
-fn build_fn_sig(f: &FnDecl, resolved: &ResolvedNames, decls: &DeclIndex, diags: &mut Vec<Diagnostic>) -> FnSig {
+fn build_fn_sig(
+    f: &FnDecl,
+    resolved: &ResolvedNames,
+    decls: &DeclIndex,
+    diags: &mut Vec<Diagnostic>,
+) -> FnSig {
     let generics = f
         .generics
         .iter()
@@ -302,11 +330,25 @@ fn build_fn_sig(f: &FnDecl, resolved: &ResolvedNames, decls: &DeclIndex, diags: 
             ty: lower_type_expr(&p.ty, resolved, decls, diags),
         })
         .collect();
-    let ret = f.ret.as_ref().map(|r| lower_type_expr(r, resolved, decls, diags)).unwrap_or_else(Type::unit);
-    FnSig { self_param: f.self_param, params, ret, generics }
+    let ret = f
+        .ret
+        .as_ref()
+        .map(|r| lower_type_expr(r, resolved, decls, diags))
+        .unwrap_or_else(Type::unit);
+    FnSig {
+        self_param: f.self_param,
+        params,
+        ret,
+        generics,
+    }
 }
 
-fn build_type_shapes(decls: &DeclIndex, resolved: &ResolvedNames, sigs: &mut Signatures, diags: &mut Vec<Diagnostic>) {
+fn build_type_shapes(
+    decls: &DeclIndex,
+    resolved: &ResolvedNames,
+    sigs: &mut Signatures,
+    diags: &mut Vec<Diagnostic>,
+) {
     for (&id, t) in &decls.type_decls {
         sigs.type_generics
             .insert(id, t.generics.iter().map(|g| g.name.name.clone()).collect());
@@ -318,28 +360,40 @@ fn build_type_shapes(decls: &DeclIndex, resolved: &ResolvedNames, sigs: &mut Sig
                     generic
                         .bound
                         .as_ref()
-                        .and_then(|bound| {
-                            lower_generic_bound(
-                                bound, resolved, decls, diags,
-                            )
-                        })
+                        .and_then(|bound| lower_generic_bound(bound, resolved, decls, diags))
                 })
                 .collect(),
         );
         let shape = match &t.kind {
             TypeDeclKind::Struct(fields) => TypeShape::Struct(
-                fields.iter().map(|f| (f.name.name.clone(), lower_type_expr(&f.ty, resolved, decls, diags))).collect(),
+                fields
+                    .iter()
+                    .map(|f| {
+                        (
+                            f.name.name.clone(),
+                            lower_type_expr(&f.ty, resolved, decls, diags),
+                        )
+                    })
+                    .collect(),
             ),
-            TypeDeclKind::TupleStruct(tys) => {
-                TypeShape::TupleStruct(tys.iter().map(|ty| lower_type_expr(ty, resolved, decls, diags)).collect())
-            }
+            TypeDeclKind::TupleStruct(tys) => TypeShape::TupleStruct(
+                tys.iter()
+                    .map(|ty| lower_type_expr(ty, resolved, decls, diags))
+                    .collect(),
+            ),
             TypeDeclKind::Unit => TypeShape::Unit,
         };
         sigs.type_shapes.insert(id, shape);
     }
 }
 
-fn build_enum_sigs(module: &Module, resolved: &ResolvedNames, decls: &DeclIndex, sigs: &mut Signatures, diags: &mut Vec<Diagnostic>) {
+fn build_enum_sigs(
+    module: &Module,
+    resolved: &ResolvedNames,
+    decls: &DeclIndex,
+    sigs: &mut Signatures,
+    diags: &mut Vec<Diagnostic>,
+) {
     // Option/Result are ordinary built-in generic enums.  They have no AST
     // declarations, so their structural signatures must be seeded here
     // explicitly just like their names/variants are seeded by resolver.
@@ -374,10 +428,9 @@ fn build_enum_sigs(module: &Module, resolved: &ResolvedNames, decls: &DeclIndex,
     }
     for item in &module.items {
         let Item::Enum(e) = item else { continue };
-        let Some(id) = resolved
-            .definitions
-            .lookup_in(e.span.file, &e.name.name)
-        else { continue };
+        let Some(id) = resolved.definitions.lookup_in(e.span.file, &e.name.name) else {
+            continue;
+        };
         let generics = e.generics.iter().map(|g| g.name.name.clone()).collect();
         sigs.generic_type_bounds.insert(
             id,
@@ -387,30 +440,37 @@ fn build_enum_sigs(module: &Module, resolved: &ResolvedNames, decls: &DeclIndex,
                     generic
                         .bound
                         .as_ref()
-                        .and_then(|bound| {
-                            lower_generic_bound(
-                                bound, resolved, decls, diags,
-                            )
-                        })
+                        .and_then(|bound| lower_generic_bound(bound, resolved, decls, diags))
                 })
                 .collect(),
         );
         let variants = e
             .variants
             .iter()
-            .map(|v| (v.name.name.clone(), v.payload.iter().map(|t| lower_type_expr(t, resolved, decls, diags)).collect()))
+            .map(|v| {
+                (
+                    v.name.name.clone(),
+                    v.payload
+                        .iter()
+                        .map(|t| lower_type_expr(t, resolved, decls, diags))
+                        .collect(),
+                )
+            })
             .collect();
         sigs.enum_sigs.insert(id, EnumSig { generics, variants });
     }
 }
 
-fn build_fn_sigs(module: &Module, resolved: &ResolvedNames, decls: &DeclIndex, sigs: &mut Signatures, diags: &mut Vec<Diagnostic>) {
+fn build_fn_sigs(
+    module: &Module,
+    resolved: &ResolvedNames,
+    decls: &DeclIndex,
+    sigs: &mut Signatures,
+    diags: &mut Vec<Diagnostic>,
+) {
     for item in &module.items {
         if let Item::Fn(f) = item {
-            if let Some(id) = resolved
-                .definitions
-                .lookup_in(f.span.file, &f.name.name)
-            {
+            if let Some(id) = resolved.definitions.lookup_in(f.span.file, &f.name.name) {
                 let sig = build_fn_sig(f, resolved, decls, diags);
                 sigs.fns.insert(id, sig);
             }
@@ -418,7 +478,22 @@ fn build_fn_sigs(module: &Module, resolved: &ResolvedNames, decls: &DeclIndex, s
     }
 }
 
-type InterfaceMethodTable = HashMap<DefId, HashMap<Symbol, (FnSig, bool)>>;
+#[derive(Clone)]
+struct InterfaceDefault {
+    source: DefId,
+    /// Source-interface generic parameters expressed in the current
+    /// interface's generic parameters.
+    subst: HashMap<Symbol, Type>,
+}
+
+#[derive(Clone)]
+struct InterfaceMethod {
+    sig: FnSig,
+    default: Option<InterfaceDefault>,
+    ambiguous_default: bool,
+}
+
+type InterfaceMethodTable = HashMap<DefId, HashMap<Symbol, InterfaceMethod>>;
 
 fn specialize_fn_sig(sig: &FnSig, subst: &HashMap<Symbol, Type>) -> FnSig {
     FnSig {
@@ -492,32 +567,165 @@ fn owner_generic_params(
                 generic
                     .bound
                     .as_ref()
-                    .and_then(|bound| {
-                        lower_generic_bound(bound, resolved, decls, diags)
-                    }),
+                    .and_then(|bound| lower_generic_bound(bound, resolved, decls, diags)),
             )
         })
         .collect()
 }
 
-fn build_interface_method_table(decls: &DeclIndex, resolved: &ResolvedNames, diags: &mut Vec<Diagnostic>) -> InterfaceMethodTable {
+fn build_interface_method_table(
+    decls: &DeclIndex,
+    resolved: &ResolvedNames,
+    sigs: &mut Signatures,
+    diags: &mut Vec<Diagnostic>,
+) -> InterfaceMethodTable {
     let mut table = HashMap::new();
     for (&id, iface) in &decls.interface_decls {
-        let methods = iface
-            .methods
+        sigs.interface_generics.insert(
+            id,
+            iface
+                .generics
+                .iter()
+                .map(|generic| generic.name.name.clone())
+                .collect(),
+        );
+        let parents = iface
+            .parents
             .iter()
-            .map(|m| (m.name.name.clone(), (build_fn_sig(m, resolved, decls, diags), m.body.is_some())))
+            .filter_map(|parent| lower_generic_bound(parent, resolved, decls, diags))
             .collect();
+        sigs.interface_parents.insert(id, parents);
+    }
+
+    fn build_one(
+        id: DefId,
+        decls: &DeclIndex,
+        resolved: &ResolvedNames,
+        sigs: &Signatures,
+        diags: &mut Vec<Diagnostic>,
+        visiting: &mut HashSet<DefId>,
+        table: &mut InterfaceMethodTable,
+    ) {
+        if table.contains_key(&id) {
+            return;
+        }
+        let Some(iface) = decls.interface_decls.get(&id).copied() else {
+            return;
+        };
+        if !visiting.insert(id) {
+            diags.push(
+                Diagnostic::error(format!(
+                    "interface inheritance cycle involving `{}`",
+                    resolved.definitions.get(id).name
+                ))
+                .with_label(iface.span, "cycle reaches this interface"),
+            );
+            return;
+        }
+
+        let mut methods: HashMap<Symbol, InterfaceMethod> = HashMap::new();
+        for parent in sigs.interface_parents.get(&id).cloned().unwrap_or_default() {
+            build_one(
+                parent.interface,
+                decls,
+                resolved,
+                sigs,
+                diags,
+                visiting,
+                table,
+            );
+            let parent_generics = sigs
+                .interface_generics
+                .get(&parent.interface)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let parent_subst: HashMap<Symbol, Type> = parent_generics
+                .iter()
+                .cloned()
+                .zip(parent.args.iter().cloned())
+                .collect();
+            for (name, inherited) in table.get(&parent.interface).cloned().unwrap_or_default() {
+                let inherited = InterfaceMethod {
+                    sig: specialize_fn_sig(&inherited.sig, &parent_subst),
+                    default: inherited.default.map(|default| InterfaceDefault {
+                        source: default.source,
+                        subst: default
+                            .subst
+                            .into_iter()
+                            .map(|(name, ty)| (name, substitute_generic(&ty, &parent_subst)))
+                            .collect(),
+                    }),
+                    ambiguous_default: inherited.ambiguous_default,
+                };
+                if let Some(existing) = methods.get_mut(&name) {
+                    if !method_signatures_match(&existing.sig, &inherited.sig) {
+                        diags.push(
+                            Diagnostic::error(format!(
+                                "inherited method `{name}` has incompatible signatures in interface `{}`",
+                                iface.name.name
+                            ))
+                            .with_label(iface.span, "conflicting parent interfaces"),
+                        );
+                    }
+                    existing.ambiguous_default |= inherited.ambiguous_default;
+                    match (&existing.default, &inherited.default) {
+                        (Some(left), Some(right))
+                            if left.source != right.source || left.subst != right.subst =>
+                        {
+                            existing.default = None;
+                            existing.ambiguous_default = true;
+                        }
+                        (None, Some(default)) if !existing.ambiguous_default => {
+                            existing.default = Some(default.clone());
+                        }
+                        _ => {}
+                    }
+                } else {
+                    methods.insert(name, inherited);
+                }
+            }
+        }
+
+        let identity_subst: HashMap<Symbol, Type> = iface
+            .generics
+            .iter()
+            .map(|generic| {
+                (
+                    generic.name.name.clone(),
+                    Type::Generic(generic.name.name.clone()),
+                )
+            })
+            .collect();
+        for method in &iface.methods {
+            methods.insert(
+                method.name.name.clone(),
+                InterfaceMethod {
+                    sig: build_fn_sig(method, resolved, decls, diags),
+                    default: method.body.as_ref().map(|_| InterfaceDefault {
+                        source: id,
+                        subst: identity_subst.clone(),
+                    }),
+                    ambiguous_default: false,
+                },
+            );
+        }
+        visiting.remove(&id);
         table.insert(id, methods);
+    }
+
+    let mut visiting = HashSet::new();
+    for id in decls.interface_decls.keys().copied().collect::<Vec<_>>() {
+        build_one(id, decls, resolved, sigs, diags, &mut visiting, &mut table);
+    }
+    for (interface, methods) in &table {
+        for (name, method) in methods {
+            sigs.interface_methods
+                .insert((*interface, name.clone()), method.sig.clone());
+        }
     }
     table
 }
 
-/// Merges each `impl` block's own methods into [`Signatures::methods`],
-/// records `(type, interface)` pairs in [`Signatures::impls`], and — for
-/// every interface an `impl` declares — inherits any default method the
-/// impl didn't override, reporting a diagnostic for any *required*
-/// (no-default) method the impl is missing (language-spec §7).
 fn build_impl_methods(
     module: &Module,
     resolved: &ResolvedNames,
@@ -526,16 +734,14 @@ fn build_impl_methods(
     sigs: &mut Signatures,
     diags: &mut Vec<Diagnostic>,
 ) {
+    // All user-written methods share one namespace per owner, regardless
+    // of which freely mixed impl block contains them.
     for item in &module.items {
         let Item::Impl(b) = item else { continue };
-        let Some(owner) = resolved
-            .definitions
-            .lookup_in(b.span.file, &b.target.name)
-        else { continue };
-        let owner_ty = owner_as_type(owner, resolved, decls);
-        let owner_generics =
-            owner_generic_params(owner, decls, resolved, diags);
-
+        let Some(owner) = resolved.definitions.lookup_in(b.span.file, &b.target.name) else {
+            continue;
+        };
+        let owner_generics = owner_generic_params(owner, decls, resolved, diags);
         for m in &b.methods {
             let mut sig = build_fn_sig(m, resolved, decls, diags);
             sig.generics.splice(0..0, owner_generics.clone());
@@ -552,73 +758,209 @@ fn build_impl_methods(
                 sigs.methods.insert(key, sig);
             }
         }
+    }
 
-        let Some(interface_ty) = &b.interface else { continue };
-        let Some(bound) = lower_generic_bound(interface_ty, resolved, decls, diags) else { continue };
-        let iface_id = bound.interface;
-        if sigs
-            .impls
-            .iter()
-            .any(|(impl_owner, existing)| {
-                nominal_id(impl_owner) == Some(owner)
-                    && existing.interface == bound.interface
-            })
-        {
+    struct Request {
+        owner: DefId,
+        owner_ty: Type,
+        owner_name: Symbol,
+        owner_span: Span,
+        bound: GenericBound,
+        allow_defaults: bool,
+    }
+
+    let mut requests = Vec::new();
+    for (&owner, decl) in &decls.type_decls {
+        for interface in &decl.interfaces {
+            if let Some(bound) = lower_generic_bound(interface, resolved, decls, diags) {
+                requests.push(Request {
+                    owner,
+                    owner_ty: owner_as_type(owner, resolved, decls),
+                    owner_name: decl.name.name.clone(),
+                    owner_span: interface.span(),
+                    bound,
+                    allow_defaults: true,
+                });
+            }
+        }
+    }
+    for (&owner, decl) in &decls.enum_decls {
+        for interface in &decl.interfaces {
+            if let Some(bound) = lower_generic_bound(interface, resolved, decls, diags) {
+                requests.push(Request {
+                    owner,
+                    owner_ty: owner_as_type(owner, resolved, decls),
+                    owner_name: decl.name.name.clone(),
+                    owner_span: interface.span(),
+                    bound,
+                    allow_defaults: true,
+                });
+            }
+        }
+    }
+    for item in &module.items {
+        let Item::Impl(block) = item else { continue };
+        let Some(owner) = resolved
+            .definitions
+            .lookup_in(block.span.file, &block.target.name)
+        else {
+            continue;
+        };
+        for interface in &block.interfaces {
+            if let Some(bound) = lower_generic_bound(interface, resolved, decls, diags) {
+                requests.push(Request {
+                    owner,
+                    owner_ty: owner_as_type(owner, resolved, decls),
+                    owner_name: block.target.name.clone(),
+                    owner_span: interface.span(),
+                    bound,
+                    allow_defaults: false,
+                });
+            }
+        }
+    }
+
+    let mut seen = HashSet::new();
+    requests.retain(|request| {
+        if seen.insert((request.owner, request.bound.clone())) {
+            sigs.impls
+                .insert((request.owner_ty.clone(), request.bound.clone()));
+            true
+        } else {
             diags.push(
                 Diagnostic::error(format!(
                     "`{}` already implements `{}`",
-                    b.target.name,
-                    resolved.definitions.get(iface_id).name
+                    request.owner_name,
+                    resolved.definitions.get(request.bound.interface).name
                 ))
-                .with_label(interface_ty.span(), "duplicate implementation"),
+                .with_label(request.owner_span, "duplicate implementation"),
             );
-            continue;
+            false
         }
-        sigs.impls.insert((owner_ty, bound.clone()));
+    });
 
-        let Some(iface_methods) = interface_methods.get(&iface_id) else { continue };
-        let interface_generics = decls
-            .interface_decls
+    #[derive(Clone)]
+    struct DefaultCandidate {
+        source: DefId,
+        subst: HashMap<Symbol, Type>,
+        sig: FnSig,
+    }
+    struct DeclaredNeed {
+        owner_name: Symbol,
+        span: Span,
+        interface_name: Symbol,
+        sig: FnSig,
+        defaults: Vec<DefaultCandidate>,
+        ambiguous: bool,
+    }
+    let mut declared: HashMap<(DefId, Symbol), DeclaredNeed> = HashMap::new();
+
+    for request in requests {
+        let iface_id = request.bound.interface;
+        let Some(methods) = interface_methods.get(&iface_id) else {
+            continue;
+        };
+        let interface_generics = sigs
+            .interface_generics
             .get(&iface_id)
-            .map(|decl| decl.generics.as_slice())
+            .map(Vec::as_slice)
             .unwrap_or(&[]);
         let interface_subst: HashMap<Symbol, Type> = interface_generics
             .iter()
-            .map(|generic| generic.name.name.clone())
-            .zip(bound.args.iter().cloned())
+            .cloned()
+            .zip(request.bound.args.iter().cloned())
             .collect();
-        for (name, (raw_sig, has_default)) in iface_methods {
-            let mut sig = specialize_fn_sig(raw_sig, &interface_subst);
-            sig.generics.splice(0..0, owner_generics.clone());
-            if sigs.methods.contains_key(&(owner, name.clone())) {
-                if let Some(actual) = sigs.methods.get(&(owner, name.clone())) {
-                    if !method_signatures_match(actual, &sig) {
-                        diags.push(
-                            Diagnostic::error(format!(
-                                "method `{name}` does not match its declaration in interface `{}`",
-                                resolved.definitions.get(iface_id).name
-                            ))
-                            .with_label(b.span, "implementation is here"),
-                        );
-                    }
+        let owner_generics = owner_generic_params(request.owner, decls, resolved, diags);
+
+        for (name, method) in methods {
+            let mut expected = specialize_fn_sig(&method.sig, &interface_subst);
+            expected.generics.splice(0..0, owner_generics.clone());
+            let key = (request.owner, name.clone());
+            if let Some(actual) = sigs.methods.get(&key) {
+                if !method_signatures_match(actual, &expected) {
+                    diags.push(
+                        Diagnostic::error(format!(
+                            "method `{name}` does not match its declaration in interface `{}`",
+                            resolved.definitions.get(iface_id).name
+                        ))
+                        .with_label(request.owner_span, "implementation is here"),
+                    );
                 }
                 continue;
             }
-            if *has_default {
-                sigs.methods.insert((owner, name.clone()), sig);
-                sigs.default_method_substitutions
-                    .insert((owner, name.clone()), interface_subst.clone());
-            } else {
+
+            if !request.allow_defaults {
                 diags.push(
                     Diagnostic::error(format!(
-                        "`{}` does not implement required method `{}` of interface `{}`",
-                        b.target.name,
-                        name,
+                        "`{}` must explicitly implement method `{name}` of interface `{}`",
+                        request.owner_name,
                         resolved.definitions.get(iface_id).name
                     ))
-                    .with_label(b.target.span, "here"),
+                    .with_label(request.owner_span, "explicit implementation is here"),
+                );
+                continue;
+            }
+
+            let candidate = method.default.as_ref().map(|default| DefaultCandidate {
+                source: default.source,
+                subst: default
+                    .subst
+                    .iter()
+                    .map(|(name, ty)| (name.clone(), substitute_generic(ty, &interface_subst)))
+                    .collect(),
+                sig: expected.clone(),
+            });
+            let need = declared.entry(key).or_insert_with(|| DeclaredNeed {
+                owner_name: request.owner_name.clone(),
+                span: request.owner_span,
+                interface_name: resolved.definitions.get(iface_id).name.clone(),
+                sig: expected.clone(),
+                defaults: Vec::new(),
+                ambiguous: false,
+            });
+            if !method_signatures_match(&need.sig, &expected) {
+                need.ambiguous = true;
+                diags.push(
+                    Diagnostic::error(format!(
+                        "method `{name}` has incompatible signatures in implemented interfaces"
+                    ))
+                    .with_label(request.owner_span, "conflicting interface"),
                 );
             }
+            need.ambiguous |= method.ambiguous_default;
+            if let Some(candidate) = candidate {
+                if !need.defaults.iter().any(|existing| {
+                    existing.source == candidate.source && existing.subst == candidate.subst
+                }) {
+                    need.defaults.push(candidate);
+                }
+            }
+        }
+    }
+
+    for ((owner, name), need) in declared {
+        if need.ambiguous || need.defaults.len() > 1 {
+            diags.push(
+                Diagnostic::error(format!(
+                    "multiple default implementations of method `{name}` are available for `{}`; provide an explicit implementation",
+                    need.owner_name
+                ))
+                .with_label(need.span, "ambiguous default"),
+            );
+        } else if let Some(default) = need.defaults.into_iter().next() {
+            sigs.methods.insert((owner, name.clone()), default.sig);
+            sigs.default_method_substitutions
+                .insert((owner, name.clone()), default.subst);
+            sigs.default_method_sources
+                .insert((owner, name), default.source);
+        } else {
+            diags.push(
+                Diagnostic::error(format!(
+                    "`{}` does not implement required method `{name}` of interface `{}`",
+                    need.owner_name, need.interface_name
+                ))
+                .with_label(need.span, "missing implementation"),
+            );
         }
     }
 }
@@ -651,15 +993,6 @@ fn owner_as_type(id: DefId, resolved: &ResolvedNames, decls: &DeclIndex) -> Type
     }
 }
 
-fn nominal_id(ty: &Type) -> Option<DefId> {
-    match ty {
-        Type::Struct(id, _)
-        | Type::TupleStruct(id, _)
-        | Type::Enum(id, _) => Some(*id),
-        _ => None,
-    }
-}
-
 fn validate_finite_value_layouts(
     resolved: &ResolvedNames,
     decls: &DeclIndex,
@@ -668,17 +1001,10 @@ fn validate_finite_value_layouts(
 ) {
     for (&id, decl) in &decls.type_decls {
         let ty = owner_as_type(id, resolved, decls);
-        if crate::alloc::alloc_kind(&ty, &resolved.definitions)
-            == crate::alloc::AllocKind::Heap
-        {
+        if crate::alloc::alloc_kind(&ty, &resolved.definitions) == crate::alloc::AllocKind::Heap {
             continue;
         }
-        if value_layout_reaches_cycle(
-            &ty,
-            resolved,
-            sigs,
-            &mut Vec::new(),
-        ) {
+        if value_layout_reaches_cycle(&ty, resolved, sigs, &mut Vec::new()) {
             diags.push(
                 Diagnostic::error(format!(
                     "value type `{}` has an infinitely recursive layout",
@@ -693,12 +1019,7 @@ fn validate_finite_value_layouts(
     }
     for (&id, decl) in &decls.enum_decls {
         let ty = owner_as_type(id, resolved, decls);
-        if value_layout_reaches_cycle(
-            &ty,
-            resolved,
-            sigs,
-            &mut Vec::new(),
-        ) {
+        if value_layout_reaches_cycle(&ty, resolved, sigs, &mut Vec::new()) {
             diags.push(
                 Diagnostic::error(format!(
                     "enum `{}` has an infinitely recursive layout",
@@ -721,8 +1042,7 @@ fn value_layout_reaches_cycle(
 ) -> bool {
     match ty {
         Type::Struct(id, _) | Type::TupleStruct(id, _) => {
-            if crate::alloc::alloc_kind(ty, &resolved.definitions)
-                == crate::alloc::AllocKind::Heap
+            if crate::alloc::alloc_kind(ty, &resolved.definitions) == crate::alloc::AllocKind::Heap
             {
                 return false;
             }
@@ -734,11 +1054,7 @@ fn value_layout_reaches_cycle(
                 .type_fields(ty)
                 .unwrap_or_default()
                 .iter()
-                .any(|field| {
-                    value_layout_reaches_cycle(
-                        field, resolved, sigs, stack,
-                    )
-                });
+                .any(|field| value_layout_reaches_cycle(field, resolved, sigs, stack));
             stack.pop();
             recursive
         }
@@ -747,27 +1063,20 @@ fn value_layout_reaches_cycle(
                 return true;
             }
             stack.push(*id);
-            let recursive = sigs
-                .enum_sigs
-                .get(id)
-                .is_some_and(|sig| {
-                    (0..sig.variants.len()).any(|variant| {
-                        sigs.enum_payload(ty, variant as u32)
-                            .unwrap_or_default()
-                            .iter()
-                            .any(|field| {
-                                value_layout_reaches_cycle(
-                                    field, resolved, sigs, stack,
-                                )
-                            })
-                    })
-                });
+            let recursive = sigs.enum_sigs.get(id).is_some_and(|sig| {
+                (0..sig.variants.len()).any(|variant| {
+                    sigs.enum_payload(ty, variant as u32)
+                        .unwrap_or_default()
+                        .iter()
+                        .any(|field| value_layout_reaches_cycle(field, resolved, sigs, stack))
+                })
+            });
             stack.pop();
             recursive
         }
-        Type::Tuple(items) => items.iter().any(|item| {
-            value_layout_reaches_cycle(item, resolved, sigs, stack)
-        }),
+        Type::Tuple(items) => items
+            .iter()
+            .any(|item| value_layout_reaches_cycle(item, resolved, sigs, stack)),
         // These all provide an indirection or have a fixed scalar layout.
         Type::Array(_)
         | Type::String
@@ -798,24 +1107,25 @@ pub fn check(module: &Module, resolved: &ResolvedNames) -> (TypedTables, Vec<Dia
     build_type_shapes(&decls, resolved, &mut sigs, &mut diagnostics);
     build_enum_sigs(module, resolved, &decls, &mut sigs, &mut diagnostics);
     build_fn_sigs(module, resolved, &decls, &mut sigs, &mut diagnostics);
-    let interface_methods = build_interface_method_table(&decls, resolved, &mut diagnostics);
-    build_impl_methods(module, resolved, &decls, &interface_methods, &mut sigs, &mut diagnostics);
-    validate_finite_value_layouts(
+    let interface_methods =
+        build_interface_method_table(&decls, resolved, &mut sigs, &mut diagnostics);
+    build_impl_methods(
+        module,
         resolved,
         &decls,
-        &sigs,
+        &interface_methods,
+        &mut sigs,
         &mut diagnostics,
     );
+    validate_finite_value_layouts(resolved, &decls, &sigs, &mut diagnostics);
 
     let mut expr_types = HashMap::new();
     let mut local_types = HashMap::new();
+    let mut call_generic_args = HashMap::new();
     for item in &module.items {
         match item {
             Item::Fn(f) => {
-                if let Some(id) = resolved
-                    .definitions
-                    .lookup_in(f.span.file, &f.name.name)
-                {
+                if let Some(id) = resolved.definitions.lookup_in(f.span.file, &f.name.name) {
                     if let Some(sig) = sigs.fns.get(&id).cloned() {
                         if f.name.name.as_str() == "main"
                             && (!sig.params.is_empty()
@@ -823,71 +1133,96 @@ pub fn check(module: &Module, resolved: &ResolvedNames) -> (TypedTables, Vec<Dia
                                 || sig.ret != Type::unit())
                         {
                             diagnostics.push(
-                                Diagnostic::error(
-                                    "`main` must have signature `fn main()`",
-                                )
-                                .with_label(f.span, "invalid entry point"),
+                                Diagnostic::error("`main` must have signature `fn main()`")
+                                    .with_label(f.span, "invalid entry point"),
                             );
                             continue;
                         }
-                        let mut checker = Checker::new(resolved, &sigs, &decls, &mut expr_types, &mut local_types, &mut diagnostics);
+                        let mut checker = Checker::new(
+                            resolved,
+                            &sigs,
+                            &decls,
+                            &mut expr_types,
+                            &mut local_types,
+                            &mut call_generic_args,
+                            &mut diagnostics,
+                        );
                         checker.check_fn_decl(f, &sig, None);
                     }
                 }
             }
             Item::Impl(b) => {
-                if let Some(owner) = resolved
-                    .definitions
-                    .lookup_in(b.span.file, &b.target.name)
-                {
+                if let Some(owner) = resolved.definitions.lookup_in(b.span.file, &b.target.name) {
                     let self_ty = owner_as_type(owner, resolved, &decls);
                     for m in &b.methods {
                         if let Some(sig) = sigs.method(owner, &m.name.name).cloned() {
-                            let mut checker = Checker::new(resolved, &sigs, &decls, &mut expr_types, &mut local_types, &mut diagnostics);
+                            let mut checker = Checker::new(
+                                resolved,
+                                &sigs,
+                                &decls,
+                                &mut expr_types,
+                                &mut local_types,
+                                &mut call_generic_args,
+                                &mut diagnostics,
+                            );
                             checker.check_fn_decl(m, &sig, Some(self_ty.clone()));
                         }
                     }
                 }
             }
             Item::Interface(i) => {
-                if let Some(id) = resolved
-                    .definitions
-                    .lookup_in(i.span.file, &i.name.name)
-                {
+                if let Some(id) = resolved.definitions.lookup_in(i.span.file, &i.name.name) {
                     for m in &i.methods {
                         if m.body.is_none() {
                             continue;
                         }
-                        if let Some((sig, _)) = interface_methods.get(&id).and_then(|ms| ms.get(&m.name.name)).cloned() {
-                            let mut checking_sig = sig;
+                        if let Some(method) = interface_methods
+                            .get(&id)
+                            .and_then(|ms| ms.get(&m.name.name))
+                            .cloned()
+                        {
+                            let mut checking_sig = method.sig;
                             let interface_generics = i.generics.iter().map(|generic| {
                                 (
                                     generic.name.name.clone(),
-                                    generic
-                                        .bound
-                                        .as_ref()
-                                        .and_then(|bound| {
-                                            lower_generic_bound(
-                                                bound,
-                                                resolved,
-                                                &decls,
-                                                &mut diagnostics,
-                                            )
-                                        }),
+                                    generic.bound.as_ref().and_then(|bound| {
+                                        lower_generic_bound(
+                                            bound,
+                                            resolved,
+                                            &decls,
+                                            &mut diagnostics,
+                                        )
+                                    }),
                                 )
                             });
                             checking_sig.generics.splice(0..0, interface_generics);
-                            let mut checker = Checker::new(resolved, &sigs, &decls, &mut expr_types, &mut local_types, &mut diagnostics);
+                            let mut checker = Checker::new(
+                                resolved,
+                                &sigs,
+                                &decls,
+                                &mut expr_types,
+                                &mut local_types,
+                                &mut call_generic_args,
+                                &mut diagnostics,
+                            );
                             checker.check_fn_decl(m, &checking_sig, Some(Type::Interface(id)));
                         }
                     }
                 }
             }
-            Item::Type(_) | Item::Enum(_) | Item::Use(_) => {}
+            Item::Type(_) | Item::Enum(_) | Item::Use(_) | Item::Mod(_) => {}
         }
     }
 
-    (TypedTables { expr_types, local_types, signatures: sigs }, diagnostics)
+    (
+        TypedTables {
+            expr_types,
+            local_types,
+            call_generic_args,
+            signatures: sigs,
+        },
+        diagnostics,
+    )
 }
 
 fn describe_type(ty: &Type, resolved: &ResolvedNames) -> String {
@@ -911,18 +1246,30 @@ fn describe_type(ty: &Type, resolved: &ResolvedNames) -> String {
             if args.is_empty() {
                 name
             } else {
-                let args_str: Vec<String> = args.iter().map(|a| describe_type(a, resolved)).collect();
+                let args_str: Vec<String> =
+                    args.iter().map(|a| describe_type(a, resolved)).collect();
                 format!("{name}<{}>", args_str.join(", "))
             }
         }
         Type::Tuple(elems) => {
-            format!("({})", elems.iter().map(|e| describe_type(e, resolved)).collect::<Vec<_>>().join(", "))
+            format!(
+                "({})",
+                elems
+                    .iter()
+                    .map(|e| describe_type(e, resolved))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
         }
         Type::Array(inner) => format!("[{}]", describe_type(inner, resolved)),
         Type::String => "String".to_string(),
         Type::Function(params, ret) => format!(
             "({}) => {}",
-            params.iter().map(|p| describe_type(p, resolved)).collect::<Vec<_>>().join(", "),
+            params
+                .iter()
+                .map(|p| describe_type(p, resolved))
+                .collect::<Vec<_>>()
+                .join(", "),
             describe_type(ret, resolved)
         ),
         Type::Interface(id) => resolved.definitions.get(*id).name.to_string(),
@@ -936,20 +1283,34 @@ fn describe_type(ty: &Type, resolved: &ResolvedNames) -> String {
 fn substitute_generic(ty: &Type, subst: &HashMap<Symbol, Type>) -> Type {
     match ty {
         Type::Generic(name) => subst.get(name).cloned().unwrap_or_else(|| ty.clone()),
-        Type::Struct(id, args) => {
-            Type::Struct(*id, args.iter().map(|arg| substitute_generic(arg, subst)).collect())
-        }
+        Type::Struct(id, args) => Type::Struct(
+            *id,
+            args.iter()
+                .map(|arg| substitute_generic(arg, subst))
+                .collect(),
+        ),
         Type::TupleStruct(id, args) => Type::TupleStruct(
             *id,
-            args.iter().map(|arg| substitute_generic(arg, subst)).collect(),
+            args.iter()
+                .map(|arg| substitute_generic(arg, subst))
+                .collect(),
         ),
         Type::Array(inner) => Type::Array(Box::new(substitute_generic(inner, subst))),
         Type::Weak(inner) => Type::Weak(Box::new(substitute_generic(inner, subst))),
-        Type::Tuple(elems) => Type::Tuple(elems.iter().map(|e| substitute_generic(e, subst)).collect()),
-        Type::Enum(id, args) => Type::Enum(*id, args.iter().map(|a| substitute_generic(a, subst)).collect()),
-        Type::Function(params, ret) => {
-            Type::Function(params.iter().map(|p| substitute_generic(p, subst)).collect(), Box::new(substitute_generic(ret, subst)))
+        Type::Tuple(elems) => {
+            Type::Tuple(elems.iter().map(|e| substitute_generic(e, subst)).collect())
         }
+        Type::Enum(id, args) => Type::Enum(
+            *id,
+            args.iter().map(|a| substitute_generic(a, subst)).collect(),
+        ),
+        Type::Function(params, ret) => Type::Function(
+            params
+                .iter()
+                .map(|p| substitute_generic(p, subst))
+                .collect(),
+            Box::new(substitute_generic(ret, subst)),
+        ),
         other => other.clone(),
     }
 }
@@ -992,14 +1353,18 @@ fn collect_generic_bindings(declared: &Type, actual: &Type, subst: &mut HashMap<
 /// still prevent the pipeline from continuing.
 fn contextualize_unknowns(actual: &Type, expected: &Type) -> Type {
     match (actual, expected) {
-        (Type::Error, expected) if !expected.contains_error() && !expected.contains_generic() => expected.clone(),
-        (Type::Tuple(actual), Type::Tuple(expected)) if actual.len() == expected.len() => Type::Tuple(
-            actual
-                .iter()
-                .zip(expected)
-                .map(|(actual, expected)| contextualize_unknowns(actual, expected))
-                .collect(),
-        ),
+        (Type::Error, expected) if !expected.contains_error() && !expected.contains_generic() => {
+            expected.clone()
+        }
+        (Type::Tuple(actual), Type::Tuple(expected)) if actual.len() == expected.len() => {
+            Type::Tuple(
+                actual
+                    .iter()
+                    .zip(expected)
+                    .map(|(actual, expected)| contextualize_unknowns(actual, expected))
+                    .collect(),
+            )
+        }
         (Type::Enum(actual_id, actual), Type::Enum(expected_id, expected))
             if actual_id == expected_id && actual.len() == expected.len() =>
         {
@@ -1024,35 +1389,35 @@ fn contextualize_unknowns(actual: &Type, expected: &Type) -> Type {
                     .collect(),
             )
         }
-        (
-            Type::TupleStruct(actual_id, actual),
-            Type::TupleStruct(expected_id, expected),
-        ) if actual_id == expected_id && actual.len() == expected.len() => Type::TupleStruct(
-            *actual_id,
-            actual
-                .iter()
-                .zip(expected)
-                .map(|(actual, expected)| contextualize_unknowns(actual, expected))
-                .collect(),
-        ),
+        (Type::TupleStruct(actual_id, actual), Type::TupleStruct(expected_id, expected))
+            if actual_id == expected_id && actual.len() == expected.len() =>
+        {
+            Type::TupleStruct(
+                *actual_id,
+                actual
+                    .iter()
+                    .zip(expected)
+                    .map(|(actual, expected)| contextualize_unknowns(actual, expected))
+                    .collect(),
+            )
+        }
         (Type::Array(actual), Type::Array(expected)) => {
             Type::Array(Box::new(contextualize_unknowns(actual, expected)))
         }
         (Type::Weak(actual), Type::Weak(expected)) => {
             Type::Weak(Box::new(contextualize_unknowns(actual, expected)))
         }
-        (Type::Function(actual_params, actual_ret), Type::Function(expected_params, expected_ret))
-            if actual_params.len() == expected_params.len() =>
-        {
-            Type::Function(
-                actual_params
-                    .iter()
-                    .zip(expected_params)
-                    .map(|(actual, expected)| contextualize_unknowns(actual, expected))
-                    .collect(),
-                Box::new(contextualize_unknowns(actual_ret, expected_ret)),
-            )
-        }
+        (
+            Type::Function(actual_params, actual_ret),
+            Type::Function(expected_params, expected_ret),
+        ) if actual_params.len() == expected_params.len() => Type::Function(
+            actual_params
+                .iter()
+                .zip(expected_params)
+                .map(|(actual, expected)| contextualize_unknowns(actual, expected))
+                .collect(),
+            Box::new(contextualize_unknowns(actual_ret, expected_ret)),
+        ),
         _ => actual.clone(),
     }
 }
@@ -1075,6 +1440,7 @@ struct Checker<'a> {
     decls: &'a DeclIndex<'a>,
     expr_types: &'a mut HashMap<NodeId, Type>,
     local_types: &'a mut HashMap<NodeId, Type>,
+    call_generic_args: &'a mut HashMap<NodeId, Vec<Type>>,
     diagnostics: &'a mut Vec<Diagnostic>,
     locals: HashMap<nether_resolver::LocalId, (Type, bool)>,
     generics: HashMap<Symbol, Option<GenericBound>>,
@@ -1089,6 +1455,7 @@ impl<'a> Checker<'a> {
         decls: &'a DeclIndex<'a>,
         expr_types: &'a mut HashMap<NodeId, Type>,
         local_types: &'a mut HashMap<NodeId, Type>,
+        call_generic_args: &'a mut HashMap<NodeId, Vec<Type>>,
         diagnostics: &'a mut Vec<Diagnostic>,
     ) -> Self {
         Checker {
@@ -1097,6 +1464,7 @@ impl<'a> Checker<'a> {
             decls,
             expr_types,
             local_types,
+            call_generic_args,
             diagnostics,
             locals: HashMap::new(),
             generics: HashMap::new(),
@@ -1116,11 +1484,22 @@ impl<'a> Checker<'a> {
     }
 
     fn err(&mut self, span: Span, message: impl Into<String>) {
-        self.diagnostics.push(Diagnostic::error(message).with_label(span, "here"));
+        self.diagnostics
+            .push(Diagnostic::error(message).with_label(span, "here"));
     }
 
     fn describe(&self, ty: &Type) -> String {
         describe_type(ty, self.resolved)
+    }
+
+    fn lower_call_generic_args(&mut self, args: &[TypeExpr]) -> Vec<Type> {
+        args.iter()
+            .map(|arg| {
+                let ty = lower_type_expr(arg, self.resolved, self.decls, self.diagnostics);
+                self.validate_type_bounds(&ty, arg.span());
+                ty
+            })
+            .collect()
     }
 
     fn check_fn_decl(&mut self, f: &FnDecl, sig: &FnSig, self_ty: Option<Type>) {
@@ -1144,7 +1523,10 @@ impl<'a> Checker<'a> {
             if !body_ty.compatible(&self.return_ty) {
                 let expected = self.describe(&self.return_ty.clone());
                 let found = self.describe(&body_ty);
-                self.err(body.span, format!("expected return type `{expected}`, found `{found}`"));
+                self.err(
+                    body.span,
+                    format!("expected return type `{expected}`, found `{found}`"),
+                );
             }
         }
     }
@@ -1166,7 +1548,10 @@ impl<'a> Checker<'a> {
     fn check_stmt(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::Let(let_stmt) => {
-                let declared_ty = let_stmt.ty.as_ref().map(|t| lower_type_expr(t, self.resolved, self.decls, self.diagnostics));
+                let declared_ty = let_stmt
+                    .ty
+                    .as_ref()
+                    .map(|t| lower_type_expr(t, self.resolved, self.decls, self.diagnostics));
                 let has_declared_type = declared_ty.is_some();
                 let value_ty = self.check_expr_with_expected(&let_stmt.value, declared_ty.as_ref());
                 let final_ty = match declared_ty {
@@ -1174,7 +1559,10 @@ impl<'a> Checker<'a> {
                         if !value_ty.compatible(&declared) {
                             let expected = self.describe(&declared);
                             let found = self.describe(&value_ty);
-                            self.err(let_stmt.value.span, format!("expected `{expected}`, found `{found}`"));
+                            self.err(
+                                let_stmt.value.span,
+                                format!("expected `{expected}`, found `{found}`"),
+                            );
                         }
                         declared
                     }
@@ -1191,7 +1579,10 @@ impl<'a> Checker<'a> {
             Stmt::Expr(expr) => {
                 let ty = self.check_expr(expr);
                 if !ty.is_error() && ty.contains_error() {
-                    self.err(expr.span, "cannot infer all generic type arguments for this expression");
+                    self.err(
+                        expr.span,
+                        "cannot infer all generic type arguments for this expression",
+                    );
                 }
             }
         }
@@ -1224,7 +1615,7 @@ impl<'a> Checker<'a> {
             ExprKind::Literal(Literal::Bool(_)) => Type::Primitive(PrimitiveKind::Bool),
             ExprKind::Literal(Literal::Char(_)) => Type::Primitive(PrimitiveKind::Char),
             ExprKind::Literal(Literal::Str(_)) => Type::String,
-            ExprKind::Path(path) => self.check_value_path(path, None, expected),
+            ExprKind::Path(path) => self.check_value_path(path, None, expected, None, &[]),
             ExprKind::Tuple(elems) => {
                 let expected_elems = match expected {
                     Some(Type::Tuple(expected)) if expected.len() == elems.len() => Some(expected),
@@ -1256,21 +1647,45 @@ impl<'a> Checker<'a> {
             ExprKind::Unary { op, expr: inner } => self.check_unary(*op, inner),
             ExprKind::Binary { op, lhs, rhs } => self.check_binary(*op, lhs, rhs),
             ExprKind::Assign { target, value } => self.check_assign(target, value),
-            ExprKind::Call { callee, args } => self.check_call(callee, args, expected),
+            ExprKind::Call {
+                callee,
+                generic_args,
+                args,
+            } => {
+                let generic_args = self.lower_call_generic_args(generic_args);
+                self.check_call(expr.id, callee, &generic_args, args, expected)
+            }
             ExprKind::MutArg(inner) => self.check_expr(inner),
-            ExprKind::MethodCall { receiver, method, args } => {
+            ExprKind::MethodCall {
+                receiver,
+                method,
+                generic_args,
+                args,
+            } => {
+                let generic_args = self.lower_call_generic_args(generic_args);
                 let receiver_ty = self.check_expr(receiver);
-                self.check_method_call_on(&receiver_ty, method, args, method.span)
+                self.check_method_call_on(
+                    &receiver_ty,
+                    method,
+                    &generic_args,
+                    args,
+                    method.span,
+                    Some(expr.id),
+                )
             }
             ExprKind::Field { base, field } => {
                 let base_ty = self.check_expr(base);
                 self.check_field_access(&base_ty, field)
             }
             ExprKind::Index { base, index } => self.check_index(base, index),
-            ExprKind::If { cond, then_branch, else_branch } => {
-                self.check_if(cond, then_branch, else_branch, expected)
+            ExprKind::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => self.check_if(cond, then_branch, else_branch, expected),
+            ExprKind::Match { scrutinee, arms } => {
+                self.check_match(scrutinee, arms, expr.span, expected)
             }
-            ExprKind::Match { scrutinee, arms } => self.check_match(scrutinee, arms, expr.span, expected),
             ExprKind::Block(block) => self.check_block_with_expected(block, expected),
             ExprKind::While { cond, body } => {
                 let cond_ty = self.check_expr(cond);
@@ -1280,7 +1695,11 @@ impl<'a> Checker<'a> {
                 self.loop_depth -= 1;
                 Type::unit()
             }
-            ExprKind::ForIn { pattern, iter, body } => self.check_for_in(pattern, iter, body),
+            ExprKind::ForIn {
+                pattern,
+                iter,
+                body,
+            } => self.check_for_in(pattern, iter, body),
             ExprKind::Loop { body } => {
                 self.loop_depth += 1;
                 self.check_block(body);
@@ -1298,10 +1717,7 @@ impl<'a> Checker<'a> {
             }
             ExprKind::Continue => {
                 if self.loop_depth == 0 {
-                    self.err(
-                        expr.span,
-                        "`continue` is only valid inside a loop",
-                    );
+                    self.err(expr.span, "`continue` is only valid inside a loop");
                 }
                 Type::Never
             }
@@ -1316,7 +1732,10 @@ impl<'a> Checker<'a> {
             return match expected {
                 Some(Type::Array(inner)) => Type::Array(inner.clone()),
                 _ => {
-                    self.err(span, "cannot infer the element type of an empty array literal without context");
+                    self.err(
+                        span,
+                        "cannot infer the element type of an empty array literal without context",
+                    );
                     Type::Error
                 }
             };
@@ -1331,7 +1750,10 @@ impl<'a> Checker<'a> {
             if !t.compatible(&first) {
                 let expected_s = self.describe(&first);
                 let found_s = self.describe(&t);
-                self.err(e.span, format!("expected `{expected_s}`, found `{found_s}` in array literal"));
+                self.err(
+                    e.span,
+                    format!("expected `{expected_s}`, found `{found_s}` in array literal"),
+                );
             }
         }
         Type::Array(Box::new(first))
@@ -1370,14 +1792,20 @@ impl<'a> Checker<'a> {
                     return Type::Error;
                 }
                 if !lhs_ty.compatible(&rhs_ty) {
-                    self.err(rhs.span, "both operands of an arithmetic operator must have the same type");
+                    self.err(
+                        rhs.span,
+                        "both operands of an arithmetic operator must have the same type",
+                    );
                     return Type::Error;
                 }
                 lhs_ty
             }
             BinaryOp::Eq | BinaryOp::Ne => {
                 if !lhs_ty.compatible(&rhs_ty) {
-                    self.err(rhs.span, "both operands of `==`/`!=` must have the same type");
+                    self.err(
+                        rhs.span,
+                        "both operands of `==`/`!=` must have the same type",
+                    );
                 }
                 Type::Primitive(PrimitiveKind::Bool)
             }
@@ -1385,7 +1813,10 @@ impl<'a> Checker<'a> {
                 if !matches!(&lhs_ty, Type::Primitive(p) if p.is_numeric()) && !lhs_ty.is_error() {
                     self.err(lhs.span, "comparison operators require numeric operands");
                 } else if !lhs_ty.compatible(&rhs_ty) {
-                    self.err(rhs.span, "both operands of a comparison must have the same type");
+                    self.err(
+                        rhs.span,
+                        "both operands of a comparison must have the same type",
+                    );
                 }
                 Type::Primitive(PrimitiveKind::Bool)
             }
@@ -1410,7 +1841,10 @@ impl<'a> Checker<'a> {
         if !value_ty.compatible(&target_ty) {
             let expected = self.describe(&target_ty);
             let found = self.describe(&value_ty);
-            self.err(value.span, format!("expected `{expected}`, found `{found}`"));
+            self.err(
+                value.span,
+                format!("expected `{expected}`, found `{found}`"),
+            );
         }
         self.check_assign_target_mutable(target);
         Type::unit()
@@ -1422,11 +1856,8 @@ impl<'a> Checker<'a> {
                 .resolved
                 .path_res
                 .get(&path.id)
-                .is_some_and(|resolution| {
-                    matches!(resolution.base, Resolution::Local(_))
-                }),
-            ExprKind::Field { base, .. }
-            | ExprKind::Index { base, .. } => {
+                .is_some_and(|resolution| matches!(resolution.base, Resolution::Local(_))),
+            ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => {
                 self.assign_target_has_local_root(base)
             }
             _ => false,
@@ -1447,7 +1878,10 @@ impl<'a> Checker<'a> {
             // all share `.`, so the parser only ever produces a dotted
             // -path node for a bare identifier chain like this).
             ExprKind::Path(path) => self.check_assign_path_type(path),
-            ExprKind::Field { base, field: nether_ast::FieldAccessor::Named(ident) } => {
+            ExprKind::Field {
+                base,
+                field: nether_ast::FieldAccessor::Named(ident),
+            } => {
                 let base_ty = self.check_expr(base);
                 self.field_type_named(&base_ty, ident)
             }
@@ -1467,16 +1901,23 @@ impl<'a> Checker<'a> {
         };
         let total = path.segments.len();
         let mut current_ty = match res.base {
-            Resolution::Local(id) => self.locals.get(&id).map(|(t, _)| t.clone()).unwrap_or(Type::Error),
+            Resolution::Local(id) => self
+                .locals
+                .get(&id)
+                .map(|(t, _)| t.clone())
+                .unwrap_or(Type::Error),
             // No other resolution kind can ever name a `weak`-typed place
             // (only locals/fields can be declared `weak T`), so falling
             // back to the normal, upgrading path is safe here.
-            _ => return self.check_value_path(path, None, None),
+            _ => return self.check_value_path(path, None, None, None, &[]),
         };
         for i in res.consumed..total {
             let seg = &path.segments[i];
-            current_ty =
-                if i + 1 == total { self.field_type_named(&current_ty, seg) } else { self.check_field_access_named(&current_ty, seg) };
+            current_ty = if i + 1 == total {
+                self.field_type_named(&current_ty, seg)
+            } else {
+                self.check_field_access_named(&current_ty, seg)
+            };
         }
         current_ty
     }
@@ -1494,17 +1935,32 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => self.check_assign_target_mutable(base),
+            ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => {
+                self.check_assign_target_mutable(base)
+            }
             _ => {}
         }
     }
 
-    fn check_call(&mut self, callee: &Expr, args: &[Expr], expected: Option<&Type>) -> Type {
+    fn check_call(
+        &mut self,
+        call_id: NodeId,
+        callee: &Expr,
+        generic_args: &[Type],
+        args: &[Expr],
+        expected: Option<&Type>,
+    ) -> Type {
         if let ExprKind::Path(path) = &callee.kind {
-            let ty = self.check_value_path(path, Some(args), expected);
+            let ty = self.check_value_path(path, Some(args), expected, Some(call_id), generic_args);
             self.expr_types.insert(callee.id, ty.clone());
             ty
         } else {
+            if !generic_args.is_empty() {
+                self.err(
+                    callee.span,
+                    "explicit generic arguments require a named function or method",
+                );
+            }
             let callee_ty = self.check_expr(callee);
             self.check_call_value(&callee_ty, args, callee.span)
         }
@@ -1514,7 +1970,14 @@ impl<'a> Checker<'a> {
         match ty {
             Type::Function(params, ret) => {
                 if args.len() != params.len() {
-                    self.err(span, format!("expected {} argument(s), found {}", params.len(), args.len()));
+                    self.err(
+                        span,
+                        format!(
+                            "expected {} argument(s), found {}",
+                            params.len(),
+                            args.len()
+                        ),
+                    );
                 }
                 for (p, a) in params.iter().zip(args.iter()) {
                     let actual = self.check_expr_with_expected(a, Some(p));
@@ -1544,32 +2007,64 @@ impl<'a> Checker<'a> {
         path: &Path,
         call_args: Option<&[Expr]>,
         expected: Option<&Type>,
+        call_id: Option<NodeId>,
+        generic_args: &[Type],
     ) -> Type {
         let Some(res) = self.resolved.path_res.get(&path.id).cloned() else {
             return Type::Error;
         };
         let total = path.segments.len();
-        let direct_call_args = if res.consumed == total { call_args } else { None };
+        let direct_call_args = if res.consumed == total {
+            call_args
+        } else {
+            None
+        };
 
         let mut current_ty = match res.base {
             Resolution::Local(id) => {
-                let ty = self.locals.get(&id).map(|(t, _)| t.clone()).unwrap_or(Type::Error);
+                let ty = self
+                    .locals
+                    .get(&id)
+                    .map(|(t, _)| t.clone())
+                    .unwrap_or(Type::Error);
                 if res.consumed == total {
                     if let Some(args) = call_args {
+                        if !generic_args.is_empty() {
+                            self.err(
+                                path.span,
+                                "explicit generic arguments cannot be applied to a function value",
+                            );
+                        }
                         return self.check_call_value(&ty, args, path.span);
                     }
                 }
                 self.upgrade_weak(ty)
             }
-            Resolution::Def(id) => {
-                self.resolve_def_value(id, path.span, direct_call_args, expected)
-            }
+            Resolution::Def(id) => self.resolve_def_value(
+                id,
+                path.span,
+                direct_call_args,
+                expected,
+                call_id,
+                generic_args,
+            ),
             Resolution::EnumVariant(enum_id, idx) => {
+                if !generic_args.is_empty() {
+                    self.err(
+                        path.span,
+                        "enum variants do not accept function generic arguments",
+                    );
+                }
                 self.enum_variant_value_type(enum_id, idx, path.span, direct_call_args, expected)
             }
-            Resolution::StaticMember(owner_id, idx) => {
-                self.static_member_call_or_value(owner_id, idx, path.span, direct_call_args)
-            }
+            Resolution::StaticMember(owner_id, idx) => self.static_member_call_or_value(
+                owner_id,
+                idx,
+                path.span,
+                direct_call_args,
+                call_id,
+                generic_args,
+            ),
             Resolution::GenericParam | Resolution::Error => Type::Error,
         };
 
@@ -1578,7 +2073,14 @@ impl<'a> Checker<'a> {
             let is_last = i + 1 == total;
             if is_last {
                 if let Some(args) = call_args {
-                    return self.check_method_call_on(&current_ty, seg, args, seg.span);
+                    return self.check_method_call_on(
+                        &current_ty,
+                        seg,
+                        generic_args,
+                        args,
+                        seg.span,
+                        call_id,
+                    );
                 }
             }
             current_ty = self.check_field_access_named(&current_ty, seg);
@@ -1592,6 +2094,8 @@ impl<'a> Checker<'a> {
         span: Span,
         call_args: Option<&[Expr]>,
         expected: Option<&Type>,
+        call_id: Option<NodeId>,
+        generic_args: &[Type],
     ) -> Type {
         let def = self.resolved.definitions.get(id);
         let name = def.name.clone();
@@ -1601,16 +2105,32 @@ impl<'a> Checker<'a> {
                 Type::Error
             }
             DefKind::Interface => {
-                self.err(span, format!("`{name}` is an interface and has no value form"));
+                self.err(
+                    span,
+                    format!("`{name}` is an interface and has no value form"),
+                );
                 Type::Error
             }
             DefKind::Imported => Type::Error,
             DefKind::Enum => {
-                self.err(span, format!("`{name}` is an enum type, not a value — use one of its variants"));
+                self.err(
+                    span,
+                    format!("`{name}` is an enum type, not a value — use one of its variants"),
+                );
                 Type::Error
             }
-            DefKind::Fn => self.resolve_fn_value(id, &name, span, call_args, expected),
-            DefKind::Type => self.resolve_type_value(id, &name, span, call_args, expected),
+            DefKind::Fn => {
+                self.resolve_fn_value(id, &name, span, call_args, expected, call_id, generic_args)
+            }
+            DefKind::Type => {
+                if !generic_args.is_empty() {
+                    self.err(
+                        span,
+                        "type constructors do not accept function generic arguments",
+                    );
+                }
+                self.resolve_type_value(id, &name, span, call_args, expected)
+            }
         }
     }
 
@@ -1621,8 +2141,13 @@ impl<'a> Checker<'a> {
         span: Span,
         call_args: Option<&[Expr]>,
         expected: Option<&Type>,
+        call_id: Option<NodeId>,
+        generic_args: &[Type],
     ) -> Type {
         if name.as_str() == "println" || name.as_str() == "print" {
+            if !generic_args.is_empty() {
+                self.err(span, format!("builtin function `{name}` is not generic"));
+            }
             return match call_args {
                 Some(args) => {
                     for a in args {
@@ -1640,13 +2165,21 @@ impl<'a> Checker<'a> {
         match self.sigs.fns.get(&id).cloned() {
             Some(sig) => match call_args {
                 Some(args) => {
-                    let subst =
-                        self.check_call_args(&sig, args, span, expected, None);
+                    let subst = self.check_call_args(
+                        &sig,
+                        args,
+                        span,
+                        expected,
+                        None,
+                        generic_args,
+                        call_id,
+                    );
                     substitute_generic(&sig.ret, &subst)
                 }
-                None if sig.generics.is_empty() => {
-                    Type::Function(sig.params.iter().map(|p| p.ty.clone()).collect(), Box::new(sig.ret))
-                }
+                None if sig.generics.is_empty() => Type::Function(
+                    sig.params.iter().map(|p| p.ty.clone()).collect(),
+                    Box::new(sig.ret),
+                ),
                 None => {
                     self.err(
                         span,
@@ -1677,8 +2210,7 @@ impl<'a> Checker<'a> {
             .unwrap_or_default();
         let mut subst: HashMap<Symbol, Type> = HashMap::new();
         match expected {
-            Some(Type::Struct(expected_id, args))
-            | Some(Type::TupleStruct(expected_id, args))
+            Some(Type::Struct(expected_id, args)) | Some(Type::TupleStruct(expected_id, args))
                 if *expected_id == id && args.len() == generic_names.len() =>
             {
                 subst.extend(generic_names.iter().cloned().zip(args.iter().cloned()));
@@ -1695,7 +2227,14 @@ impl<'a> Checker<'a> {
             ),
             (Some(TypeShape::TupleStruct(field_tys)), Some(args)) => {
                 if args.len() != field_tys.len() {
-                    self.err(span, format!("expected {} argument(s), found {}", field_tys.len(), args.len()));
+                    self.err(
+                        span,
+                        format!(
+                            "expected {} argument(s), found {}",
+                            field_tys.len(),
+                            args.len()
+                        ),
+                    );
                 }
                 for (a, declared) in args.iter().zip(field_tys.iter()) {
                     let concrete_expected = substitute_generic(declared, &subst);
@@ -1705,7 +2244,10 @@ impl<'a> Checker<'a> {
                     if !actual.compatible(&concrete_expected) {
                         let expected_s = self.describe(&concrete_expected);
                         let found_s = self.describe(&actual);
-                        self.err(a.span, format!("expected `{expected_s}`, found `{found_s}`"));
+                        self.err(
+                            a.span,
+                            format!("expected `{expected_s}`, found `{found_s}`"),
+                        );
                     }
                 }
                 Type::TupleStruct(
@@ -1738,7 +2280,10 @@ impl<'a> Checker<'a> {
         expected: Option<&Type>,
     ) -> Type {
         let Some(sig) = self.sigs.enum_sigs.get(&enum_id) else {
-            self.err(span, "internal type information for this enum is unavailable");
+            self.err(
+                span,
+                "internal type information for this enum is unavailable",
+            );
             return Type::Error;
         };
         let Some((_, payload)) = sig.variants.get(idx as usize) else {
@@ -1757,7 +2302,14 @@ impl<'a> Checker<'a> {
             match call_args {
                 Some(args) => {
                     if args.len() != payload.len() {
-                        self.err(span, format!("variant expects {} argument(s), found {}", payload.len(), args.len()));
+                        self.err(
+                            span,
+                            format!(
+                                "variant expects {} argument(s), found {}",
+                                payload.len(),
+                                args.len()
+                            ),
+                        );
                     }
                     for (a, declared) in args.iter().zip(payload.iter()) {
                         let concrete_expected = substitute_generic(declared, &subst);
@@ -1767,7 +2319,10 @@ impl<'a> Checker<'a> {
                         if !actual.compatible(&concrete_expected) {
                             let expected_s = self.describe(&concrete_expected);
                             let found_s = self.describe(&actual);
-                            self.err(a.span, format!("expected `{expected_s}`, found `{found_s}`"));
+                            self.err(
+                                a.span,
+                                format!("expected `{expected_s}`, found `{found_s}`"),
+                            );
                         }
                     }
                 }
@@ -1783,30 +2338,64 @@ impl<'a> Checker<'a> {
         )
     }
 
-    fn static_member_call_or_value(&mut self, owner_id: DefId, idx: u32, span: Span, call_args: Option<&[Expr]>) -> Type {
-        let Some(name) = self.resolved.definitions.get(owner_id).methods.get(idx as usize).cloned() else {
+    fn static_member_call_or_value(
+        &mut self,
+        owner_id: DefId,
+        idx: u32,
+        span: Span,
+        call_args: Option<&[Expr]>,
+        call_id: Option<NodeId>,
+        generic_args: &[Type],
+    ) -> Type {
+        let Some(name) = self
+            .resolved
+            .definitions
+            .get(owner_id)
+            .methods
+            .get(idx as usize)
+            .cloned()
+        else {
             return Type::Error;
         };
-        let Some(sig) = self.sigs.method(owner_id, &name).cloned() else { return Type::Error };
+        let Some(sig) = self.sigs.method(owner_id, &name).cloned() else {
+            return Type::Error;
+        };
         if sig.self_param.is_some() {
-            self.err(span, format!("`{name}` is an instance method and cannot be called as a static member"));
+            self.err(
+                span,
+                format!("`{name}` is an instance method and cannot be called as a static member"),
+            );
             return Type::Error;
         }
         match call_args {
             Some(args) => {
                 let subst =
-                    self.check_call_args(&sig, args, span, None, None);
+                    self.check_call_args(&sig, args, span, None, None, generic_args, call_id);
                 substitute_generic(&sig.ret, &subst)
             }
-            None => Type::Function(sig.params.iter().map(|p| p.ty.clone()).collect(), Box::new(sig.ret)),
+            None => Type::Function(
+                sig.params.iter().map(|p| p.ty.clone()).collect(),
+                Box::new(sig.ret),
+            ),
         }
     }
 
-    fn check_method_call_on(&mut self, base_ty: &Type, method: &Ident, args: &[Expr], span: Span) -> Type {
+    fn check_method_call_on(
+        &mut self,
+        base_ty: &Type,
+        method: &Ident,
+        generic_args: &[Type],
+        args: &[Expr],
+        span: Span,
+        call_id: Option<NodeId>,
+    ) -> Type {
         if let Type::Generic(name) = base_ty {
-            return self.check_generic_method_call(name, method, args, span);
+            return self.check_generic_method_call(name, method, generic_args, args, span, call_id);
         }
         if let Type::Array(elem_ty) = base_ty {
+            if !generic_args.is_empty() {
+                self.err(method.span, "array methods are not generic");
+            }
             return self.check_array_method_call(elem_ty, method, args, span);
         }
         let owner_id = match base_ty {
@@ -1817,28 +2406,45 @@ impl<'a> Checker<'a> {
         let Some(owner_id) = owner_id else {
             if !base_ty.is_error() {
                 let desc = self.describe(base_ty);
-                self.err(method.span, format!("`{desc}` has no method named `{}`", method.name));
+                self.err(
+                    method.span,
+                    format!("`{desc}` has no method named `{}`", method.name),
+                );
             }
             return Type::Error;
         };
         let Some(sig) = self.sigs.method(owner_id, &method.name).cloned() else {
             let desc = self.describe(base_ty);
-            self.err(method.span, format!("`{desc}` has no method named `{}`", method.name));
+            self.err(
+                method.span,
+                format!("`{desc}` has no method named `{}`", method.name),
+            );
             return Type::Error;
         };
-        if sig.self_param.is_none() {
-            self.err(method.span, format!("`{}` is a static method; call it as `Type.{}(...)`", method.name, method.name));
-            return Type::Error;
-        }
         let owner_pattern = owner_as_type(owner_id, self.resolved, self.decls);
         let mut owner_subst = HashMap::new();
         collect_generic_bindings(&owner_pattern, base_ty, &mut owner_subst);
-        let subst =
-            self.check_call_args(&sig, args, span, None, Some(owner_subst));
+        let subst = self.check_call_args(
+            &sig,
+            args,
+            span,
+            None,
+            Some(owner_subst),
+            generic_args,
+            call_id,
+        );
         substitute_generic(&sig.ret, &subst)
     }
 
-    fn check_generic_method_call(&mut self, name: &Symbol, method: &Ident, args: &[Expr], span: Span) -> Type {
+    fn check_generic_method_call(
+        &mut self,
+        name: &Symbol,
+        method: &Ident,
+        generic_args: &[Type],
+        args: &[Expr],
+        span: Span,
+        call_id: Option<NodeId>,
+    ) -> Type {
         let bound = self.generics.get(name).cloned().flatten();
         if let Some(bound) = bound {
             let bound_name = self.resolved.definitions.get(bound.interface).name.as_str();
@@ -1846,28 +2452,45 @@ impl<'a> Checker<'a> {
                 && bound.args == [Type::String]
                 && method.name.as_str() == "into_string"
             {
+                if !generic_args.is_empty() {
+                    self.err(method.span, "`into_string` is not generic");
+                }
                 if !args.is_empty() {
-                    self.err(span, format!("expected 0 argument(s), found {}", args.len()));
+                    self.err(
+                        span,
+                        format!("expected 0 argument(s), found {}", args.len()),
+                    );
                 }
                 return Type::String;
             }
-            if let Some(iface) = self.decls.interface_decls.get(&bound.interface) {
-                if let Some(m) = iface.methods.iter().find(|m| m.name.name == method.name) {
-                    let raw_sig = build_fn_sig(m, self.resolved, self.decls, self.diagnostics);
-                    let interface_subst: HashMap<Symbol, Type> = iface
-                        .generics
-                        .iter()
-                        .map(|generic| generic.name.name.clone())
-                        .zip(bound.args)
-                        .collect();
-                    let sig = specialize_fn_sig(&raw_sig, &interface_subst);
-                    let subst =
-                        self.check_call_args(&sig, args, span, None, None);
-                    return substitute_generic(&sig.ret, &subst);
-                }
+            if let Some(raw_sig) = self
+                .sigs
+                .interface_methods
+                .get(&(bound.interface, method.name.clone()))
+                .cloned()
+            {
+                let interface_subst: HashMap<Symbol, Type> = self
+                    .sigs
+                    .interface_generics
+                    .get(&bound.interface)
+                    .into_iter()
+                    .flatten()
+                    .cloned()
+                    .zip(bound.args)
+                    .collect();
+                let sig = specialize_fn_sig(&raw_sig, &interface_subst);
+                let subst =
+                    self.check_call_args(&sig, args, span, None, None, generic_args, call_id);
+                return substitute_generic(&sig.ret, &subst);
             }
         }
-        self.err(method.span, format!("no method named `{}` found for generic type `{name}`", method.name));
+        self.err(
+            method.span,
+            format!(
+                "no method named `{}` found for generic type `{name}`",
+                method.name
+            ),
+        );
         Type::Error
     }
 
@@ -1877,31 +2500,49 @@ impl<'a> Checker<'a> {
     /// them in [`Signatures::methods`] to look up; special-cased here the
     /// same way `println`/`print` are special-cased in
     /// [`Checker::resolve_fn_value`].
-    fn check_array_method_call(&mut self, elem_ty: &Type, method: &Ident, args: &[Expr], span: Span) -> Type {
+    fn check_array_method_call(
+        &mut self,
+        elem_ty: &Type,
+        method: &Ident,
+        args: &[Expr],
+        span: Span,
+    ) -> Type {
         match method.name.as_str() {
             "len" => {
                 if !args.is_empty() {
-                    self.err(span, format!("expected 0 argument(s), found {}", args.len()));
+                    self.err(
+                        span,
+                        format!("expected 0 argument(s), found {}", args.len()),
+                    );
                 }
                 Type::Primitive(PrimitiveKind::Usize)
             }
             "push" => {
                 if args.len() != 1 {
-                    self.err(span, format!("expected 1 argument(s), found {}", args.len()));
+                    self.err(
+                        span,
+                        format!("expected 1 argument(s), found {}", args.len()),
+                    );
                 }
                 if let Some(arg) = args.first() {
                     let actual = self.check_expr_with_expected(arg, Some(elem_ty));
                     if !actual.compatible(elem_ty) {
                         let expected_s = self.describe(elem_ty);
                         let found_s = self.describe(&actual);
-                        self.err(arg.span, format!("expected `{expected_s}`, found `{found_s}`"));
+                        self.err(
+                            arg.span,
+                            format!("expected `{expected_s}`, found `{found_s}`"),
+                        );
                     }
                 }
                 Type::unit()
             }
             "pop" => {
                 if !args.is_empty() {
-                    self.err(span, format!("expected 0 argument(s), found {}", args.len()));
+                    self.err(
+                        span,
+                        format!("expected 0 argument(s), found {}", args.len()),
+                    );
                 }
                 match self.resolved.definitions.lookup(&Symbol::new("Option")) {
                     Some(option_id) => Type::Enum(option_id, vec![elem_ty.clone()]),
@@ -1909,7 +2550,10 @@ impl<'a> Checker<'a> {
                 }
             }
             other => {
-                self.err(method.span, format!("`Array` has no method named `{other}`"));
+                self.err(
+                    method.span,
+                    format!("`Array` has no method named `{other}`"),
+                );
                 Type::Error
             }
         }
@@ -1936,8 +2580,12 @@ impl<'a> Checker<'a> {
 
     fn check_field_access(&mut self, base_ty: &Type, field: &nether_ast::FieldAccessor) -> Type {
         match field {
-            nether_ast::FieldAccessor::Named(ident) => self.check_field_access_named(base_ty, ident),
-            nether_ast::FieldAccessor::Index(idx, span) => self.check_tuple_index(base_ty, *idx, *span),
+            nether_ast::FieldAccessor::Named(ident) => {
+                self.check_field_access_named(base_ty, ident)
+            }
+            nether_ast::FieldAccessor::Index(idx, span) => {
+                self.check_tuple_index(base_ty, *idx, *span)
+            }
         }
     }
 
@@ -1963,7 +2611,10 @@ impl<'a> Checker<'a> {
             return Type::Error;
         }
         let desc = self.describe(base_ty);
-        self.err(ident.span, format!("`{desc}` has no field named `{}`", ident.name));
+        self.err(
+            ident.span,
+            format!("`{desc}` has no field named `{}`", ident.name),
+        );
         Type::Error
     }
 
@@ -2053,7 +2704,12 @@ impl<'a> Checker<'a> {
         let mut covered: HashSet<u32> = HashSet::new();
         let mut has_catch_all = false;
         for arm in arms {
-            self.check_pattern(&arm.pattern, &scrutinee_ty, &mut covered, &mut has_catch_all);
+            self.check_pattern(
+                &arm.pattern,
+                &scrutinee_ty,
+                &mut covered,
+                &mut has_catch_all,
+            );
             let arm_expected = expected.or(result_ty.as_ref());
             let body_ty = self.check_expr_with_expected(&arm.body, arm_expected);
             result_ty = Some(match result_ty {
@@ -2062,7 +2718,12 @@ impl<'a> Checker<'a> {
                     if !prev.compatible(&body_ty) {
                         let prev_s = self.describe(&prev);
                         let body_s = self.describe(&body_ty);
-                        self.err(arm.body.span, format!("`match` arms have incompatible types: `{prev_s}` vs `{body_s}`"));
+                        self.err(
+                            arm.body.span,
+                            format!(
+                                "`match` arms have incompatible types: `{prev_s}` vs `{body_s}`"
+                            ),
+                        );
                     }
                     if matches!(prev, Type::Never) {
                         body_ty
@@ -2083,7 +2744,13 @@ impl<'a> Checker<'a> {
                         .map(|(_, (name, _))| name.as_str())
                         .collect();
                     if !missing.is_empty() {
-                        self.err(span, format!("match is not exhaustive: missing variant(s) {}", missing.join(", ")));
+                        self.err(
+                            span,
+                            format!(
+                                "match is not exhaustive: missing variant(s) {}",
+                                missing.join(", ")
+                            ),
+                        );
                     }
                 }
             }
@@ -2105,7 +2772,13 @@ impl<'a> Checker<'a> {
         result
     }
 
-    fn check_pattern(&mut self, pattern: &Pattern, scrutinee_ty: &Type, covered: &mut HashSet<u32>, has_catch_all: &mut bool) {
+    fn check_pattern(
+        &mut self,
+        pattern: &Pattern,
+        scrutinee_ty: &Type,
+        covered: &mut HashSet<u32>,
+        has_catch_all: &mut bool,
+    ) {
         self.check_pattern_inner(pattern, scrutinee_ty, covered, has_catch_all, true);
     }
 
@@ -2162,7 +2835,10 @@ impl<'a> Checker<'a> {
                 };
                 if !compatible && !scrutinee_ty.is_error() {
                     let found = self.describe(scrutinee_ty);
-                    self.err(*span, format!("literal pattern is incompatible with `{found}`"));
+                    self.err(
+                        *span,
+                        format!("literal pattern is incompatible with `{found}`"),
+                    );
                 }
             }
             Pattern::Tuple(elems, span) => {
@@ -2183,19 +2859,16 @@ impl<'a> Checker<'a> {
                     Type::Error => vec![Type::Error; elems.len()],
                     other => {
                         let found = self.describe(other);
-                        self.err(*span, format!("tuple pattern requires a tuple, found `{found}`"));
+                        self.err(
+                            *span,
+                            format!("tuple pattern requires a tuple, found `{found}`"),
+                        );
                         vec![Type::Error; elems.len()]
                     }
                 };
                 for (index, pattern) in elems.iter().enumerate() {
                     let ty = elem_tys.get(index).cloned().unwrap_or(Type::Error);
-                    self.check_pattern_inner(
-                        pattern,
-                        &ty,
-                        covered,
-                        has_catch_all,
-                        false,
-                    );
+                    self.check_pattern_inner(pattern, &ty, covered, has_catch_all, false);
                 }
             }
             Pattern::Variant { path, payload, .. } => {
@@ -2228,16 +2901,15 @@ impl<'a> Checker<'a> {
         has_catch_all: &mut bool,
         top_level: bool,
     ) {
-        let same_enum = matches!(scrutinee_ty, Type::Enum(scrutinee_id, _) if *scrutinee_id == enum_id);
+        let same_enum =
+            matches!(scrutinee_ty, Type::Enum(scrutinee_id, _) if *scrutinee_id == enum_id);
         if !same_enum {
             if !scrutinee_ty.is_error() {
                 let pattern_enum = self.resolved.definitions.get(enum_id).name.to_string();
                 let found = self.describe(scrutinee_ty);
                 self.err(
                     span,
-                    format!(
-                        "variant pattern from enum `{pattern_enum}` cannot match `{found}`"
-                    ),
+                    format!("variant pattern from enum `{pattern_enum}` cannot match `{found}`"),
                 );
             }
         } else if top_level {
@@ -2269,13 +2941,7 @@ impl<'a> Checker<'a> {
         };
         for (index, pattern) in payload.iter().enumerate() {
             let ty = payload_tys.get(index).cloned().unwrap_or(Type::Error);
-            self.check_pattern_inner(
-                pattern,
-                &ty,
-                covered,
-                has_catch_all,
-                false,
-            );
+            self.check_pattern_inner(pattern, &ty, covered, has_catch_all, false);
         }
     }
 
@@ -2286,7 +2952,10 @@ impl<'a> Checker<'a> {
             Type::Error => Type::Error,
             other => {
                 let desc = self.describe(other);
-                self.err(iter.span, format!("`for`-`in` requires an `Array`, found `{desc}`"));
+                self.err(
+                    iter.span,
+                    format!("`for`-`in` requires an `Array`, found `{desc}`"),
+                );
                 Type::Error
             }
         };
@@ -2308,20 +2977,34 @@ impl<'a> Checker<'a> {
         if !actual.compatible(&expected_ret) {
             let expected_s = self.describe(&expected_ret);
             let found_s = self.describe(&actual);
-            self.err(span, format!("expected return type `{expected_s}`, found `{found_s}`"));
+            self.err(
+                span,
+                format!("expected return type `{expected_s}`, found `{found_s}`"),
+            );
         }
         Type::Never
     }
 
-    fn check_closure(&mut self, params: &[nether_ast::Param], body: &Expr, expected: Option<&Type>) -> Type {
-        let param_tys: Vec<Type> = params.iter().map(|p| lower_type_expr(&p.ty, self.resolved, self.decls, self.diagnostics)).collect();
+    fn check_closure(
+        &mut self,
+        params: &[nether_ast::Param],
+        body: &Expr,
+        expected: Option<&Type>,
+    ) -> Type {
+        let param_tys: Vec<Type> = params
+            .iter()
+            .map(|p| lower_type_expr(&p.ty, self.resolved, self.decls, self.diagnostics))
+            .collect();
         for (p, t) in params.iter().zip(param_tys.iter()) {
             self.bind_local(p.id, t.clone(), p.mutable);
         }
         let expected_ret = match expected {
             Some(Type::Function(expected_params, expected_ret))
                 if expected_params.len() == param_tys.len()
-                    && expected_params.iter().zip(&param_tys).all(|(expected, actual)| actual.compatible(expected)) =>
+                    && expected_params
+                        .iter()
+                        .zip(&param_tys)
+                        .all(|(expected, actual)| actual.compatible(expected)) =>
             {
                 Some(expected_ret.as_ref())
             }
@@ -2355,7 +3038,10 @@ impl<'a> Checker<'a> {
         }
         let name = def.name.clone();
         let Some(TypeShape::Struct(decl_fields)) = self.sigs.type_shapes.get(&id).cloned() else {
-            self.err(path.span, format!("`{name}` is not a struct with named fields"));
+            self.err(
+                path.span,
+                format!("`{name}` is not a struct with named fields"),
+            );
             return Type::Error;
         };
         let generic_names = self
@@ -2381,16 +3067,28 @@ impl<'a> Checker<'a> {
                 if !actual.compatible(&concrete_expected) {
                     let expected_s = self.describe(&concrete_expected);
                     let found_s = self.describe(&actual);
-                    self.err(value.span, format!("expected `{expected_s}`, found `{found_s}` for field `{}`", fname.name));
+                    self.err(
+                        value.span,
+                        format!(
+                            "expected `{expected_s}`, found `{found_s}` for field `{}`",
+                            fname.name
+                        ),
+                    );
                 }
             } else {
-                self.err(fname.span, format!("`{name}` has no field named `{}`", fname.name));
+                self.err(
+                    fname.span,
+                    format!("`{name}` has no field named `{}`", fname.name),
+                );
                 self.check_expr(value);
             }
         }
         for (field_name, _) in &decl_fields {
             if !seen.contains(field_name) {
-                self.err(path.span, format!("missing field `{field_name}` in struct literal for `{name}`"));
+                self.err(
+                    path.span,
+                    format!("missing field `{field_name}` in struct literal for `{name}`"),
+                );
             }
         }
         Type::Struct(
@@ -2409,11 +3107,44 @@ impl<'a> Checker<'a> {
         call_span: Span,
         expected_return: Option<&Type>,
         initial_subst: Option<HashMap<Symbol, Type>>,
+        explicit_generic_args: &[Type],
+        call_id: Option<NodeId>,
     ) -> HashMap<Symbol, Type> {
         if args.len() != sig.params.len() {
-            self.err(call_span, format!("expected {} argument(s), found {}", sig.params.len(), args.len()));
+            self.err(
+                call_span,
+                format!(
+                    "expected {} argument(s), found {}",
+                    sig.params.len(),
+                    args.len()
+                ),
+            );
         }
         let mut subst = initial_subst.unwrap_or_default();
+        if !explicit_generic_args.is_empty() {
+            let remaining: Vec<Symbol> = sig
+                .generics
+                .iter()
+                .map(|(name, _)| name)
+                .filter(|name| !subst.contains_key(*name))
+                .cloned()
+                .collect();
+            if explicit_generic_args.len() != remaining.len() {
+                self.err(
+                    call_span,
+                    format!(
+                        "expected {} explicit generic argument(s), found {}",
+                        remaining.len(),
+                        explicit_generic_args.len()
+                    ),
+                );
+            }
+            subst.extend(
+                remaining
+                    .into_iter()
+                    .zip(explicit_generic_args.iter().cloned()),
+            );
+        }
         if let Some(expected_return) = expected_return {
             collect_generic_bindings(&sig.ret, expected_return, &mut subst);
         }
@@ -2426,7 +3157,10 @@ impl<'a> Checker<'a> {
                 if param.mutable {
                     self.err(arg.span, format!("parameter `{}` is `mut`; the caller must also write `mut` at the call site", param.name));
                 } else {
-                    self.err(arg.span, "`mut` is only valid for arguments passed to a `mut` parameter");
+                    self.err(
+                        arg.span,
+                        "`mut` is only valid for arguments passed to a `mut` parameter",
+                    );
                 }
             } else if param.mutable {
                 self.check_mut_arg_target(inner_expr);
@@ -2441,7 +3175,10 @@ impl<'a> Checker<'a> {
             if !actual.compatible(&expected) {
                 let expected_s = self.describe(&expected);
                 let found_s = self.describe(&actual);
-                self.err(inner_expr.span, format!("expected `{expected_s}`, found `{found_s}`"));
+                self.err(
+                    inner_expr.span,
+                    format!("expected `{expected_s}`, found `{found_s}`"),
+                );
             }
         }
         for (name, bound) in &sig.generics {
@@ -2461,12 +3198,22 @@ impl<'a> Checker<'a> {
                     .map(|arg| substitute_generic(arg, &subst))
                     .collect(),
             };
-            let satisfies =
-                self.type_satisfies_bound(concrete, &concrete_bound);
+            let satisfies = self.type_satisfies_bound(concrete, &concrete_bound);
             if !satisfies {
                 let concrete_s = self.describe(concrete);
                 let iface_name = self.describe_bound(&concrete_bound);
                 self.err(call_span, format!("`{concrete_s}` does not implement `{iface_name}`, required by generic parameter `{name}`"));
+            }
+        }
+        if let Some(call_id) = call_id {
+            if !sig.generics.is_empty() {
+                self.call_generic_args.insert(
+                    call_id,
+                    sig.generics
+                        .iter()
+                        .map(|(name, _)| subst.get(name).cloned().unwrap_or(Type::Error))
+                        .collect(),
+                );
             }
         }
         subst
@@ -2474,20 +3221,13 @@ impl<'a> Checker<'a> {
 
     fn validate_type_bounds(&mut self, ty: &Type, span: Span) {
         match ty {
-            Type::Struct(id, args)
-            | Type::TupleStruct(id, args)
-            | Type::Enum(id, args) => {
+            Type::Struct(id, args) | Type::TupleStruct(id, args) | Type::Enum(id, args) => {
                 let names = self
                     .sigs
                     .type_generics
                     .get(id)
                     .cloned()
-                    .or_else(|| {
-                        self.sigs
-                            .enum_sigs
-                            .get(id)
-                            .map(|sig| sig.generics.clone())
-                    })
+                    .or_else(|| self.sigs.enum_sigs.get(id).map(|sig| sig.generics.clone()))
                     .unwrap_or_default();
                 let bounds = self
                     .sigs
@@ -2495,13 +3235,13 @@ impl<'a> Checker<'a> {
                     .get(id)
                     .cloned()
                     .unwrap_or_default();
-                let subst: HashMap<Symbol, Type> = names
-                    .into_iter()
-                    .zip(args.iter().cloned())
-                    .collect();
+                let subst: HashMap<Symbol, Type> =
+                    names.into_iter().zip(args.iter().cloned()).collect();
                 for (index, bound) in bounds.into_iter().enumerate() {
                     let Some(bound) = bound else { continue };
-                    let Some(actual) = args.get(index) else { continue };
+                    let Some(actual) = args.get(index) else {
+                        continue;
+                    };
                     if actual.contains_error() {
                         continue;
                     }
@@ -2547,7 +3287,12 @@ impl<'a> Checker<'a> {
     }
 
     fn describe_bound(&self, bound: &GenericBound) -> String {
-        let name = self.resolved.definitions.get(bound.interface).name.to_string();
+        let name = self
+            .resolved
+            .definitions
+            .get(bound.interface)
+            .name
+            .to_string();
         if bound.args.is_empty() {
             name
         } else {
@@ -2580,7 +3325,7 @@ impl<'a> Checker<'a> {
                 .generics
                 .get(name)
                 .and_then(Option::as_ref)
-                .is_some_and(|actual| actual == bound),
+                .is_some_and(|actual| self.sigs.bound_satisfies(actual, bound)),
             Type::Error => true,
             _ => false,
         }
@@ -2603,12 +3348,11 @@ impl<'a> Checker<'a> {
                         .method(*id, &Symbol::new("into_string"))
                         .is_some_and(|sig| sig.self_param.is_some() && sig.ret == Type::String)
             }
-            Type::Generic(name) => {
-                self.generics
-                    .get(name)
-                    .and_then(Option::as_ref)
-                    .is_some_and(|bound| self.is_into_string_bound(bound))
-            }
+            Type::Generic(name) => self
+                .generics
+                .get(name)
+                .and_then(Option::as_ref)
+                .is_some_and(|bound| self.is_into_string_bound(bound)),
             _ => false,
         }
     }
@@ -2616,7 +3360,12 @@ impl<'a> Checker<'a> {
     fn require_into_string(&mut self, ty: &Type, span: Span) {
         if !self.is_into_string_convertible(ty) {
             let description = self.describe(ty);
-            self.err(span, format!("`{description}` cannot be converted to `String`; implement `Into<String>`"));
+            self.err(
+                span,
+                format!(
+                    "`{description}` cannot be converted to `String`; implement `Into<String>`"
+                ),
+            );
         }
     }
 
@@ -2637,6 +3386,9 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        self.err(expr.span, "a `mut` argument must be a plain mutable local variable");
+        self.err(
+            expr.span,
+            "a `mut` argument must be a plain mutable local variable",
+        );
     }
 }

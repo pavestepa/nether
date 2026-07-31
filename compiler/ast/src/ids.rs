@@ -11,7 +11,7 @@ pub struct NodeId(u32);
 
 /// Hands out fresh, never-repeating [`NodeId`]s while parsing one
 /// compilation unit.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct NodeIdGen(u32);
 
 impl NodeIdGen {

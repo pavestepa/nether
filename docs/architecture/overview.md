@@ -141,9 +141,10 @@ function signatures (declared, not defined, in `codegen`/`llvm`).
    spec §10).
 3. **Name Resolution** (`resolver`) — walks the AST, builds scopes, binds
    every identifier/path to a concrete declaration (or reports an
-   unresolved-name diagnostic). This is the stage that disambiguates the
-   dotted-path node from §10 into "module segment" vs. "value/static
-   access" by looking up each segment.
+   unresolved-name diagnostic). The driver has already expanded
+   `mod` declarations into a file graph and mapped `self`/`super`/`crate`
+   imports to target file namespaces; resolver binds each imported name
+   and disambiguates remaining value/static access.
 4. **Type Checking** (`typecheck`) — assigns a structured `Type` (never a
    string — see `type-system.md`) to every expression, checks interface
    bounds are satisfied, checks `mut`/heap-vs-stack rules are respected
@@ -218,6 +219,12 @@ and compile options, and compile every file under `examples/`.
 The end-to-end native pipeline is implemented. The compiler is an
 experimental alpha/MVP rather than a production toolchain: it has no
 package manager or incremental compilation, imports have no aliases,
+globs or re-exports, inline modules are absent,
 generics intentionally omit where-clauses/associated types/specialization,
 the standard library is small, enums use a space-inefficient flat layout,
 and linking is host-only (cross-target object emission is supported).
+
+Generic functions, methods, structs, tuple structs, enums, interfaces,
+generic bounds and interface inheritance are implemented through static
+monomorphization. The example-driven feature and limitation reference is
+[`../generics.md`](../generics.md).

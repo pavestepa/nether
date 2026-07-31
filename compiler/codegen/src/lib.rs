@@ -78,17 +78,38 @@ pub use shims::Shims;
 
 /// Builds one LLVM module named `name` containing every function in
 /// `functions`.
-pub fn generate<'ctx>(cg: &'ctx Codegen, name: &str, functions: &[MirFunction], defs: &Definitions, sigs: &Signatures) -> ModuleCx<'ctx> {
+pub fn generate<'ctx>(
+    cg: &'ctx Codegen,
+    name: &str,
+    functions: &[MirFunction],
+    defs: &Definitions,
+    sigs: &Signatures,
+) -> ModuleCx<'ctx> {
     let m = cg.module(name);
     let layout = Layout::new(&m, defs, sigs);
     let runtime = Runtime::declare(&m);
     let shims = Shims::new();
 
     let llvm_fns: Vec<Func<'ctx>> = functions.iter().map(|f| declare(&m, &layout, f)).collect();
-    let funcs: HashMap<MonoFnId, Func<'ctx>> = functions.iter().map(|f| f.id).zip(llvm_fns.iter().copied()).collect();
+    let funcs: HashMap<MonoFnId, Func<'ctx>> = functions
+        .iter()
+        .map(|f| f.id)
+        .zip(llvm_fns.iter().copied())
+        .collect();
+    let mir_functions: HashMap<MonoFnId, &MirFunction> =
+        functions.iter().map(|f| (f.id, f)).collect();
 
     for (f, &llvm_fn) in functions.iter().zip(&llvm_fns) {
-        function::build_function(&m, &layout, &runtime, &shims, &funcs, f, llvm_fn);
+        function::build_function(
+            &m,
+            &layout,
+            &runtime,
+            &shims,
+            &funcs,
+            &mir_functions,
+            f,
+            llvm_fn,
+        );
     }
 
     emit_entry_point(&m, functions, &funcs);
@@ -106,8 +127,15 @@ pub fn generate<'ctx>(cg: &'ctx Codegen, name: &str, functions: &[MirFunction], 
 /// (see its own module docs), so this is really just "always," but the
 /// check is cheap insurance against ever calling `generate` on a
 /// `main`-less module in the future.
-fn emit_entry_point<'ctx>(m: &ModuleCx<'ctx>, functions: &[MirFunction], funcs: &HashMap<MonoFnId, Func<'ctx>>) {
-    let Some(main_fn) = functions.iter().find(|f| f.owner.is_none() && f.name.as_str() == "main") else {
+fn emit_entry_point<'ctx>(
+    m: &ModuleCx<'ctx>,
+    functions: &[MirFunction],
+    funcs: &HashMap<MonoFnId, Func<'ctx>>,
+) {
+    let Some(main_fn) = functions
+        .iter()
+        .find(|f| f.owner.is_none() && f.name.as_str() == "main")
+    else {
         return;
     };
     let nether_main = funcs[&main_fn.id];
@@ -120,24 +148,28 @@ fn emit_entry_point<'ctx>(m: &ModuleCx<'ctx>, functions: &[MirFunction], funcs: 
 }
 
 fn declare<'ctx>(m: &ModuleCx<'ctx>, layout: &Layout<'_, 'ctx>, f: &MirFunction) -> Func<'ctx> {
-    // A stack aggregate (`Tuple`/camelCase `struct`/`enum`) parameter is
-    // always passed by pointer, never as a raw LLVM aggregate value —
-    // see `function::FnCodegen::build`'s matching entry-block handling
-    // and `crate`'s own module docs on why every aggregate is addressed
-    // through a pointer, never loaded into an SSA value.
+    // A stack aggregate (`Tuple`/camelCase `struct`/`enum`) and every
+    // mutable parameter are passed by pointer. See
+    // `function::FnCodegen::build`'s matching entry-block handling and
+    // `crate`'s module docs on aggregate addressing; the pointer is also
+    // what gives a `mut` scalar access to the caller's original slot.
     let mut param_tys: Vec<_> = Vec::new();
     if f.is_closure {
         param_tys.push(m.ptr_type());
     }
-    param_tys.extend(f
-        .params
-        .iter()
-        .map(|&p| {
-            let ty = &f.local_decl(p).ty;
-            if function::is_aggregate(ty, layout.defs) { m.ptr_type() } else { layout.llvm_type(ty) }
-        })
-    );
-    let ret_ty = if is_unit(&f.ret) { None } else { Some(layout.llvm_type(&f.ret)) };
+    param_tys.extend(f.params.iter().map(|&p| {
+        let decl = f.local_decl(p);
+        if decl.mutable || function::is_aggregate(&decl.ty, layout.defs) {
+            m.ptr_type()
+        } else {
+            layout.llvm_type(&decl.ty)
+        }
+    }));
+    let ret_ty = if is_unit(&f.ret) {
+        None
+    } else {
+        Some(layout.llvm_type(&f.ret))
+    };
     let fn_ty = m.fn_type(&param_tys, ret_ty);
     m.declare_function(&mangled_name(f), fn_ty)
 }
@@ -156,7 +188,12 @@ fn mangled_name(f: &MirFunction) -> String {
         return "nether_main".to_string();
     }
     match f.owner {
-        Some(owner) => format!("nether_{}_{}_mono{}", owner_tag(owner), f.name, f.id.index()),
+        Some(owner) => format!(
+            "nether_{}_{}_mono{}",
+            owner_tag(owner),
+            f.name,
+            f.id.index()
+        ),
         None => format!("nether_{}_mono{}", f.name, f.id.index()),
     }
 }

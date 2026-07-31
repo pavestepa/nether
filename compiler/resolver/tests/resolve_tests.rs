@@ -13,7 +13,11 @@ fn parse(source: &str) -> Module {
 fn resolve_ok(source: &str) -> ResolvedNames {
     let module = parse(source);
     let (resolved, diags) = resolve(&module);
-    assert!(diags.is_empty(), "unexpected resolve diagnostics: {}", messages(&diags));
+    assert!(
+        diags.is_empty(),
+        "unexpected resolve diagnostics: {}",
+        messages(&diags)
+    );
     resolved
 }
 
@@ -24,7 +28,11 @@ fn resolve_with_diagnostics(source: &str) -> (Module, ResolvedNames, Vec<Diagnos
 }
 
 fn messages(diags: &[Diagnostic]) -> String {
-    diags.iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("; ")
+    diags
+        .iter()
+        .map(|d| d.message.clone())
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// Finds the first `Path` expression node anywhere within `expr`'s tail
@@ -84,13 +92,19 @@ impl Lang: Sound {
 }
 "#;
     let resolved = resolve_ok(source);
-    let lang_id = resolved.definitions.lookup(&"Lang".into()).expect("Lang should be defined");
+    let lang_id = resolved
+        .definitions
+        .lookup(&"Lang".into())
+        .expect("Lang should be defined");
     assert_eq!(resolved.definitions.get(lang_id).kind, DefKind::Type);
     // `new` and `set_name` (from the plain impl) plus `into_string` and
     // `sound` (from the interface impls) should all have been merged in.
     let methods = &resolved.definitions.get(lang_id).methods;
     for expected in ["new", "set_name", "into_string", "sound"] {
-        assert!(methods.iter().any(|m| m.as_str() == expected), "missing method {expected}");
+        assert!(
+            methods.iter().any(|m| m.as_str() == expected),
+            "missing method {expected}"
+        );
     }
 }
 
@@ -110,28 +124,55 @@ fn main() {
 "#,
     );
     let (resolved, diags) = resolve(&module);
-    assert!(diags.is_empty(), "unexpected diagnostics: {}", messages(&diags));
+    assert!(
+        diags.is_empty(),
+        "unexpected diagnostics: {}",
+        messages(&diags)
+    );
 
-    let Item::Fn(f) = &module.items[0] else { panic!("expected FnDecl") };
+    let Item::Fn(f) = &module.items[0] else {
+        panic!("expected FnDecl")
+    };
     let body = f.body.as_ref().unwrap();
 
     // stmts[0] = `let x = 1;` — its own local id.
-    let Stmt::Let(outer_let) = &body.stmts[0] else { panic!("expected let") };
-    let outer_local = *resolved.locals.get(&outer_let.id).expect("outer x should be a binding site");
+    let Stmt::Let(outer_let) = &body.stmts[0] else {
+        panic!("expected let")
+    };
+    let outer_local = *resolved
+        .locals
+        .get(&outer_let.id)
+        .expect("outer x should be a binding site");
 
     // stmts[1] = `println(x);` — should resolve to the outer local.
-    let Stmt::Expr(println_call) = &body.stmts[1] else { panic!("expected call stmt") };
-    let ExprKind::Call { args, .. } = &println_call.kind else { panic!("expected Call") };
+    let Stmt::Expr(println_call) = &body.stmts[1] else {
+        panic!("expected call stmt")
+    };
+    let ExprKind::Call { args, .. } = &println_call.kind else {
+        panic!("expected Call")
+    };
     let use_path = first_path(&args[0]);
-    let res = resolved.path_res.get(&use_path.id).expect("path should be resolved");
+    let res = resolved
+        .path_res
+        .get(&use_path.id)
+        .expect("path should be resolved");
     assert_eq!(res.base, Resolution::Local(outer_local));
 
     // stmts[2] = `let y = { let x = 2; x };` — the inner `x` must resolve
     // to a *different* local than the outer one (shadowing).
-    let Stmt::Let(y_let) = &body.stmts[2] else { panic!("expected let y") };
-    let ExprKind::Block(inner_block) = &y_let.value.kind else { panic!("expected block") };
-    let Stmt::Let(inner_let) = &inner_block.stmts[0] else { panic!("expected inner let") };
-    let inner_local = *resolved.locals.get(&inner_let.id).expect("inner x should be a binding site");
+    let Stmt::Let(y_let) = &body.stmts[2] else {
+        panic!("expected let y")
+    };
+    let ExprKind::Block(inner_block) = &y_let.value.kind else {
+        panic!("expected block")
+    };
+    let Stmt::Let(inner_let) = &inner_block.stmts[0] else {
+        panic!("expected inner let")
+    };
+    let inner_local = *resolved
+        .locals
+        .get(&inner_let.id)
+        .expect("inner x should be a binding site");
     assert_ne!(outer_local, inner_local);
 
     let inner_tail_path = first_path(inner_block.tail.as_ref().unwrap());
@@ -140,8 +181,12 @@ fn main() {
 
     // stmts[3] = `println(x);` after the block — resolves back to the
     // *outer* local, since the inner one went out of scope.
-    let Stmt::Expr(second_println) = &body.stmts[3] else { panic!("expected call stmt") };
-    let ExprKind::Call { args, .. } = &second_println.kind else { panic!("expected Call") };
+    let Stmt::Expr(second_println) = &body.stmts[3] else {
+        panic!("expected call stmt")
+    };
+    let ExprKind::Call { args, .. } = &second_println.kind else {
+        panic!("expected Call")
+    };
     let after_path = first_path(&args[0]);
     let after_res = resolved.path_res.get(&after_path.id).unwrap();
     assert_eq!(after_res.base, Resolution::Local(outer_local));
@@ -160,14 +205,27 @@ impl Dog {
 "#,
     );
     let (resolved, diags) = resolve(&module);
-    assert!(diags.is_empty(), "unexpected diagnostics: {}", messages(&diags));
+    assert!(
+        diags.is_empty(),
+        "unexpected diagnostics: {}",
+        messages(&diags)
+    );
 
-    let Item::Impl(impl_block) = &module.items[1] else { panic!("expected impl") };
+    let Item::Impl(impl_block) = &module.items[1] else {
+        panic!("expected impl")
+    };
     let method = &impl_block.methods[0];
-    let self_local = *resolved.locals.get(&method.id).expect("self should be bound under the FnDecl's id");
+    let self_local = *resolved
+        .locals
+        .get(&method.id)
+        .expect("self should be bound under the FnDecl's id");
 
-    let Stmt::Expr(assign_stmt) = &method.body.as_ref().unwrap().stmts[0] else { panic!("expected assign stmt") };
-    let ExprKind::Assign { target, .. } = &assign_stmt.kind else { panic!("expected assign") };
+    let Stmt::Expr(assign_stmt) = &method.body.as_ref().unwrap().stmts[0] else {
+        panic!("expected assign stmt")
+    };
+    let ExprKind::Assign { target, .. } = &assign_stmt.kind else {
+        panic!("expected assign")
+    };
     let self_path = first_path(target);
     let res = resolved.path_res.get(&self_path.id).unwrap();
     assert_eq!(res.base, Resolution::Local(self_local));
@@ -192,12 +250,24 @@ fn main() {
 "#,
     );
     let (resolved, diags) = resolve(&module);
-    assert!(diags.is_empty(), "unexpected diagnostics: {}", messages(&diags));
+    assert!(
+        diags.is_empty(),
+        "unexpected diagnostics: {}",
+        messages(&diags)
+    );
 
-    let Item::Fn(main_fn) = &module.items[2] else { panic!("expected FnDecl") };
-    let Stmt::Let(let_stmt) = &main_fn.body.as_ref().unwrap().stmts[0] else { panic!("expected let") };
-    let ExprKind::Call { callee, .. } = &let_stmt.value.kind else { panic!("expected Call") };
-    let ExprKind::Path(path) = &callee.kind else { panic!("expected Path callee") };
+    let Item::Fn(main_fn) = &module.items[2] else {
+        panic!("expected FnDecl")
+    };
+    let Stmt::Let(let_stmt) = &main_fn.body.as_ref().unwrap().stmts[0] else {
+        panic!("expected let")
+    };
+    let ExprKind::Call { callee, .. } = &let_stmt.value.kind else {
+        panic!("expected Call")
+    };
+    let ExprKind::Path(path) = &callee.kind else {
+        panic!("expected Path callee")
+    };
     let res = resolved.path_res.get(&path.id).unwrap();
     assert!(matches!(res.base, Resolution::StaticMember(_, _)));
     assert_eq!(res.consumed, 2);
@@ -220,18 +290,39 @@ fn describe(c: Color) {
 "#,
     );
     let (resolved, diags) = resolve(&module);
-    assert!(diags.is_empty(), "unexpected diagnostics: {}", messages(&diags));
+    assert!(
+        diags.is_empty(),
+        "unexpected diagnostics: {}",
+        messages(&diags)
+    );
 
-    let Item::Fn(f) = &module.items[1] else { panic!("expected FnDecl") };
-    let tail = f.body.as_ref().unwrap().tail.as_ref().expect("match is the tail expr");
-    let ExprKind::Match { arms, .. } = &tail.kind else { panic!("expected Match") };
+    let Item::Fn(f) = &module.items[1] else {
+        panic!("expected FnDecl")
+    };
+    let tail = f
+        .body
+        .as_ref()
+        .unwrap()
+        .tail
+        .as_ref()
+        .expect("match is the tail expr");
+    let ExprKind::Match { arms, .. } = &tail.kind else {
+        panic!("expected Match")
+    };
 
-    let nether_ast::Pattern::Variant { path: red_path, .. } = &arms[0].pattern else { panic!("expected Variant") };
+    let nether_ast::Pattern::Variant { path: red_path, .. } = &arms[0].pattern else {
+        panic!("expected Variant")
+    };
     let red_res = resolved.path_res.get(&red_path.id).unwrap();
     assert!(matches!(red_res.base, Resolution::EnumVariant(_, 0)));
     assert_eq!(red_res.consumed, 2);
 
-    let nether_ast::Pattern::Variant { path: custom_path, .. } = &arms[1].pattern else { panic!("expected Variant") };
+    let nether_ast::Pattern::Variant {
+        path: custom_path, ..
+    } = &arms[1].pattern
+    else {
+        panic!("expected Variant")
+    };
     let custom_res = resolved.path_res.get(&custom_path.id).unwrap();
     assert!(matches!(custom_res.base, Resolution::EnumVariant(_, 1)));
     assert_eq!(custom_res.consumed, 1);
@@ -270,7 +361,8 @@ fn main() {
 
 #[test]
 fn duplicate_top_level_definition_reports_diagnostic() {
-    let (_, _, diags) = resolve_with_diagnostics("type Dog { name: String }\ntype Dog { other: i32 }\n");
+    let (_, _, diags) =
+        resolve_with_diagnostics("type Dog { name: String }\ntype Dog { other: i32 }\n");
     assert_eq!(diags.len(), 1);
     assert!(diags[0].message.contains("defined more than once"));
 }
@@ -320,9 +412,15 @@ fn f<T: Sound>(x: T) {
 #[test]
 fn builtins_are_available_without_use() {
     let resolved = resolve_ok("fn main() { println(\"hi\"); }");
-    let println_id = resolved.definitions.lookup(&"println".into()).expect("println should be builtin");
+    let println_id = resolved
+        .definitions
+        .lookup(&"println".into())
+        .expect("println should be builtin");
     assert_eq!(resolved.definitions.get(println_id).kind, DefKind::Fn);
     for name in ["i32", "bool", "String", "Array", "Option", "Result"] {
-        assert!(resolved.definitions.lookup(&name.into()).is_some(), "missing builtin {name}");
+        assert!(
+            resolved.definitions.lookup(&name.into()).is_some(),
+            "missing builtin {name}"
+        );
     }
 }

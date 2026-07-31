@@ -9,7 +9,11 @@ use crate::ident::Path;
 #[derive(Debug, Clone)]
 pub enum TypeExpr {
     /// `Dog`, `Array<T>`, `user.User`.
-    Named { path: Path, generics: Vec<TypeExpr>, span: Span },
+    Named {
+        path: Path,
+        generics: Vec<TypeExpr>,
+        span: Span,
+    },
     /// `(i32, String)`.
     Tuple(Vec<TypeExpr>, Span),
     /// `[i32]` — sugar the parser desugars to this node; see
@@ -18,7 +22,11 @@ pub enum TypeExpr {
     /// `weak T`.
     Weak(Box<TypeExpr>, Span),
     /// A function-typed value, e.g. a closure's inferred/annotated shape.
-    Function { params: Vec<TypeExpr>, ret: Box<TypeExpr>, span: Span },
+    Function {
+        params: Vec<TypeExpr>,
+        ret: Box<TypeExpr>,
+        span: Span,
+    },
 }
 
 impl TypeExpr {

@@ -9,11 +9,7 @@ fn target_and_optimization_configuration_is_validated() {
         Err(error) => error,
     };
     assert!(invalid_level.contains("expected O0..O3"));
-    assert!(Codegen::with_target(
-        "not-a-real-llvm-target",
-        0
-    )
-    .is_err());
+    assert!(Codegen::with_target("not-a-real-llvm-target", 0).is_err());
 }
 
 #[test]
@@ -33,7 +29,10 @@ fn builds_verifies_and_emits_a_simple_function() {
 
     m.verify().expect("module should verify");
     let ir = m.print_to_string();
-    assert!(ir.contains("define i32 @add"), "expected the IR to contain the defined function:\n{ir}");
+    assert!(
+        ir.contains("define i32 @add"),
+        "expected the IR to contain the defined function:\n{ir}"
+    );
 
     let out = std::env::temp_dir().join("nether_llvm_test_add.o");
     m.emit_object(&out).expect("emit_object should succeed");
@@ -76,7 +75,9 @@ fn builds_a_branching_function_with_a_call() {
     let caller_entry = m.append_block(caller, "entry");
     m.position_at_end(caller_entry);
     let five = m.const_int(i32_ty, 5, false);
-    let result = m.call(f, &[five], "call_result").expect("is_positive returns a value");
+    let result = m
+        .call(f, &[five], "call_result")
+        .expect("is_positive returns a value");
     m.ret(Some(result));
 
     let _ = bool_ty;

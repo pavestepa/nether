@@ -1,0 +1,35 @@
+type summary {
+    count: i32,
+    total: i32,
+    min: i32,
+    max: i32,
+}
+
+fn summarize(values: [i32]): summary {
+    let mut result = summary {
+        count: 0,
+        total: 0,
+        min: 0,
+        max: 0,
+    };
+    for value in values {
+        if result.count == 0 {
+            result.min = value;
+            result.max = value;
+        } else {
+            if value < result.min {
+                result.min = value;
+            }
+            if value > result.max {
+                result.max = value;
+            }
+        }
+        result.count = result.count + 1;
+        result.total = result.total + value;
+    }
+    result
+}
+
+fn describe(value: summary): String {
+    `count=${value.count}, total=${value.total}, range=${value.min}..${value.max}`
+}

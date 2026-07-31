@@ -5,13 +5,25 @@ fn build(source: &str) -> Vec<MirFunction> {
     let mut map = nether_diagnostics::SourceMap::new();
     let file = map.add_file("test.nr", source);
     let (module, parse_diags) = nether_parser::parse_module(source, file);
-    assert!(parse_diags.is_empty(), "unexpected parse diagnostics: {parse_diags:?}");
+    assert!(
+        parse_diags.is_empty(),
+        "unexpected parse diagnostics: {parse_diags:?}"
+    );
     let (resolved, resolve_diags) = nether_resolver::resolve(&module);
-    assert!(resolve_diags.is_empty(), "unexpected resolve diagnostics: {resolve_diags:?}");
+    assert!(
+        resolve_diags.is_empty(),
+        "unexpected resolve diagnostics: {resolve_diags:?}"
+    );
     let (tables, check_diags) = nether_typecheck::check(&module, &resolved);
-    assert!(check_diags.is_empty(), "unexpected typecheck diagnostics: {check_diags:?}");
+    assert!(
+        check_diags.is_empty(),
+        "unexpected typecheck diagnostics: {check_diags:?}"
+    );
     let hir = nether_hir::lower(&module, &resolved, tables);
-    let main_id = *hir.fn_by_name.get(&Symbol::new("main")).expect("no `main` in test source");
+    let main_id = *hir
+        .fn_by_name
+        .get(&Symbol::new("main"))
+        .expect("no `main` in test source");
     let mono = nether_monomorphization::monomorphize(&hir, main_id);
     let mut functions = build_mir(&mono, &resolved.definitions, &hir.signatures);
     insert_arc(&mut functions);
@@ -19,7 +31,10 @@ fn build(source: &str) -> Vec<MirFunction> {
 }
 
 fn find_fn<'a>(functions: &'a [MirFunction], name: &str) -> &'a MirFunction {
-    functions.iter().find(|f| f.name.as_str() == name).unwrap_or_else(|| panic!("no MIR function named {name}"))
+    functions
+        .iter()
+        .find(|f| f.name.as_str() == name)
+        .unwrap_or_else(|| panic!("no MIR function named {name}"))
 }
 
 /// Flattens every instruction across every block, in block order — good
@@ -95,12 +110,18 @@ fn main() {
     // (the parameter, at scope exit) — `tag` itself is never released
     // (it's the escaping/returned value).
     let shape = retain_release_shape(describe);
-    assert_eq!(shape, vec!["retain", "release"], "expected exactly one Retain (field-read bind) then one Release (parameter, scope exit)");
+    assert_eq!(
+        shape,
+        vec!["retain", "release"],
+        "expected exactly one Retain (field-read bind) then one Release (parameter, scope exit)"
+    );
 
     // The retain's target must be the same local the Field rvalue was
     // assigned into, and the terminator must return that same local.
     let field_dest = instrs.iter().find_map(|i| match i {
-        Instr::Assign(place, Rvalue::Field { .. }) if place.projection.is_empty() => Some(place.local),
+        Instr::Assign(place, Rvalue::Field { .. }) if place.projection.is_empty() => {
+            Some(place.local)
+        }
         _ => None,
     });
     assert!(field_dest.is_some());
@@ -108,8 +129,15 @@ fn main() {
     // `blocks.last()` is always the trailing dead block `terminate_current`
     // creates after every real terminator, not the block holding the
     // actual `Return` — search for it instead.
-    let return_terminator = describe.blocks.iter().map(|b| &b.terminator).find(|t| matches!(t, Terminator::Return(_))).expect("expected a Return terminator");
-    assert!(matches!(return_terminator, Terminator::Return(Operand::Local(l)) if Some(*l) == field_dest));
+    let return_terminator = describe
+        .blocks
+        .iter()
+        .map(|b| &b.terminator)
+        .find(|t| matches!(t, Terminator::Return(_)))
+        .expect("expected a Return terminator");
+    assert!(
+        matches!(return_terminator, Terminator::Return(Operand::Local(l)) if Some(*l) == field_dest)
+    );
 }
 
 #[test]
@@ -141,9 +169,17 @@ fn main() {
     // argument, and *not* immediately followed by a Release of it — that
     // credit is now the callee's own parameter's, released at its own
     // scope exit instead (checked below).
-    let call_pos = instrs.iter().position(|i| matches!(i, Instr::Assign(_, Rvalue::Call { .. }))).expect("expected a Call instruction");
-    let Instr::Retain(arg) = instrs[call_pos - 1] else { panic!("expected a Retain immediately before the call") };
-    assert!(!matches!(instrs[call_pos + 1], Instr::Release(l) if *l == *arg), "the call must not also release its own argument right after returning");
+    let call_pos = instrs
+        .iter()
+        .position(|i| matches!(i, Instr::Assign(_, Rvalue::Call { .. })))
+        .expect("expected a Call instruction");
+    let Instr::Retain(arg) = instrs[call_pos - 1] else {
+        panic!("expected a Retain immediately before the call")
+    };
+    assert!(
+        !matches!(instrs[call_pos + 1], Instr::Release(l) if *l == *arg),
+        "the call must not also release its own argument right after returning"
+    );
 
     // Inside `describe`: one retain for `d.name`'s own bind-time read
     // (§3.1), then `d`'s own normal scope-exit release — `d.name`'s own
@@ -167,7 +203,10 @@ fn main() {
 "#,
     );
     let make = find_fn(&functions, "make");
-    assert!(retain_release_shape(make).is_empty(), "a directly-returned fresh construction should need no Retain/Release at all");
+    assert!(
+        retain_release_shape(make).is_empty(),
+        "a directly-returned fresh construction should need no Retain/Release at all"
+    );
 }
 
 #[test]
@@ -193,7 +232,10 @@ fn main() {
 "#,
     );
     let make = find_fn(&functions, "make");
-    assert!(retain_release_shape(make).is_empty(), "a let-bound fresh construction, then returned, should still need no Retain/Release");
+    assert!(
+        retain_release_shape(make).is_empty(),
+        "a let-bound fresh construction, then returned, should still need no Retain/Release"
+    );
 }
 
 #[test]
@@ -223,7 +265,11 @@ fn main() {
 "#,
     );
     let identity = find_fn(&functions, "identity");
-    assert_eq!(retain_release_shape(identity), Vec::<&str>::new(), "the parameter's incoming credit should pass straight through, untouched");
+    assert_eq!(
+        retain_release_shape(identity),
+        Vec::<&str>::new(),
+        "the parameter's incoming credit should pass straight through, untouched"
+    );
 
     // And the whole round trip must still balance in `main`: one retain
     // before the call, no release right after it (the bug this fixes),
@@ -231,7 +277,10 @@ fn main() {
     // exit — not zero (a leak) and not three (the double-release this
     // fixes elsewhere).
     let main = find_fn(&functions, "main");
-    assert_eq!(retain_release_shape(main), vec!["retain", "release", "release"]);
+    assert_eq!(
+        retain_release_shape(main),
+        vec!["retain", "release", "release"]
+    );
 }
 
 #[test]
@@ -262,7 +311,10 @@ fn main() {
     // then `new_name` at scope exit. `mut self` is a borrowed parameter:
     // the caller retains ownership, so the callee neither retains nor
     // releases the receiver itself.
-    assert_eq!(shape, vec!["retain", "retain", "release", "release", "release"]);
+    assert_eq!(
+        shape,
+        vec!["retain", "retain", "release", "release", "release"]
+    );
 }
 
 #[test]
@@ -364,8 +416,14 @@ fn main() {
         ],
     );
     let weak_snapshot_retain = all_instrs(set_kid).into_iter().find_map(|instr| {
-        let Instr::Retain(local) = instr else { return None };
-        matches!(set_kid.local_decl(*local).ty, nether_typecheck::Type::Weak(_)).then_some(())
+        let Instr::Retain(local) = instr else {
+            return None;
+        };
+        matches!(
+            set_kid.local_decl(*local).ty,
+            nether_typecheck::Type::Weak(_)
+        )
+        .then_some(())
     });
     assert!(weak_snapshot_retain.is_some());
 }
@@ -396,7 +454,10 @@ fn main() {
     // sequence rather than panicking or looping forever building the
     // pattern-test chain.
     let shape = retain_release_shape(unwrap_fn);
-    assert!(!shape.is_empty(), "expected at least the VariantField bind-time retain");
+    assert!(
+        !shape.is_empty(),
+        "expected at least the VariantField bind-time retain"
+    );
     let w = unwrap_fn.params[0];
     assert_eq!(
         all_instrs(unwrap_fn)
@@ -433,9 +494,13 @@ fn main() {
     // loop — find the body block (the one whose Goto target is the loop
     // header, per `lower_while`) and confirm it contains a Release.
     let has_release_in_some_non_final_block = main.blocks.iter().any(|b| {
-        matches!(b.terminator, Terminator::Goto(_)) && b.instrs.iter().any(|i| matches!(i, Instr::Release(_)))
+        matches!(b.terminator, Terminator::Goto(_))
+            && b.instrs.iter().any(|i| matches!(i, Instr::Release(_)))
     });
-    assert!(has_release_in_some_non_final_block, "expected the loop body's own block to contain a Release for `d`, executed every iteration");
+    assert!(
+        has_release_in_some_non_final_block,
+        "expected the loop body's own block to contain a Release for `d`, executed every iteration"
+    );
 }
 
 #[test]
@@ -452,7 +517,10 @@ fn main() {
 "#,
     );
     let bump = find_fn(&functions, "bump");
-    assert!(retain_release_shape(bump).is_empty(), "a stack-kind mut parameter should never participate in ARC (arc-model.md §3.6)");
+    assert!(
+        retain_release_shape(bump).is_empty(),
+        "a stack-kind mut parameter should never participate in ARC (arc-model.md §3.6)"
+    );
 }
 
 #[test]

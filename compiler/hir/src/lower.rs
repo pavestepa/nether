@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use nether_ast::{
     BinaryOp, Block, Expr, ExprKind, FieldAccessor, FnDecl, Ident, InterfaceDecl, Item, Literal,
-    MatchArm, Module, NodeId, Param, Path, Pattern, Stmt, Symbol, TemplatePart, TypeExpr,
+    MatchArm, Module, NodeId, Param, Path, Pattern, Stmt, Symbol, TemplatePart,
 };
 use nether_resolver::{DefId, LocalId as ResolverLocalId, Resolution, ResolvedNames};
 use nether_typecheck::{
@@ -10,8 +10,8 @@ use nether_typecheck::{
 };
 
 use crate::node::{
-    HirCapture, HirExpr, HirExprKind, HirFnId, HirFunction, HirLocalId, HirMatchArm, HirModule, HirParam,
-    HirPattern, HirStmt, HirStmtKind,
+    HirCapture, HirExpr, HirExprKind, HirFnId, HirFunction, HirLocalId, HirMatchArm, HirModule,
+    HirParam, HirPattern, HirStmt, HirStmtKind,
 };
 
 /// Lowers a fully resolved, fully type-checked [`Module`] into a
@@ -24,7 +24,12 @@ use crate::node::{
 /// desugared type information `monomorphization`/`mir` need, so this
 /// crate carries it forward rather than re-deriving or re-wrapping it.
 pub fn lower(module: &Module, resolved: &ResolvedNames, tables: TypedTables) -> HirModule {
-    let TypedTables { expr_types, local_types, signatures } = tables;
+    let TypedTables {
+        expr_types,
+        local_types,
+        call_generic_args,
+        signatures,
+    } = tables;
 
     // `resolver::LocalId` -> `Type`, built once by cross-referencing
     // `resolved.locals` (binding site -> LocalId) against `local_types`
@@ -33,7 +38,9 @@ pub fn lower(module: &Module, resolved: &ResolvedNames, tables: TypedTables) -> 
     let local_types_by_id: HashMap<ResolverLocalId, Type> = resolved
         .locals
         .iter()
-        .filter_map(|(node_id, local_id)| local_types.get(node_id).map(|ty| (*local_id, ty.clone())))
+        .filter_map(|(node_id, local_id)| {
+            local_types.get(node_id).map(|ty| (*local_id, ty.clone()))
+        })
         .collect();
 
     let interface_decls = index_interfaces(module, resolved);
@@ -64,6 +71,7 @@ pub fn lower(module: &Module, resolved: &ResolvedNames, tables: TypedTables) -> 
             resolved,
             expr_types: &expr_types,
             local_types_by_id: &local_types_by_id,
+            call_generic_args: &call_generic_args,
             sigs: &signatures,
             fn_by_def: &fn_by_def,
             methods: &methods,
@@ -85,14 +93,14 @@ pub fn lower(module: &Module, resolved: &ResolvedNames, tables: TypedTables) -> 
     }
 }
 
-fn index_interfaces<'a>(module: &'a Module, resolved: &ResolvedNames) -> HashMap<DefId, &'a InterfaceDecl> {
+fn index_interfaces<'a>(
+    module: &'a Module,
+    resolved: &ResolvedNames,
+) -> HashMap<DefId, &'a InterfaceDecl> {
     let mut map = HashMap::new();
     for item in &module.items {
         if let Item::Interface(i) = item {
-            if let Some(id) = resolved
-                .definitions
-                .lookup_in(i.span.file, &i.name.name)
-            {
+            if let Some(id) = resolved.definitions.lookup_in(i.span.file, &i.name.name) {
                 map.insert(id, i);
             }
         }
@@ -100,28 +108,16 @@ fn index_interfaces<'a>(module: &'a Module, resolved: &ResolvedNames) -> HashMap
     map
 }
 
-fn type_expr_def_id(ty: &TypeExpr, resolved: &ResolvedNames) -> Option<DefId> {
-    if let TypeExpr::Named { path, .. } = ty {
-        if let Some(res) = resolved.path_res.get(&path.id) {
-            if let Resolution::Def(id) = res.base {
-                return Some(id);
-            }
-        }
-    }
-    None
-}
-
 fn owner_type(owner: DefId, sigs: &Signatures) -> Type {
     if let Some(sig) = sigs.enum_sigs.get(&owner) {
         Type::Enum(
             owner,
-            sig.generics
-                .iter()
-                .cloned()
-                .map(Type::Generic)
-                .collect(),
+            sig.generics.iter().cloned().map(Type::Generic).collect(),
         )
-    } else if matches!(sigs.type_shapes.get(&owner), Some(TypeShape::TupleStruct(_))) {
+    } else if matches!(
+        sigs.type_shapes.get(&owner),
+        Some(TypeShape::TupleStruct(_))
+    ) {
         Type::TupleStruct(
             owner,
             sigs.type_generics
@@ -197,10 +193,7 @@ fn collect_pending_fns<'a>(
     for item in &module.items {
         match item {
             Item::Fn(f) => {
-                if let Some(id) = resolved
-                    .definitions
-                    .lookup_in(f.span.file, &f.name.name)
-                {
+                if let Some(id) = resolved.definitions.lookup_in(f.span.file, &f.name.name) {
                     if let Some(sig) = sigs.fns.get(&id).cloned() {
                         pending.push(PendingFn {
                             name: f.name.name.clone(),
@@ -214,10 +207,10 @@ fn collect_pending_fns<'a>(
                 }
             }
             Item::Impl(b) => {
-                let Some(owner) = resolved
-                    .definitions
-                    .lookup_in(b.span.file, &b.target.name)
-                else { continue };
+                let Some(owner) = resolved.definitions.lookup_in(b.span.file, &b.target.name)
+                else {
+                    continue;
+                };
                 for m in &b.methods {
                     if let Some(sig) = sigs.method(owner, &m.name.name).cloned() {
                         pending.push(PendingFn {
@@ -230,47 +223,53 @@ fn collect_pending_fns<'a>(
                         });
                     }
                 }
-                let Some(iface_ty) = &b.interface else { continue };
-                let Some(iface_id) = type_expr_def_id(iface_ty, resolved) else { continue };
-                let Some(iface_decl) = interface_decls.get(&iface_id) else { continue };
-                for m in &iface_decl.methods {
-                    if m.body.is_none() {
-                        continue;
-                    }
-                    if b.methods.iter().any(|om| om.name.name == m.name.name) {
-                        continue;
-                    }
-                    if let Some(sig) = sigs.method(owner, &m.name.name).cloned() {
-                        let type_subst = sigs
-                            .default_method_substitutions
-                            .get(&(owner, m.name.name.clone()))
-                            .cloned()
-                            .unwrap_or_default();
-                        pending.push(PendingFn {
-                            name: m.name.name.clone(),
-                            def_id: None,
-                            owner: Some(owner),
-                            decl: m,
-                            sig,
-                            type_subst,
-                        });
-                    }
-                }
             }
             _ => {}
         }
+    }
+
+    let mut defaults: Vec<_> = sigs.default_method_sources.iter().collect();
+    defaults.sort_by_key(|((owner, name), _)| {
+        (resolved.definitions.get(*owner).name.clone(), name.clone())
+    });
+    for ((owner, name), source) in defaults {
+        let Some(decl) = interface_decls
+            .get(source)
+            .and_then(|interface| interface.methods.iter().find(|m| m.name.name == *name))
+        else {
+            continue;
+        };
+        let Some(sig) = sigs.method(*owner, name).cloned() else {
+            continue;
+        };
+        pending.push(PendingFn {
+            name: name.clone(),
+            def_id: None,
+            owner: Some(*owner),
+            decl,
+            sig,
+            type_subst: sigs
+                .default_method_substitutions
+                .get(&(*owner, name.clone()))
+                .cloned()
+                .unwrap_or_default(),
+        });
     }
     pending
 }
 
 fn local_ref(local: HirLocalId, ty: Type) -> HirExpr {
-    HirExpr { kind: HirExprKind::Local(local), ty }
+    HirExpr {
+        kind: HirExprKind::Local(local),
+        ty,
+    }
 }
 
 struct Lowerer<'a> {
     resolved: &'a ResolvedNames,
     expr_types: &'a HashMap<NodeId, Type>,
     local_types_by_id: &'a HashMap<ResolverLocalId, Type>,
+    call_generic_args: &'a HashMap<NodeId, Vec<Type>>,
     sigs: &'a Signatures,
     fn_by_def: &'a HashMap<DefId, HirFnId>,
     methods: &'a HashMap<(DefId, Symbol), HirFnId>,
@@ -298,8 +297,21 @@ impl Lowerer<'_> {
     }
 
     fn ty_of(&self, node_id: NodeId) -> Type {
-        let ty = self.expr_types.get(&node_id).cloned().unwrap_or(Type::Error);
+        let ty = self
+            .expr_types
+            .get(&node_id)
+            .cloned()
+            .unwrap_or(Type::Error);
         subst_type(&ty, &self.type_subst)
+    }
+
+    fn generic_args_for(&self, node_id: NodeId) -> Vec<Type> {
+        self.call_generic_args
+            .get(&node_id)
+            .into_iter()
+            .flatten()
+            .map(|ty| subst_type(ty, &self.type_subst))
+            .collect()
     }
 
     fn local_ty(&self, orig: ResolverLocalId) -> Type {
@@ -308,7 +320,11 @@ impl Lowerer<'_> {
                 return ty.clone();
             }
         }
-        let ty = self.local_types_by_id.get(&orig).cloned().unwrap_or(Type::Error);
+        let ty = self
+            .local_types_by_id
+            .get(&orig)
+            .cloned()
+            .unwrap_or(Type::Error);
         subst_type(&ty, &self.type_subst)
     }
 
@@ -329,15 +345,25 @@ impl Lowerer<'_> {
                 Some(orig) => self.local_for(*orig),
                 None => self.fresh_local(),
             };
-            params.push(HirParam { local, name: param_sig.name.clone(), mutable: param_sig.mutable, ty: param_sig.ty.clone() });
+            params.push(HirParam {
+                local,
+                name: param_sig.name.clone(),
+                mutable: param_sig.mutable,
+                ty: param_sig.ty.clone(),
+            });
         }
         // `self` isn't in `params` (matching FnSig's own self/params
         // split) but still needs its translated id reserved up front so
         // body references resolve consistently.
-        let self_local = self.resolved.locals.get(&p.decl.id).map(|orig| self.local_for(*orig));
+        let self_local = self
+            .resolved
+            .locals
+            .get(&p.decl.id)
+            .map(|orig| self.local_for(*orig));
 
-        let body =
-            p.decl.body.as_ref().expect("standalone fns, impl methods, and inherited interface defaults always have a body");
+        let body = p.decl.body.as_ref().expect(
+            "standalone fns, impl methods, and inherited interface defaults always have a body",
+        );
         let body_hir = self.lower_block_as_expr(body);
 
         HirFunction {
@@ -355,9 +381,16 @@ impl Lowerer<'_> {
     }
 
     fn lower_block_as_expr(&mut self, block: &Block) -> HirExpr {
-        let ty = block.tail.as_ref().map(|t| self.ty_of(t.id)).unwrap_or_else(Type::unit);
+        let ty = block
+            .tail
+            .as_ref()
+            .map(|t| self.ty_of(t.id))
+            .unwrap_or_else(Type::unit);
         let (stmts, tail) = self.lower_block(block);
-        HirExpr { kind: HirExprKind::Block(stmts, tail), ty }
+        HirExpr {
+            kind: HirExprKind::Block(stmts, tail),
+            ty,
+        }
     }
 
     fn lower_block(&mut self, block: &Block) -> (Vec<HirStmt>, Option<Box<HirExpr>>) {
@@ -370,9 +403,13 @@ impl Lowerer<'_> {
                         Some(orig) => (self.local_for(*orig), self.local_ty(*orig)),
                         None => (self.fresh_local(), value.ty.clone()),
                     };
-                    stmts.push(HirStmt { kind: HirStmtKind::Let { local, ty, value } });
+                    stmts.push(HirStmt {
+                        kind: HirStmtKind::Let { local, ty, value },
+                    });
                 }
-                Stmt::Expr(e) => stmts.push(HirStmt { kind: HirStmtKind::Expr(self.lower_expr(e)) }),
+                Stmt::Expr(e) => stmts.push(HirStmt {
+                    kind: HirStmtKind::Expr(self.lower_expr(e)),
+                }),
             }
         }
         let tail = block.tail.as_ref().map(|t| Box::new(self.lower_expr(t)));
@@ -382,35 +419,63 @@ impl Lowerer<'_> {
     fn lower_expr(&mut self, expr: &Expr) -> HirExpr {
         let ty = self.ty_of(expr.id);
         match &expr.kind {
-            ExprKind::Literal(lit) => HirExpr { kind: HirExprKind::Literal(lit.clone()), ty },
-            ExprKind::Path(path) => self.lower_value_path(path, None, ty),
-            ExprKind::Tuple(elems) => {
-                HirExpr { kind: HirExprKind::Tuple(elems.iter().map(|e| self.lower_expr(e)).collect()), ty }
-            }
-            ExprKind::Array(elems) => {
-                HirExpr { kind: HirExprKind::Array(elems.iter().map(|e| self.lower_expr(e)).collect()), ty }
-            }
+            ExprKind::Literal(lit) => HirExpr {
+                kind: HirExprKind::Literal(lit.clone()),
+                ty,
+            },
+            ExprKind::Path(path) => self.lower_value_path(path, None, &[], ty),
+            ExprKind::Tuple(elems) => HirExpr {
+                kind: HirExprKind::Tuple(elems.iter().map(|e| self.lower_expr(e)).collect()),
+                ty,
+            },
+            ExprKind::Array(elems) => HirExpr {
+                kind: HirExprKind::Array(elems.iter().map(|e| self.lower_expr(e)).collect()),
+                ty,
+            },
             ExprKind::StringTemplate(parts) => self.lower_template(parts, ty),
-            ExprKind::Unary { op, expr: inner } => {
-                HirExpr { kind: HirExprKind::Unary { op: *op, expr: Box::new(self.lower_expr(inner)) }, ty }
-            }
+            ExprKind::Unary { op, expr: inner } => HirExpr {
+                kind: HirExprKind::Unary {
+                    op: *op,
+                    expr: Box::new(self.lower_expr(inner)),
+                },
+                ty,
+            },
             ExprKind::Binary { op, lhs, rhs } => HirExpr {
-                kind: HirExprKind::Binary { op: *op, lhs: Box::new(self.lower_expr(lhs)), rhs: Box::new(self.lower_expr(rhs)) },
+                kind: HirExprKind::Binary {
+                    op: *op,
+                    lhs: Box::new(self.lower_expr(lhs)),
+                    rhs: Box::new(self.lower_expr(rhs)),
+                },
                 ty,
             },
             ExprKind::Assign { target, value } => HirExpr {
-                kind: HirExprKind::Assign { target: Box::new(self.lower_assign_target(target)), value: Box::new(self.lower_expr(value)) },
+                kind: HirExprKind::Assign {
+                    target: Box::new(self.lower_assign_target(target)),
+                    value: Box::new(self.lower_expr(value)),
+                },
                 ty,
             },
-            ExprKind::Call { callee, args } => self.lower_call(callee, args, ty),
+            ExprKind::Call { callee, args, .. } => self.lower_call(expr.id, callee, args, ty),
             ExprKind::MutArg(inner) => self.lower_expr(inner),
-            ExprKind::MethodCall { receiver, method, args } => self.lower_method_call(receiver, method, args, ty),
+            ExprKind::MethodCall {
+                receiver,
+                method,
+                args,
+                ..
+            } => self.lower_method_call(expr.id, receiver, method, args, ty),
             ExprKind::Field { base, field } => self.lower_field(base, field, ty),
             ExprKind::Index { base, index } => HirExpr {
-                kind: HirExprKind::Index { base: Box::new(self.lower_expr(base)), index: Box::new(self.lower_expr(index)) },
+                kind: HirExprKind::Index {
+                    base: Box::new(self.lower_expr(base)),
+                    index: Box::new(self.lower_expr(index)),
+                },
                 ty,
             },
-            ExprKind::If { cond, then_branch, else_branch } => HirExpr {
+            ExprKind::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => HirExpr {
                 kind: HirExprKind::If {
                     cond: Box::new(self.lower_expr(cond)),
                     then_branch: Box::new(self.lower_block_as_expr(then_branch)),
@@ -427,18 +492,35 @@ impl Lowerer<'_> {
             },
             ExprKind::Block(block) => self.lower_block_as_expr(block),
             ExprKind::While { cond, body } => HirExpr {
-                kind: HirExprKind::While { cond: Box::new(self.lower_expr(cond)), body: Box::new(self.lower_block_as_expr(body)) },
+                kind: HirExprKind::While {
+                    cond: Box::new(self.lower_expr(cond)),
+                    body: Box::new(self.lower_block_as_expr(body)),
+                },
                 ty,
             },
-            ExprKind::ForIn { pattern, iter, body } => self.lower_for_in(pattern, iter, body),
-            ExprKind::Loop { body } => HirExpr { kind: HirExprKind::Loop { body: Box::new(self.lower_block_as_expr(body)) }, ty },
-            ExprKind::Break(value) => {
-                HirExpr { kind: HirExprKind::Break(value.as_ref().map(|v| Box::new(self.lower_expr(v)))), ty }
-            }
-            ExprKind::Continue => HirExpr { kind: HirExprKind::Continue, ty },
-            ExprKind::Return(value) => {
-                HirExpr { kind: HirExprKind::Return(value.as_ref().map(|v| Box::new(self.lower_expr(v)))), ty }
-            }
+            ExprKind::ForIn {
+                pattern,
+                iter,
+                body,
+            } => self.lower_for_in(pattern, iter, body),
+            ExprKind::Loop { body } => HirExpr {
+                kind: HirExprKind::Loop {
+                    body: Box::new(self.lower_block_as_expr(body)),
+                },
+                ty,
+            },
+            ExprKind::Break(value) => HirExpr {
+                kind: HirExprKind::Break(value.as_ref().map(|v| Box::new(self.lower_expr(v)))),
+                ty,
+            },
+            ExprKind::Continue => HirExpr {
+                kind: HirExprKind::Continue,
+                ty,
+            },
+            ExprKind::Return(value) => HirExpr {
+                kind: HirExprKind::Return(value.as_ref().map(|v| Box::new(self.lower_expr(v)))),
+                ty,
+            },
             ExprKind::Closure { params, body } => self.lower_closure(params, body, ty),
             ExprKind::StructLit { path, fields } => self.lower_struct_lit(path, fields, ty),
         }
@@ -457,12 +539,25 @@ impl Lowerer<'_> {
     /// `resolver`'s [`Resolution`] for the path's base, then any leftover
     /// segments as a field/method-call chain (language-spec §10), except
     /// this builds [`HirExpr`] nodes instead of computing a [`Type`].
-    fn lower_value_path(&mut self, path: &Path, call_args: Option<&[Expr]>, result_ty: Type) -> HirExpr {
+    fn lower_value_path(
+        &mut self,
+        path: &Path,
+        call_args: Option<&[Expr]>,
+        generic_args: &[Type],
+        result_ty: Type,
+    ) -> HirExpr {
         let Some(res) = self.resolved.path_res.get(&path.id).cloned() else {
-            return HirExpr { kind: HirExprKind::Unit, ty: result_ty };
+            return HirExpr {
+                kind: HirExprKind::Unit,
+                ty: result_ty,
+            };
         };
         let total = path.segments.len();
-        let direct_call_args = if res.consumed == total { call_args } else { None };
+        let direct_call_args = if res.consumed == total {
+            call_args
+        } else {
+            None
+        };
 
         let (mut current, mut current_ty) = match res.base {
             Resolution::Local(id) => {
@@ -476,12 +571,30 @@ impl Lowerer<'_> {
                 }
                 let upgraded_ty = self.upgrade_weak(ty.clone());
                 let kind = self.weak_upgrade_kind(expr, &ty);
-                (HirExpr { kind, ty: upgraded_ty.clone() }, upgraded_ty)
+                (
+                    HirExpr {
+                        kind,
+                        ty: upgraded_ty.clone(),
+                    },
+                    upgraded_ty,
+                )
             }
-            Resolution::Def(id) => self.lower_def_value(id, direct_call_args, &result_ty),
-            Resolution::EnumVariant(enum_id, idx) => self.lower_enum_variant_value(enum_id, idx, direct_call_args, &result_ty),
-            Resolution::StaticMember(owner_id, idx) => self.lower_static_member(owner_id, idx, direct_call_args, &result_ty),
-            Resolution::GenericParam | Resolution::Error => (HirExpr { kind: HirExprKind::Unit, ty: Type::Error }, Type::Error),
+            Resolution::Def(id) => {
+                self.lower_def_value(id, direct_call_args, generic_args, &result_ty)
+            }
+            Resolution::EnumVariant(enum_id, idx) => {
+                self.lower_enum_variant_value(enum_id, idx, direct_call_args, &result_ty)
+            }
+            Resolution::StaticMember(owner_id, idx) => {
+                self.lower_static_member(owner_id, idx, direct_call_args, generic_args, &result_ty)
+            }
+            Resolution::GenericParam | Resolution::Error => (
+                HirExpr {
+                    kind: HirExprKind::Unit,
+                    ty: Type::Error,
+                },
+                Type::Error,
+            ),
         };
 
         for i in res.consumed..total {
@@ -489,7 +602,14 @@ impl Lowerer<'_> {
             let is_last = i + 1 == total;
             if is_last {
                 if let Some(args) = call_args {
-                    return self.lower_method_call_on(current, &current_ty, seg, args, &result_ty);
+                    return self.lower_method_call_on(
+                        current,
+                        &current_ty,
+                        seg,
+                        args,
+                        generic_args,
+                        &result_ty,
+                    );
                 }
             }
             let (next, next_ty) = self.lower_field_access_named(current, &current_ty, seg);
@@ -499,7 +619,13 @@ impl Lowerer<'_> {
         current
     }
 
-    fn lower_def_value(&mut self, id: DefId, call_args: Option<&[Expr]>, result_ty: &Type) -> (HirExpr, Type) {
+    fn lower_def_value(
+        &mut self,
+        id: DefId,
+        call_args: Option<&[Expr]>,
+        generic_args: &[Type],
+        result_ty: &Type,
+    ) -> (HirExpr, Type) {
         let def = self.resolved.definitions.get(id);
         match def.kind {
             nether_resolver::DefKind::Fn => {
@@ -510,21 +636,40 @@ impl Lowerer<'_> {
                         .into_iter()
                         .map(|arg| self.into_string_expr(arg))
                         .collect();
-                    let expr = HirExpr { kind: HirExprKind::CallBuiltin { name, args }, ty: result_ty.clone() };
+                    let expr = HirExpr {
+                        kind: HirExprKind::CallBuiltin { name, args },
+                        ty: result_ty.clone(),
+                    };
                     return (expr, result_ty.clone());
                 }
                 let fn_id = self.fn_by_def.get(&id).copied();
                 match (fn_id, call_args) {
                     (Some(fid), Some(args)) => {
                         let args = self.lower_args(args);
-                        let expr = HirExpr { kind: HirExprKind::CallStatic { fn_id: fid, args }, ty: result_ty.clone() };
+                        let expr = HirExpr {
+                            kind: HirExprKind::CallStatic {
+                                fn_id: fid,
+                                generic_args: generic_args.to_vec(),
+                                args,
+                            },
+                            ty: result_ty.clone(),
+                        };
                         (expr, result_ty.clone())
                     }
                     (Some(fid), None) => {
-                        let expr = HirExpr { kind: HirExprKind::FnRef(fid), ty: result_ty.clone() };
+                        let expr = HirExpr {
+                            kind: HirExprKind::FnRef(fid),
+                            ty: result_ty.clone(),
+                        };
                         (expr, result_ty.clone())
                     }
-                    (None, _) => (HirExpr { kind: HirExprKind::Unit, ty: Type::Error }, Type::Error),
+                    (None, _) => (
+                        HirExpr {
+                            kind: HirExprKind::Unit,
+                            ty: Type::Error,
+                        },
+                        Type::Error,
+                    ),
                 }
             }
             nether_resolver::DefKind::Type => {
@@ -532,14 +677,29 @@ impl Lowerer<'_> {
                     Some(args) => self.lower_args(args),
                     None => Vec::new(),
                 };
-                let expr = HirExpr { kind: HirExprKind::Construct { ty: id, fields }, ty: result_ty.clone() };
+                let expr = HirExpr {
+                    kind: HirExprKind::Construct { ty: id, fields },
+                    ty: result_ty.clone(),
+                };
                 (expr, result_ty.clone())
             }
-            _ => (HirExpr { kind: HirExprKind::Unit, ty: Type::Error }, Type::Error),
+            _ => (
+                HirExpr {
+                    kind: HirExprKind::Unit,
+                    ty: Type::Error,
+                },
+                Type::Error,
+            ),
         }
     }
 
-    fn lower_enum_variant_value(&mut self, enum_id: DefId, idx: u32, call_args: Option<&[Expr]>, result_ty: &Type) -> (HirExpr, Type) {
+    fn lower_enum_variant_value(
+        &mut self,
+        enum_id: DefId,
+        idx: u32,
+        call_args: Option<&[Expr]>,
+        result_ty: &Type,
+    ) -> (HirExpr, Type) {
         let has_payload = self
             .sigs
             .enum_sigs
@@ -547,41 +707,108 @@ impl Lowerer<'_> {
             .and_then(|s| s.variants.get(idx as usize))
             .map(|(_, p)| !p.is_empty())
             .unwrap_or(false);
-        let payload = if has_payload { self.lower_args(call_args.unwrap_or(&[])) } else { Vec::new() };
-        let expr = HirExpr { kind: HirExprKind::ConstructVariant { enum_id, variant: idx, payload }, ty: result_ty.clone() };
+        let payload = if has_payload {
+            self.lower_args(call_args.unwrap_or(&[]))
+        } else {
+            Vec::new()
+        };
+        let expr = HirExpr {
+            kind: HirExprKind::ConstructVariant {
+                enum_id,
+                variant: idx,
+                payload,
+            },
+            ty: result_ty.clone(),
+        };
         (expr, result_ty.clone())
     }
 
-    fn lower_static_member(&mut self, owner_id: DefId, idx: u32, call_args: Option<&[Expr]>, result_ty: &Type) -> (HirExpr, Type) {
-        let Some(name) = self.resolved.definitions.get(owner_id).methods.get(idx as usize).cloned() else {
-            return (HirExpr { kind: HirExprKind::Unit, ty: Type::Error }, Type::Error);
+    fn lower_static_member(
+        &mut self,
+        owner_id: DefId,
+        idx: u32,
+        call_args: Option<&[Expr]>,
+        generic_args: &[Type],
+        result_ty: &Type,
+    ) -> (HirExpr, Type) {
+        let Some(name) = self
+            .resolved
+            .definitions
+            .get(owner_id)
+            .methods
+            .get(idx as usize)
+            .cloned()
+        else {
+            return (
+                HirExpr {
+                    kind: HirExprKind::Unit,
+                    ty: Type::Error,
+                },
+                Type::Error,
+            );
         };
         let Some(fn_id) = self.methods.get(&(owner_id, name)).copied() else {
-            return (HirExpr { kind: HirExprKind::Unit, ty: Type::Error }, Type::Error);
+            return (
+                HirExpr {
+                    kind: HirExprKind::Unit,
+                    ty: Type::Error,
+                },
+                Type::Error,
+            );
         };
         match call_args {
             Some(args) => {
                 let args = self.lower_args(args);
-                let expr = HirExpr { kind: HirExprKind::CallStatic { fn_id, args }, ty: result_ty.clone() };
+                let expr = HirExpr {
+                    kind: HirExprKind::CallStatic {
+                        fn_id,
+                        generic_args: generic_args.to_vec(),
+                        args,
+                    },
+                    ty: result_ty.clone(),
+                };
                 (expr, result_ty.clone())
             }
             None => {
-                let expr = HirExpr { kind: HirExprKind::FnRef(fn_id), ty: result_ty.clone() };
+                let expr = HirExpr {
+                    kind: HirExprKind::FnRef(fn_id),
+                    ty: result_ty.clone(),
+                };
                 (expr, result_ty.clone())
             }
         }
     }
 
-    fn lower_method_call_on(&mut self, receiver: HirExpr, receiver_ty: &Type, method: &Ident, args: &[Expr], result_ty: &Type) -> HirExpr {
+    fn lower_method_call_on(
+        &mut self,
+        receiver: HirExpr,
+        receiver_ty: &Type,
+        method: &Ident,
+        args: &[Expr],
+        generic_args: &[Type],
+        result_ty: &Type,
+    ) -> HirExpr {
         if let Type::Array(_) = receiver_ty {
             let lowered = self.lower_args(args);
             return HirExpr {
-                kind: HirExprKind::CallArrayMethod { receiver: Box::new(receiver), method: method.name.clone(), args: lowered },
+                kind: HirExprKind::CallArrayMethod {
+                    receiver: Box::new(receiver),
+                    method: method.name.clone(),
+                    args: lowered,
+                },
                 ty: result_ty.clone(),
             };
         }
         if let Type::Generic(name) = receiver_ty {
             let bound = self.generics.get(name).cloned().flatten();
+            let is_static = bound
+                .as_ref()
+                .and_then(|bound| {
+                    self.sigs
+                        .interface_methods
+                        .get(&(bound.interface, method.name.clone()))
+                })
+                .is_some_and(|sig| sig.self_param.is_none());
             let lowered = self.lower_args(args);
             return match bound {
                 Some(bound) => HirExpr {
@@ -589,11 +816,16 @@ impl Lowerer<'_> {
                         receiver: Box::new(receiver),
                         bound_interface: bound.interface,
                         method_name: method.name.clone(),
+                        is_static,
+                        generic_args: generic_args.to_vec(),
                         args: lowered,
                     },
                     ty: result_ty.clone(),
                 },
-                None => HirExpr { kind: HirExprKind::Unit, ty: Type::Error },
+                None => HirExpr {
+                    kind: HirExprKind::Unit,
+                    ty: Type::Error,
+                },
             };
         }
         let owner_id = match receiver_ty {
@@ -605,23 +837,64 @@ impl Lowerer<'_> {
         let mut lowered = self.lower_args(args);
         match fn_id {
             Some(fid) => {
-                let mut call_args = Vec::with_capacity(lowered.len() + 1);
-                call_args.push(receiver);
-                call_args.append(&mut lowered);
-                HirExpr { kind: HirExprKind::CallStatic { fn_id: fid, args: call_args }, ty: result_ty.clone() }
+                let is_static = owner_id
+                    .and_then(|id| self.sigs.method(id, &method.name))
+                    .is_some_and(|sig| sig.self_param.is_none());
+                let call = HirExpr {
+                    kind: HirExprKind::CallStatic {
+                        fn_id: fid,
+                        generic_args: generic_args.to_vec(),
+                        args: if is_static {
+                            lowered
+                        } else {
+                            let mut call_args = Vec::with_capacity(lowered.len() + 1);
+                            call_args.push(receiver.clone());
+                            call_args.append(&mut lowered);
+                            call_args
+                        },
+                    },
+                    ty: result_ty.clone(),
+                };
+                if is_static {
+                    HirExpr {
+                        kind: HirExprKind::Block(
+                            vec![HirStmt {
+                                kind: HirStmtKind::Expr(receiver),
+                            }],
+                            Some(Box::new(call)),
+                        ),
+                        ty: result_ty.clone(),
+                    }
+                } else {
+                    call
+                }
             }
-            None => HirExpr { kind: HirExprKind::Unit, ty: Type::Error },
+            None => HirExpr {
+                kind: HirExprKind::Unit,
+                ty: Type::Error,
+            },
         }
     }
 
-    fn lower_field_access_named(&mut self, base: HirExpr, base_ty: &Type, ident: &Ident) -> (HirExpr, Type) {
+    fn lower_field_access_named(
+        &mut self,
+        base: HirExpr,
+        base_ty: &Type,
+        ident: &Ident,
+    ) -> (HirExpr, Type) {
         let (raw, field_ty) = self.raw_field_access(base, base_ty, ident);
         if field_ty.is_error() {
             return (raw, field_ty);
         }
         let upgraded_ty = self.upgrade_weak(field_ty.clone());
         let kind = self.weak_upgrade_kind(raw, &field_ty);
-        (HirExpr { kind, ty: upgraded_ty.clone() }, upgraded_ty)
+        (
+            HirExpr {
+                kind,
+                ty: upgraded_ty.clone(),
+            },
+            upgraded_ty,
+        )
     }
 
     /// Reading a `weak T`-typed place *as a value* never yields a bare
@@ -647,15 +920,25 @@ impl Lowerer<'_> {
     /// [`Self::upgrade_weak`].
     fn weak_upgrade_kind(&self, expr: HirExpr, raw_ty: &Type) -> HirExprKind {
         if matches!(raw_ty, Type::Weak(_)) {
-            HirExprKind::CallBuiltin { name: Symbol::new("__weak_upgrade"), args: vec![expr] }
+            HirExprKind::CallBuiltin {
+                name: Symbol::new("__weak_upgrade"),
+                args: vec![expr],
+            }
         } else {
             expr.kind
         }
     }
 
-    fn lower_call(&mut self, callee: &Expr, args: &[Expr], result_ty: Type) -> HirExpr {
+    fn lower_call(
+        &mut self,
+        call_id: NodeId,
+        callee: &Expr,
+        args: &[Expr],
+        result_ty: Type,
+    ) -> HirExpr {
+        let generic_args = self.generic_args_for(call_id);
         if let ExprKind::Path(path) = &callee.kind {
-            self.lower_value_path(path, Some(args), result_ty)
+            self.lower_value_path(path, Some(args), &generic_args, result_ty)
         } else {
             let callee_hir = self.lower_expr(callee);
             self.lower_call_value(callee_hir, args, result_ty)
@@ -664,13 +947,34 @@ impl Lowerer<'_> {
 
     fn lower_call_value(&mut self, callee: HirExpr, args: &[Expr], result_ty: Type) -> HirExpr {
         let args = self.lower_args(args);
-        HirExpr { kind: HirExprKind::Call { callee: Box::new(callee), args }, ty: result_ty }
+        HirExpr {
+            kind: HirExprKind::Call {
+                callee: Box::new(callee),
+                args,
+            },
+            ty: result_ty,
+        }
     }
 
-    fn lower_method_call(&mut self, receiver: &Expr, method: &Ident, args: &[Expr], result_ty: Type) -> HirExpr {
+    fn lower_method_call(
+        &mut self,
+        call_id: NodeId,
+        receiver: &Expr,
+        method: &Ident,
+        args: &[Expr],
+        result_ty: Type,
+    ) -> HirExpr {
+        let generic_args = self.generic_args_for(call_id);
         let receiver_hir = self.lower_expr(receiver);
         let receiver_ty = receiver_hir.ty.clone();
-        self.lower_method_call_on(receiver_hir, &receiver_ty, method, args, &result_ty)
+        self.lower_method_call_on(
+            receiver_hir,
+            &receiver_ty,
+            method,
+            args,
+            &generic_args,
+            &result_ty,
+        )
     }
 
     fn lower_field(&mut self, base: &Expr, field: &FieldAccessor, result_ty: Type) -> HirExpr {
@@ -679,11 +983,18 @@ impl Lowerer<'_> {
             FieldAccessor::Named(ident) => {
                 let base_ty = base_hir.ty.clone();
                 let (expr, _) = self.lower_field_access_named(base_hir, &base_ty, ident);
-                HirExpr { kind: expr.kind, ty: result_ty }
+                HirExpr {
+                    kind: expr.kind,
+                    ty: result_ty,
+                }
             }
-            FieldAccessor::Index(idx, _) => {
-                HirExpr { kind: HirExprKind::Field { base: Box::new(base_hir), index: *idx }, ty: result_ty }
-            }
+            FieldAccessor::Index(idx, _) => HirExpr {
+                kind: HirExprKind::Field {
+                    base: Box::new(base_hir),
+                    index: *idx,
+                },
+                ty: result_ty,
+            },
         }
     }
 
@@ -703,11 +1014,17 @@ impl Lowerer<'_> {
             // `ExprKind::Field` — see `nether_typecheck::check::TypeChecker::
             // check_assign_target_type`'s own matching note.
             ExprKind::Path(path) => self.lower_assign_path_target(path, ty),
-            ExprKind::Field { base, field: FieldAccessor::Named(ident) } => {
+            ExprKind::Field {
+                base,
+                field: FieldAccessor::Named(ident),
+            } => {
                 let base_hir = self.lower_expr(base);
                 let base_ty = base_hir.ty.clone();
                 let (expr, _) = self.raw_field_access(base_hir, &base_ty, ident);
-                HirExpr { kind: expr.kind, ty }
+                HirExpr {
+                    kind: expr.kind,
+                    ty,
+                }
             }
             _ => self.lower_expr(target),
         }
@@ -721,7 +1038,10 @@ impl Lowerer<'_> {
     /// ordinary read on the way there, so it upgrades as normal.
     fn lower_assign_path_target(&mut self, path: &Path, ty: Type) -> HirExpr {
         let Some(res) = self.resolved.path_res.get(&path.id).cloned() else {
-            return HirExpr { kind: HirExprKind::Unit, ty: Type::Error };
+            return HirExpr {
+                kind: HirExprKind::Unit,
+                ty: Type::Error,
+            };
         };
         let total = path.segments.len();
         let (mut current, mut current_ty) = match res.base {
@@ -729,13 +1049,16 @@ impl Lowerer<'_> {
                 let local_ty = self.local_ty(id);
                 (local_ref(self.local_for(id), local_ty.clone()), local_ty)
             }
-            _ => return self.lower_value_path(path, None, ty),
+            _ => return self.lower_value_path(path, None, &[], ty),
         };
         for i in res.consumed..total {
             let seg = &path.segments[i];
             if i + 1 == total {
                 let (expr, _) = self.raw_field_access(current, &current_ty, seg);
-                return HirExpr { kind: expr.kind, ty };
+                return HirExpr {
+                    kind: expr.kind,
+                    ty,
+                };
             }
             let (next, next_ty) = self.lower_field_access_named(current, &current_ty, seg);
             current = next;
@@ -749,25 +1072,53 @@ impl Lowerer<'_> {
     /// (an assignment target's final segment, which must stay a plain
     /// place) and [`Self::lower_field_access_named`] (which wraps this in
     /// the `weak`-upgrade check for a normal read).
-    fn raw_field_access(&mut self, base: HirExpr, base_ty: &Type, ident: &Ident) -> (HirExpr, Type) {
+    fn raw_field_access(
+        &mut self,
+        base: HirExpr,
+        base_ty: &Type,
+        ident: &Ident,
+    ) -> (HirExpr, Type) {
         if let Type::Struct(_, _) = base_ty {
             if let Some(fields) = self.sigs.named_type_fields(base_ty) {
                 if let Some(idx) = fields.iter().position(|(n, _)| n == &ident.name) {
                     let field_ty = fields[idx].1.clone();
-                    let expr = HirExpr { kind: HirExprKind::Field { base: Box::new(base), index: idx as u32 }, ty: field_ty.clone() };
+                    let expr = HirExpr {
+                        kind: HirExprKind::Field {
+                            base: Box::new(base),
+                            index: idx as u32,
+                        },
+                        ty: field_ty.clone(),
+                    };
                     return (expr, field_ty);
                 }
             }
         }
-        (HirExpr { kind: HirExprKind::Unit, ty: Type::Error }, Type::Error)
+        (
+            HirExpr {
+                kind: HirExprKind::Unit,
+                ty: Type::Error,
+            },
+            Type::Error,
+        )
     }
 
-    fn lower_struct_lit(&mut self, path: &Path, fields: &[(Ident, Expr)], result_ty: Type) -> HirExpr {
+    fn lower_struct_lit(
+        &mut self,
+        path: &Path,
+        fields: &[(Ident, Expr)],
+        result_ty: Type,
+    ) -> HirExpr {
         let Some(res) = self.resolved.path_res.get(&path.id).cloned() else {
-            return HirExpr { kind: HirExprKind::Unit, ty: Type::Error };
+            return HirExpr {
+                kind: HirExprKind::Unit,
+                ty: Type::Error,
+            };
         };
         let Resolution::Def(id) = res.base else {
-            return HirExpr { kind: HirExprKind::Unit, ty: Type::Error };
+            return HirExpr {
+                kind: HirExprKind::Unit,
+                ty: Type::Error,
+            };
         };
         let decl_fields = match self.sigs.type_shapes.get(&id) {
             Some(TypeShape::Struct(f)) => f.clone(),
@@ -781,10 +1132,19 @@ impl Lowerer<'_> {
             .iter()
             .map(|(name, _)| match by_name.get(name) {
                 Some(e) => self.lower_expr(e),
-                None => HirExpr { kind: HirExprKind::Unit, ty: Type::Error },
+                None => HirExpr {
+                    kind: HirExprKind::Unit,
+                    ty: Type::Error,
+                },
             })
             .collect();
-        HirExpr { kind: HirExprKind::Construct { ty: id, fields: ordered }, ty: result_ty }
+        HirExpr {
+            kind: HirExprKind::Construct {
+                ty: id,
+                fields: ordered,
+            },
+            ty: result_ty,
+        }
     }
 
     fn lower_pattern(&mut self, pattern: &Pattern) -> HirPattern {
@@ -800,15 +1160,23 @@ impl Lowerer<'_> {
                 } else if let Some(Resolution::EnumVariant(enum_id, idx)) =
                     self.resolved.path_res.get(id).map(|r| r.base)
                 {
-                    HirPattern::Variant { enum_id, variant: idx, payload: Vec::new() }
+                    HirPattern::Variant {
+                        enum_id,
+                        variant: idx,
+                        payload: Vec::new(),
+                    }
                 } else {
                     HirPattern::Wildcard
                 }
             }
             Pattern::Literal(lit, _) => HirPattern::Literal(lit.clone()),
-            Pattern::Tuple(elems, _) => HirPattern::Tuple(elems.iter().map(|p| self.lower_pattern(p)).collect()),
+            Pattern::Tuple(elems, _) => {
+                HirPattern::Tuple(elems.iter().map(|p| self.lower_pattern(p)).collect())
+            }
             Pattern::Variant { path, payload, .. } => {
-                if let Some(Resolution::EnumVariant(enum_id, idx)) = self.resolved.path_res.get(&path.id).map(|r| r.base) {
+                if let Some(Resolution::EnumVariant(enum_id, idx)) =
+                    self.resolved.path_res.get(&path.id).map(|r| r.base)
+                {
                     HirPattern::Variant {
                         enum_id,
                         variant: idx,
@@ -822,7 +1190,10 @@ impl Lowerer<'_> {
     }
 
     fn lower_match_arm(&mut self, arm: &MatchArm) -> HirMatchArm {
-        HirMatchArm { pattern: self.lower_pattern(&arm.pattern), body: self.lower_expr(&arm.body) }
+        HirMatchArm {
+            pattern: self.lower_pattern(&arm.pattern),
+            body: self.lower_expr(&arm.body),
+        }
     }
 
     fn lower_template(&mut self, parts: &[TemplatePart], result_ty: Type) -> HirExpr {
@@ -830,7 +1201,10 @@ impl Lowerer<'_> {
         for part in parts {
             match part {
                 TemplatePart::Literal(s) => {
-                    pieces.push(HirExpr { kind: HirExprKind::Literal(Literal::Str(s.clone())), ty: Type::String });
+                    pieces.push(HirExpr {
+                        kind: HirExprKind::Literal(Literal::Str(s.clone())),
+                        ty: Type::String,
+                    });
                 }
                 TemplatePart::Expr(e) => {
                     let hir = self.lower_expr(e);
@@ -838,7 +1212,10 @@ impl Lowerer<'_> {
                 }
             }
         }
-        HirExpr { kind: HirExprKind::Concat(pieces), ty: result_ty }
+        HirExpr {
+            kind: HirExprKind::Concat(pieces),
+            ty: result_ty,
+        }
     }
 
     fn into_string_expr(&self, expr: HirExpr) -> HirExpr {
@@ -849,12 +1226,23 @@ impl Lowerer<'_> {
                 kind: HirExprKind::ToString(Box::new(expr)),
             },
             Type::Struct(owner, _) | Type::TupleStruct(owner, _) | Type::Enum(owner, _) => {
-                match self.methods.get(&(*owner, Symbol::new("into_string"))).copied() {
+                match self
+                    .methods
+                    .get(&(*owner, Symbol::new("into_string")))
+                    .copied()
+                {
                     Some(fn_id) => HirExpr {
                         ty: Type::String,
-                        kind: HirExprKind::CallStatic { fn_id, args: vec![expr] },
+                        kind: HirExprKind::CallStatic {
+                            fn_id,
+                            generic_args: Vec::new(),
+                            args: vec![expr],
+                        },
                     },
-                    None => HirExpr { ty: Type::Error, kind: HirExprKind::Unit },
+                    None => HirExpr {
+                        ty: Type::Error,
+                        kind: HirExprKind::Unit,
+                    },
                 }
             }
             Type::Generic(name) => match self.generics.get(name).cloned().flatten() {
@@ -864,12 +1252,20 @@ impl Lowerer<'_> {
                         receiver: Box::new(expr),
                         bound_interface: bound.interface,
                         method_name: Symbol::new("into_string"),
+                        is_static: false,
+                        generic_args: Vec::new(),
                         args: Vec::new(),
                     },
                 },
-                None => HirExpr { ty: Type::Error, kind: HirExprKind::Unit },
+                None => HirExpr {
+                    ty: Type::Error,
+                    kind: HirExprKind::Unit,
+                },
             },
-            _ => HirExpr { ty: Type::Error, kind: HirExprKind::Unit },
+            _ => HirExpr {
+                ty: Type::Error,
+                kind: HirExprKind::Unit,
+            },
         }
     }
 
@@ -893,9 +1289,16 @@ impl Lowerer<'_> {
         let elem_local = self.fresh_local();
 
         let iter_let = HirStmt {
-            kind: HirStmtKind::Let { local: iter_local, ty: iter_ty.clone(), value: iter_hir },
+            kind: HirStmtKind::Let {
+                local: iter_local,
+                ty: iter_ty.clone(),
+                value: iter_hir,
+            },
         };
-        let idx_init = HirExpr { kind: HirExprKind::Literal(Literal::Int(0)), ty: Type::Primitive(PrimitiveKind::Usize) };
+        let idx_init = HirExpr {
+            kind: HirExprKind::Literal(Literal::Int(0)),
+            ty: Type::Primitive(PrimitiveKind::Usize),
+        };
         let idx_let = HirStmt {
             kind: HirStmtKind::Let {
                 local: idx_local,
@@ -929,20 +1332,32 @@ impl Lowerer<'_> {
             ty: elem_ty.clone(),
         };
         let elem_let = HirStmt {
-            kind: HirStmtKind::Let { local: elem_local, ty: elem_ty.clone(), value: index_expr },
+            kind: HirStmtKind::Let {
+                local: elem_local,
+                ty: elem_ty.clone(),
+                value: index_expr,
+            },
         };
 
         let hir_pattern = self.lower_pattern(pattern);
         let (body_stmts, body_tail) = self.lower_block(body);
         let mut arm_stmts = body_stmts;
         if let Some(tail) = body_tail {
-            arm_stmts.push(HirStmt { kind: HirStmtKind::Expr(*tail) });
+            arm_stmts.push(HirStmt {
+                kind: HirStmtKind::Expr(*tail),
+            });
         }
-        let arm_body = HirExpr { kind: HirExprKind::Block(arm_stmts, None), ty: Type::unit() };
+        let arm_body = HirExpr {
+            kind: HirExprKind::Block(arm_stmts, None),
+            ty: Type::unit(),
+        };
         let match_expr = HirExpr {
             kind: HirExprKind::Match {
                 scrutinee: Box::new(local_ref(elem_local, elem_ty)),
-                arms: vec![HirMatchArm { pattern: hir_pattern, body: arm_body }],
+                arms: vec![HirMatchArm {
+                    pattern: hir_pattern,
+                    body: arm_body,
+                }],
             },
             ty: Type::unit(),
         };
@@ -951,7 +1366,10 @@ impl Lowerer<'_> {
             kind: HirExprKind::Binary {
                 op: BinaryOp::Add,
                 lhs: Box::new(local_ref(idx_local, Type::Primitive(PrimitiveKind::Usize))),
-                rhs: Box::new(HirExpr { kind: HirExprKind::Literal(Literal::Int(1)), ty: Type::Primitive(PrimitiveKind::Usize) }),
+                rhs: Box::new(HirExpr {
+                    kind: HirExprKind::Literal(Literal::Int(1)),
+                    ty: Type::Primitive(PrimitiveKind::Usize),
+                }),
             },
             ty: Type::Primitive(PrimitiveKind::Usize),
         };
@@ -966,12 +1384,39 @@ impl Lowerer<'_> {
         };
 
         let while_body = HirExpr {
-            kind: HirExprKind::Block(vec![elem_let, HirStmt { kind: HirStmtKind::Expr(match_expr) }, increment_stmt], None),
+            kind: HirExprKind::Block(
+                vec![
+                    elem_let,
+                    HirStmt {
+                        kind: HirStmtKind::Expr(match_expr),
+                    },
+                    increment_stmt,
+                ],
+                None,
+            ),
             ty: Type::unit(),
         };
-        let while_expr = HirExpr { kind: HirExprKind::While { cond: Box::new(cond), body: Box::new(while_body) }, ty: Type::unit() };
+        let while_expr = HirExpr {
+            kind: HirExprKind::While {
+                cond: Box::new(cond),
+                body: Box::new(while_body),
+            },
+            ty: Type::unit(),
+        };
 
-        HirExpr { kind: HirExprKind::Block(vec![iter_let, idx_let, HirStmt { kind: HirStmtKind::Expr(while_expr) }], None), ty: Type::unit() }
+        HirExpr {
+            kind: HirExprKind::Block(
+                vec![
+                    iter_let,
+                    idx_let,
+                    HirStmt {
+                        kind: HirStmtKind::Expr(while_expr),
+                    },
+                ],
+                None,
+            ),
+            ty: Type::unit(),
+        }
     }
 
     fn lower_closure(&mut self, params: &[Param], body: &Expr, result_ty: Type) -> HirExpr {
@@ -981,11 +1426,23 @@ impl Lowerer<'_> {
                 Some(orig) => (self.local_for(*orig), self.local_ty(*orig)),
                 None => (self.fresh_local(), Type::Error),
             };
-            hir_params.push(HirParam { local, name: p.name.name.clone(), mutable: p.mutable, ty });
+            hir_params.push(HirParam {
+                local,
+                name: p.name.name.clone(),
+                mutable: p.mutable,
+                ty,
+            });
         }
         let body_hir = self.lower_expr(body);
         let captures = closure_captures(&body_hir, &hir_params);
-        HirExpr { kind: HirExprKind::Closure { params: hir_params, captures, body: Box::new(body_hir) }, ty: result_ty }
+        HirExpr {
+            kind: HirExprKind::Closure {
+                params: hir_params,
+                captures,
+                body: Box::new(body_hir),
+            },
+            ty: result_ty,
+        }
     }
 }
 
@@ -1021,9 +1478,18 @@ fn collect_closure_locals(
         | HirExprKind::Field { base: inner, .. }
         | HirExprKind::Loop { body: inner } => collect_closure_locals(inner, used, bound),
         HirExprKind::Binary { lhs, rhs, .. }
-        | HirExprKind::Assign { target: lhs, value: rhs }
-        | HirExprKind::Index { base: lhs, index: rhs }
-        | HirExprKind::While { cond: lhs, body: rhs } => {
+        | HirExprKind::Assign {
+            target: lhs,
+            value: rhs,
+        }
+        | HirExprKind::Index {
+            base: lhs,
+            index: rhs,
+        }
+        | HirExprKind::While {
+            cond: lhs,
+            body: rhs,
+        } => {
             collect_closure_locals(lhs, used, bound);
             collect_closure_locals(rhs, used, bound);
         }
@@ -1048,7 +1514,11 @@ fn collect_closure_locals(
                 collect_closure_locals(arg, used, bound);
             }
         }
-        HirExprKind::If { cond, then_branch, else_branch } => {
+        HirExprKind::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
             collect_closure_locals(cond, used, bound);
             collect_closure_locals(then_branch, used, bound);
             if let Some(branch) = else_branch {
@@ -1085,10 +1555,14 @@ fn collect_closure_locals(
         // the nested closure's own body/parameters are a separate scope.
         HirExprKind::Closure { captures, .. } => {
             for capture in captures {
-                used.entry(capture.local).or_insert_with(|| capture.ty.clone());
+                used.entry(capture.local)
+                    .or_insert_with(|| capture.ty.clone());
             }
         }
-        HirExprKind::Literal(_) | HirExprKind::FnRef(_) | HirExprKind::Unit | HirExprKind::Continue => {}
+        HirExprKind::Literal(_)
+        | HirExprKind::FnRef(_)
+        | HirExprKind::Unit
+        | HirExprKind::Continue => {}
     }
 }
 

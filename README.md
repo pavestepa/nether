@@ -7,7 +7,8 @@ ownership/borrowing and compiles through LLVM to a native executable.
 The compiler implements:
 
 - lexer, parser, diagnostics, name resolution, and type checking;
-- interfaces with static dispatch and generic monomorphization;
+- interfaces with static dispatch, multiple inheritance, defaults, and
+  generic monomorphization;
 - HIR, closure conversion, CFG-based MIR, and ARC insertion;
 - structs, tuples, enums/match, arrays, weak references, and closures;
 - local multi-file modules through `use`;
@@ -69,13 +70,59 @@ For example, emit an optimized object without linking:
 cargo run -p nether-cli -- build examples/some/enums.nt -O2 --emit-object
 ```
 
+## Larger examples
+
+Three multi-file projects under `examples/` are intended as compilable
+language showcases:
+
+- `shelter` — heap structs, `weak` fields, `Option`, enums and `match`,
+  arrays, closures, templates, methods and `Into<String>`;
+- `metrics` — value structs, higher-order functions, named function
+  values, generic functions, tuples, arrays, loops and mutable scalar
+  parameters;
+- `adventure` — nested file modules, `self`/`super` imports, enum payloads,
+  mutation through methods, closures and generic interface bounds.
+
+Compile and run them from the repository root:
+
+```sh
+cargo run -p nether-cli -- build examples/shelter/main.nt
+./examples/shelter/main
+
+cargo run -p nether-cli -- build examples/metrics/main.nt
+./examples/metrics/main
+
+cargo run -p nether-cli -- build examples/adventure/main.nt
+./examples/adventure/main
+```
+
+The driver integration suite compiles, links and executes all three
+projects, so these examples are kept in sync with the language.
+
 ## Modules and standard library
 
-A file is a module. `use lang.Lang;` loads `lang.nt`/`lang.nr` next to the
-importing file. Nested paths map to directories. Each file has its own
-top-level namespace, so private declarations with equal names do not
-collide across modules. Bundled standard-library modules are available
-from the repository root:
+A file is a module. Declare a child similarly to Rust:
+
+```nether
+mod lang;
+use self.lang.Lang;
+
+fn main() {
+    let value = Lang.new("Nether");
+}
+```
+
+`mod lang;` looks for `lang.nt`, `lang.nr`, `lang/mod.nt`, or
+`lang/mod.nr`. A non-root `foo.nt` may declare nested children below
+`foo/`. Import roots have their Rust meanings: `self` is the current
+module, `super` is its parent, and `crate` is the entry module. Nether uses
+`.` everywhere instead of Rust's `::`.
+
+Each file has its own top-level namespace, while an `impl` in a child can
+extend a parent type after `use super.Type;`. Import aliases, globs,
+re-exports and inline `mod name { ... }` blocks are not implemented.
+Bundled standard-library modules are available without a `mod stdlib;`
+declaration:
 
 ```nether
 use stdlib.option.option_map;
@@ -100,11 +147,16 @@ The language reference is in
 boundaries and memory-management rules are described under
 [`docs/architecture`](docs/architecture).
 
+For working examples of generic functions, types, enums, methods,
+interfaces, bounds, inheritance and current limitations, see
+[`docs/generics.md`](docs/generics.md).
+
 Nether intentionally has no borrow checker, garbage collector, async,
 threads, unsafe code, macros, reflection, or dynamic interface dispatch in
 its MVP.
 
 Current deliberate MVP limits are local generic inference (no
 where-clauses, associated types, or specialization), one bound per generic
-parameter, no import aliases, a flattened/non-union enum layout, and native
-linking only for the host target. Cross-target object emission is supported.
+parameter, no import aliases/globs/re-exports, a flattened/non-union enum
+layout, and native linking only for the host target. Cross-target object
+emission is supported.

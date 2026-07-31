@@ -62,7 +62,10 @@ impl Diagnostic {
     }
 
     pub fn with_label(mut self, span: Span, message: impl Into<String>) -> Self {
-        self.labels.push(Label { span, message: message.into() });
+        self.labels.push(Label {
+            span,
+            message: message.into(),
+        });
         self
     }
 

@@ -46,15 +46,13 @@ mod ty;
 
 pub use nether_diagnostics::{FileId, Span};
 
-pub use expr::{
-    Block, Expr, ExprKind, FieldAccessor, LetStmt, MatchArm, Stmt, TemplatePart,
-};
 pub use expr::{BinaryOp, UnaryOp};
+pub use expr::{Block, Expr, ExprKind, FieldAccessor, LetStmt, MatchArm, Stmt, TemplatePart};
 pub use ident::{Ident, Path};
 pub use ids::{NodeId, NodeIdGen};
 pub use item::{
-    EnumDecl, EnumVariant, Field, FnDecl, GenericParam, ImplBlock, InterfaceDecl, Item, Module,
-    Param, SelfParam, TypeDecl, TypeDeclKind, UseDecl,
+    EnumDecl, EnumVariant, Field, FnDecl, GenericParam, ImplBlock, InterfaceDecl, Item, ModDecl,
+    Module, Param, SelfParam, TypeDecl, TypeDeclKind, UseDecl,
 };
 pub use literal::Literal;
 pub use pattern::Pattern;

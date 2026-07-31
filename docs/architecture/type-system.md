@@ -58,9 +58,22 @@ with these arguments. Generic type parameters are also in scope
 implicitly inside `impl Boxed { ... }`, so `self` remains `Boxed<T>` until
 monomorphization.
 
+Interface bounds form a transitive graph. `Signatures` stores each
+interface's generic parameters and direct parent templates; satisfaction
+recursively substitutes the concrete child arguments into those templates.
+Thus `Child<String>: Parent<String>` allows a concrete `Child<String>`
+implementation wherever `Parent<String>` is required. The type checker
+flattens inherited method signatures and rejects cycles, incompatible
+signatures, and unresolved default-body conflicts before HIR.
+
 Inference is intentionally local: it walks parameter/argument and expected
-return types structurally. There are no higher-kinded types, associated
-types, where-clauses, specialization, or blanket implementations.
+return types structurally. Explicit `call<Type, ...>(...)` arguments seed
+the same substitution map before expected-return and ordinary-argument
+inference; receiver-fixed owner parameters are excluded from the explicit
+method list. The fully resolved arguments are recorded by call `NodeId` so
+HIR and monomorphization do not need to re-infer an otherwise opaque
+parameter. There are no higher-kinded types, associated types,
+where-clauses, specialization, or blanket implementations.
 
 ## 3. Allocation classification
 

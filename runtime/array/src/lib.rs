@@ -59,7 +59,8 @@ struct ArrayRepr {
 
 fn buf_layout(elem_size: i64, cap: i64) -> std::alloc::Layout {
     let bytes = usize::try_from(elem_size).unwrap_or(0) * usize::try_from(cap).unwrap_or(0);
-    std::alloc::Layout::from_size_align(bytes.max(1), 16).expect("nether_rt_array: invalid buffer size")
+    std::alloc::Layout::from_size_align(bytes.max(1), 16)
+        .expect("nether_rt_array: invalid buffer size")
 }
 
 extern "C" fn drop_buffer(payload: *mut u8) {
@@ -77,7 +78,12 @@ extern "C" fn drop_buffer(payload: *mut u8) {
 /// Builds a new, empty `Array<T>` with room for `cap` elements of
 /// `elem_size` bytes each.
 #[no_mangle]
-pub extern "C" fn nether_rt_array_new(elem_size: i64, cap: i64, elem_retain: ElemFn, elem_drop: ElemFn) -> *mut u8 {
+pub extern "C" fn nether_rt_array_new(
+    elem_size: i64,
+    cap: i64,
+    elem_retain: ElemFn,
+    elem_drop: ElemFn,
+) -> *mut u8 {
     let cap = cap.max(1);
     let layout = buf_layout(elem_size, cap);
     let ptr = unsafe {
@@ -89,7 +95,14 @@ pub extern "C" fn nether_rt_array_new(elem_size: i64, cap: i64, elem_retain: Ele
     };
     let payload = nether_rt_arc_alloc(std::mem::size_of::<ArrayRepr>() as i64, Some(drop_buffer));
     unsafe {
-        payload.cast::<ArrayRepr>().write(ArrayRepr { ptr, len: 0, cap, elem_size, elem_retain, elem_drop });
+        payload.cast::<ArrayRepr>().write(ArrayRepr {
+            ptr,
+            len: 0,
+            cap,
+            elem_size,
+            elem_retain,
+            elem_drop,
+        });
     }
     payload
 }
@@ -102,7 +115,11 @@ unsafe fn grow(r: &mut ArrayRepr) {
     if new_ptr.is_null() {
         std::alloc::handle_alloc_error(new_layout);
     }
-    std::ptr::copy_nonoverlapping(r.ptr, new_ptr, usize::try_from(r.len * r.elem_size).unwrap_or(0));
+    std::ptr::copy_nonoverlapping(
+        r.ptr,
+        new_ptr,
+        usize::try_from(r.len * r.elem_size).unwrap_or(0),
+    );
     std::alloc::dealloc(r.ptr, old_layout);
     r.ptr = new_ptr;
     r.cap = new_cap;
@@ -148,7 +165,11 @@ pub unsafe extern "C" fn nether_rt_array_len(arr: *mut u8) -> i64 {
 pub unsafe extern "C" fn nether_rt_array_get(arr: *mut u8, index: i64) -> *mut u8 {
     unsafe {
         let r = &*arr.cast::<ArrayRepr>();
-        assert!(index >= 0 && index < r.len, "nether_rt_array_get: index {index} out of bounds (len {})", r.len);
+        assert!(
+            index >= 0 && index < r.len,
+            "nether_rt_array_get: index {index} out of bounds (len {})",
+            r.len
+        );
         r.ptr.add(usize::try_from(index * r.elem_size).unwrap_or(0))
     }
 }
@@ -229,14 +250,26 @@ mod tests {
             for v in [1i64, 2, 3] {
                 nether_rt_array_push(arr, (&v as *const i64).cast());
             }
-            assert_eq!(RETAINS.load(Ordering::SeqCst), retains_before + 3, "one retain per push");
+            assert_eq!(
+                RETAINS.load(Ordering::SeqCst),
+                retains_before + 3,
+                "one retain per push"
+            );
 
             let mut out: i64 = 0;
             nether_rt_array_pop(arr, (&mut out as *mut i64).cast());
-            assert_eq!(DROPS.load(Ordering::SeqCst), drops_before, "pop must not drop the element it hands back");
+            assert_eq!(
+                DROPS.load(Ordering::SeqCst),
+                drops_before,
+                "pop must not drop the element it hands back"
+            );
 
             nether_rt_arc_release(arr);
-            assert_eq!(DROPS.load(Ordering::SeqCst), drops_before + 2, "final drop releases the two remaining elements, not the popped one");
+            assert_eq!(
+                DROPS.load(Ordering::SeqCst),
+                drops_before + 2,
+                "final drop releases the two remaining elements, not the popped one"
+            );
         }
     }
 }

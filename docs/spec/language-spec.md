@@ -263,7 +263,9 @@ impl Dog {
   the method name starts the declaration directly.
 - A method with `self` or `mut self` as its first parameter is an instance
   method; a method with no `self` parameter is a static method, called as
-  `Dog.new(...)`.
+  `Dog.new(...)`. A static method may also be selected through a value
+  (`dog.new(...)`); the receiver expression is evaluated for its side
+  effects but is not passed to the method.
 - **There is no `Self` type.** A constructor or method that needs to refer
   to the enclosing type names it explicitly:
 
@@ -340,7 +342,7 @@ there are no vtables and no dynamic dispatch.
 
 ```
 interface Sound {
-    // a default body is used by any impl that does not override it
+    // A declaration such as `type Dog: Sound` opts into this default.
     sound(): String {
         "..."
     }
@@ -353,8 +355,44 @@ impl Dog: Sound {
 }
 ```
 
-`impl Type: Interface { ... }` implements an interface for a type. Because
-dispatch is always resolved at compile time, an interface name may appear
+An interface listed on a declaration opts into its default implementations:
+
+```
+type Dog: Sound, Clone {
+    name: String
+}
+
+enum State: Sound {
+    Ready,
+    Waiting
+}
+```
+
+By contrast, `impl Type: Interface { ... }` is an explicit implementation:
+every interface method must have a user-written implementation, including
+methods for which the interface declares a default. Several interfaces may
+be named in one block (`impl Dog: Sound, Clone { ... }`).
+
+Methods and interface declarations may be freely split and mixed across
+multiple blocks. All methods written for one owner are collected before
+interface conformance is checked, so a method in `impl Dog { ... }` may
+satisfy an interface named by another `impl Dog: Sound { ... }` block.
+
+Interfaces support multiple inheritance:
+
+```
+interface Pet: Sound, Named {
+    play(self);
+}
+```
+
+Implementing `Pet` also satisfies `Sound` and `Named` and requires their
+methods transitively. A child declaration overrides a same-named parent
+method. Incompatible inherited signatures are an error; conflicting
+default bodies require the concrete type to provide an explicit method.
+Inheritance cycles are rejected.
+
+Because dispatch is always resolved at compile time, an interface name may appear
 **only as a generic bound** (`fn f<T: Sound>(x: T)`) — it can never be used
 as a standalone value type (no `dyn Interface`, no heterogeneous
 `Array<Sound>` holding mixed concrete types). This is a direct consequence
@@ -381,9 +419,64 @@ impl Dog: Into<String> {
 
 Generic types, interfaces, and functions are supported and implemented via
 Rust-style monomorphization: one specialized copy of the code is generated
-per concrete instantiation, at MIR→codegen time. There is no generic code
+per concrete instantiation between HIR and MIR. There is no generic code
 left in the final binary — every call site resolves to a concrete,
 non-generic function.
+
+Generic parameters are supported on functions, methods, named types, tuple
+structs, enums, and interfaces:
+
+```nether
+fn identity<T>(value: T): T { value }
+type Boxed<T> { value: T }
+type Pair<T, U>(T, U);
+enum Maybe<T> { Some(T), None }
+interface Read<T> { read(self): T; }
+```
+
+The parameters declared by a type or enum are implicitly in scope in all
+of its `impl` blocks. Methods may declare additional parameters of their
+own. Function and method type arguments are inferred locally from the
+receiver, ordinary arguments, and expected return type, or written
+explicitly in declaration order:
+
+```nether
+let number = identity<u32>(1);
+let text = box.replace<String>("ready");
+```
+
+The explicit list is written directly after the callable name. Rust's
+`identity::<u32>(1)` syntax is not part of the grammar. For an instance
+method, owner parameters are fixed by the receiver and the list supplies
+all remaining method parameters. For a standalone function it supplies
+the complete declared parameter list; partial explicit lists are rejected.
+Explicit types do not bypass ordinary argument compatibility or bounds.
+
+Each generic parameter may declare one inline interface bound, including a
+generic interface application:
+
+```nether
+fn make_noise<T: Sound>(value: T): String { value.sound() }
+fn read_text<T: Read<String>>(value: T): String { value.read() }
+type SpeakerBox<T: Sound> { value: T }
+```
+
+Multiple effective requirements are expressed by inheriting several
+interfaces and using the child as the single inline bound. Interface
+inheritance and generic arguments are checked transitively.
+
+Every generic parameter must be explicit or inferable at a call site. A
+payload-free variant such as `Option.None` likewise needs a type annotation
+or other context when its arguments cannot be inferred.
+
+The current implementation deliberately has no partial explicit argument
+lists, Rust-style turbofish, `where` clauses, multiple inline bounds,
+associated types, specialization, blanket/conditional implementations,
+const generics, higher-kinded types, or first-class unspecialized generic
+functions.
+
+See [`../generics.md`](../generics.md) for the complete example-driven
+guide and the supported/unsupported feature matrix.
 
 Heap-vs-stack classification (§3.3) is resolved **after** substitution:
 `Array<i32>` and `Array<Dog>` are both heap/ARC (because `Array` itself is
@@ -403,7 +496,7 @@ enum Color {
     Custom(String),
 }
 
-enum Result<T, E> {
+enum Outcome<T, E> {
     Ok(T),
     Error(E),
 }
@@ -412,8 +505,10 @@ enum Result<T, E> {
 Variant payloads use tuple-call syntax, `Ok(T)` / `Error(E)` — not a colon
 form. (An older scratch file used `Ok: O`; that syntax is retired in favor
 of the form actually specified here.) Internally, an enum is represented as
-a tag plus an inline union of its variants' payloads (§3.3); construction
-never allocates independently of what its payload types themselves require.
+a tag plus flat payload storage sized for all variant fields (§3.3);
+construction never allocates independently of what its payload types
+themselves require. `Option<T>` and `Result<T, E>` are bundled generic
+enums available without redeclaration.
 
 `match` is Rust-like, MVP scope only: no guards in the initial version.
 
@@ -437,25 +532,51 @@ using `::`.
 
 ## 10. Modules
 
-Rust-like module system; imports use `use`, and both module-path segments
-and static-member access use `.` — `::` does not exist anywhere in Nether:
+The file-module model follows Rust. A `mod` item declares a child and
+`use` imports one declaration from a module:
 
 ```
-use user.User;
+mod user;
+use self.user.User;
 
 fn main() {
     let u = User.new("Ada");
 }
 ```
 
-Because module paths and member/static access share the same `.` syntax,
-the parser does not need to (and cannot) distinguish "this is a module
-path" from "this is a value/field access chain" — it produces one generic
-dotted-path node for both. **Disambiguation is a name-resolution
-responsibility**: the resolver walks each leading segment and decides, by
-looking it up, whether it names a module, a type, or a value, and rewrites
-the path accordingly. This keeps the grammar simple at the cost of pushing
-one specific kind of ambiguity to the resolver stage, where it belongs.
+For `mod user;`, the driver looks for `user.nt`/`user.nr` or
+`user/mod.nt`/`user/mod.nr` relative to the declaring file. A child of
+`user.nt` is normally stored below `user/`. Missing declared module files
+are source-anchored compilation errors.
+
+Relative roots are:
+
+- `self` — the current file module;
+- `super` — its declaring parent;
+- `crate` — the entry file/module.
+
+For example, a child can extend a type from its parent:
+
+```
+// main.nt
+mod cat_conversions;
+type Cat { name: String }
+
+// cat_conversions.nt
+use super.Cat;
+impl Cat {
+    into_i32(self): i32 { 1 }
+}
+```
+
+Nether uses `.` where Rust uses `::`. Module paths occur in `mod`/`use`;
+after import, source code refers to the imported final declaration by its
+name. Each file retains a separate namespace. `stdlib.*` is an external
+bundled root and does not require `mod stdlib;`.
+
+The MVP does not support inline module bodies, aliases, glob imports or
+re-exports. For compatibility, a direct `use user.User;` may still load a
+nearby module, but new code should declare local children with `mod`.
 
 ---
 
@@ -552,7 +673,8 @@ A single example exercising most of the surface above, with the bugs from
 the original scratch files corrected:
 
 ```
-use lang.Lang;
+mod lang;
+use self.lang.Lang;
 
 fn main() {
     let a = Lang.new("Bobby");

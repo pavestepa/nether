@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use nether_ast::{Item, Module, Symbol};
+use nether_ast::{Item, Module, Symbol, TypeExpr};
 use nether_diagnostics::{Diagnostic, FileId};
 
 /// Identifies one top-level definition (a primitive, a `type`, an `enum`,
@@ -89,7 +89,10 @@ impl Definitions {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (DefId, &Def)> {
-        self.defs.iter().enumerate().map(|(i, d)| (DefId(i as u32), d))
+        self.defs
+            .iter()
+            .enumerate()
+            .map(|(i, d)| (DefId(i as u32), d))
     }
 
     /// Registers `name` (a `use` path's last segment) as an opaque,
@@ -110,7 +113,12 @@ impl Definitions {
 
     fn insert(&mut self, name: Symbol, kind: DefKind) -> DefId {
         let id = DefId(self.defs.len() as u32);
-        self.defs.push(Def { name: name.clone(), kind, variants: Vec::new(), methods: Vec::new() });
+        self.defs.push(Def {
+            name: name.clone(),
+            kind,
+            variants: Vec::new(),
+            methods: Vec::new(),
+        });
         self.by_name.insert(name, id);
         id
     }
@@ -121,25 +129,44 @@ impl Definitions {
         id
     }
 
-    fn insert_checked(&mut self, name: &nether_ast::Ident, kind: DefKind, diags: &mut Vec<Diagnostic>) -> DefId {
+    fn insert_checked(
+        &mut self,
+        name: &nether_ast::Ident,
+        kind: DefKind,
+        diags: &mut Vec<Diagnostic>,
+    ) -> DefId {
         let key = (name.span.file, name.name.clone());
-        if let Some(existing) = self.by_file_name.get(&key).or_else(|| self.builtins.get(&name.name)) {
+        if let Some(existing) = self
+            .by_file_name
+            .get(&key)
+            .or_else(|| self.builtins.get(&name.name))
+        {
             diags.push(
-                Diagnostic::error(format!("the name `{}` is defined more than once", name.name))
-                    .with_label(name.span, "redefined here"),
+                Diagnostic::error(format!(
+                    "the name `{}` is defined more than once",
+                    name.name
+                ))
+                .with_label(name.span, "redefined here"),
             );
             return *existing;
         }
         let id = DefId(self.defs.len() as u32);
-        self.defs.push(Def { name: name.name.clone(), kind, variants: Vec::new(), methods: Vec::new() });
+        self.defs.push(Def {
+            name: name.name.clone(),
+            kind,
+            variants: Vec::new(),
+            methods: Vec::new(),
+        });
         self.by_file_name.insert(key, id);
         self.by_name.entry(name.name.clone()).or_insert(id);
         id
     }
 }
 
-const PRIMITIVES: &[&str] =
-    &["bool", "char", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "usize", "isize", "f32", "f64"];
+const PRIMITIVES: &[&str] = &[
+    "bool", "char", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "usize", "isize", "f32",
+    "f64",
+];
 
 /// Seeds a fresh [`Definitions`] table with everything the language spec
 /// makes available with no `use` (§12) plus the primitives and built-in
@@ -192,42 +219,127 @@ pub fn collect(module: &Module) -> (Definitions, Vec<Diagnostic>) {
                 defs.defs[id.0 as usize].variants = variants;
             }
             Item::Interface(i) => {
-                defs.insert_checked(&i.name, DefKind::Interface, &mut diags);
+                let id = defs.insert_checked(&i.name, DefKind::Interface, &mut diags);
+                defs.defs[id.0 as usize].methods =
+                    i.methods.iter().map(|m| m.name.name.clone()).collect();
             }
             Item::Fn(f) => {
                 defs.insert_checked(&f.name, DefKind::Fn, &mut diags);
             }
-            Item::Impl(_) | Item::Use(_) => {}
+            Item::Impl(_) | Item::Use(_) | Item::Mod(_) => {}
+        }
+    }
+
+    fn interface_id(ty: &TypeExpr, defs: &Definitions) -> Option<DefId> {
+        let TypeExpr::Named { path, .. } = ty else {
+            return None;
+        };
+        let name = path.segments.first()?;
+        let id = defs.lookup_in(path.span.file, &name.name)?;
+        (defs.get(id).kind == DefKind::Interface).then_some(id)
+    }
+
+    let interface_parents: HashMap<DefId, Vec<DefId>> = module
+        .items
+        .iter()
+        .filter_map(|item| {
+            let Item::Interface(interface) = item else {
+                return None;
+            };
+            let id = defs.lookup_in(interface.span.file, &interface.name.name)?;
+            Some((
+                id,
+                interface
+                    .parents
+                    .iter()
+                    .filter_map(|parent| interface_id(parent, &defs))
+                    .collect(),
+            ))
+        })
+        .collect();
+
+    fn inherited_method_names(
+        interface: DefId,
+        defs: &Definitions,
+        parents: &HashMap<DefId, Vec<DefId>>,
+        visiting: &mut Vec<DefId>,
+    ) -> Vec<Symbol> {
+        if visiting.contains(&interface) {
+            return Vec::new();
+        }
+        visiting.push(interface);
+        let mut names = defs.get(interface).methods.clone();
+        for parent in parents.get(&interface).into_iter().flatten() {
+            for name in inherited_method_names(*parent, defs, parents, visiting) {
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        }
+        visiting.pop();
+        names
+    }
+
+    let mut declared_members = Vec::new();
+    for item in &module.items {
+        let (owner, interfaces) = match item {
+            Item::Type(decl) => (
+                defs.lookup_in(decl.span.file, &decl.name.name),
+                decl.interfaces.as_slice(),
+            ),
+            Item::Enum(decl) => (
+                defs.lookup_in(decl.span.file, &decl.name.name),
+                decl.interfaces.as_slice(),
+            ),
+            Item::Impl(block) => (
+                defs.lookup_in(block.span.file, &block.target.name),
+                block.interfaces.as_slice(),
+            ),
+            _ => continue,
+        };
+        let Some(owner) = owner else { continue };
+        let mut names = Vec::new();
+        for interface in interfaces {
+            let Some(interface) = interface_id(interface, &defs) else {
+                continue;
+            };
+            for name in
+                inherited_method_names(interface, &defs, &interface_parents, &mut Vec::new())
+            {
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        }
+        declared_members.push((owner, names));
+    }
+    for (owner, names) in declared_members {
+        for name in names {
+            if !defs.defs[owner.0 as usize].methods.contains(&name) {
+                defs.defs[owner.0 as usize].methods.push(name);
+            }
         }
     }
 
     for item in &module.items {
         let Item::Use(use_decl) = item else { continue };
-        let Some(imported_name) = use_decl.path.segments.last() else { continue };
+        let Some(imported_name) = use_decl.path.segments.last() else {
+            continue;
+        };
         if let Some(target_file) = module.imports.get(&use_decl.id) {
             match defs
                 .by_file_name
                 .get(&(*target_file, imported_name.name.clone()))
                 .copied()
             {
-                Some(id) => defs.import(
-                    use_decl.span.file,
-                    imported_name.name.clone(),
-                    id,
-                ),
+                Some(id) => defs.import(use_decl.span.file, imported_name.name.clone(), id),
                 None => diags.push(
-                    Diagnostic::error(format!(
-                        "module does not define `{}`",
-                        imported_name.name
-                    ))
-                    .with_label(imported_name.span, "not found in this module"),
+                    Diagnostic::error(format!("module does not define `{}`", imported_name.name))
+                        .with_label(imported_name.span, "not found in this module"),
                 ),
             }
         } else {
-            defs.declare_imported(
-                use_decl.span.file,
-                imported_name.name.clone(),
-            );
+            defs.declare_imported(use_decl.span.file, imported_name.name.clone());
         }
     }
 
@@ -235,8 +347,16 @@ pub fn collect(module: &Module) -> (Definitions, Vec<Diagnostic>) {
         if let Item::Impl(impl_block) = item {
             match defs.lookup_in(impl_block.span.file, &impl_block.target.name) {
                 Some(id) if matches!(defs.get(id).kind, DefKind::Type | DefKind::Enum) => {
-                    let names: Vec<Symbol> = impl_block.methods.iter().map(|m| m.name.name.clone()).collect();
-                    defs.defs[id.0 as usize].methods.extend(names);
+                    let names: Vec<Symbol> = impl_block
+                        .methods
+                        .iter()
+                        .map(|m| m.name.name.clone())
+                        .collect();
+                    for name in names {
+                        if !defs.defs[id.0 as usize].methods.contains(&name) {
+                            defs.defs[id.0 as usize].methods.push(name);
+                        }
+                    }
                 }
                 Some(_) => {
                     diags.push(
@@ -249,8 +369,11 @@ pub fn collect(module: &Module) -> (Definitions, Vec<Diagnostic>) {
                 }
                 None => {
                     diags.push(
-                        Diagnostic::error(format!("cannot find type `{}` for this `impl` block", impl_block.target.name))
-                            .with_label(impl_block.target.span, "here"),
+                        Diagnostic::error(format!(
+                            "cannot find type `{}` for this `impl` block",
+                            impl_block.target.name
+                        ))
+                        .with_label(impl_block.target.span, "here"),
                     );
                 }
             }

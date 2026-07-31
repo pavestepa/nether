@@ -76,18 +76,14 @@ pub fn resolve(module: &Module) -> (ResolvedNames, Vec<Diagnostic>) {
         .items
         .iter()
         .filter_map(|item| match item {
-            Item::Type(decl) => {
-                Some((
-                    (decl.span.file, decl.name.name.clone()),
-                    decl.generics.clone(),
-                ))
-            }
-            Item::Enum(decl) => {
-                Some((
-                    (decl.span.file, decl.name.name.clone()),
-                    decl.generics.clone(),
-                ))
-            }
+            Item::Type(decl) => Some((
+                (decl.span.file, decl.name.name.clone()),
+                decl.generics.clone(),
+            )),
+            Item::Enum(decl) => Some((
+                (decl.span.file, decl.name.name.clone()),
+                decl.generics.clone(),
+            )),
             _ => None,
         })
         .collect();
@@ -107,10 +103,22 @@ pub fn resolve(module: &Module) -> (ResolvedNames, Vec<Diagnostic>) {
     }
     // Fully destructure `resolver` so its borrow of `defs` ends here,
     // before `defs` is moved into the return value below.
-    let Resolver { path_res, local_sites, mut diagnostics, .. } = resolver;
+    let Resolver {
+        path_res,
+        local_sites,
+        mut diagnostics,
+        ..
+    } = resolver;
     diags.append(&mut diagnostics);
 
-    (ResolvedNames { definitions: defs, path_res, locals: local_sites }, diags)
+    (
+        ResolvedNames {
+            definitions: defs,
+            path_res,
+            locals: local_sites,
+        },
+        diags,
+    )
 }
 
 struct Resolver<'a> {
@@ -132,7 +140,8 @@ struct Resolver<'a> {
 
 impl Resolver<'_> {
     fn error(&mut self, span: nether_diagnostics::Span, message: impl Into<String>) {
-        self.diagnostics.push(Diagnostic::error(message).with_label(span, "here"));
+        self.diagnostics
+            .push(Diagnostic::error(message).with_label(span, "here"));
     }
 
     fn bind_local(&mut self, site: NodeId, name: Symbol) {
@@ -167,6 +176,9 @@ impl Resolver<'_> {
                         self.resolve_type_expr(bound);
                     }
                 }
+                for parent in &i.parents {
+                    self.resolve_type_expr(parent);
+                }
                 for method in &i.methods {
                     // Resolve each bound in the method's own generics too.
                     self.resolve_fn_decl(method);
@@ -176,6 +188,7 @@ impl Resolver<'_> {
             Item::Fn(f) => self.resolve_fn_decl(f),
             Item::Impl(b) => self.resolve_impl_block(b),
             Item::Use(u) => self.resolve_use_decl(u),
+            Item::Mod(_) => {}
         }
     }
 
@@ -185,6 +198,9 @@ impl Resolver<'_> {
             if let Some(bound) = &g.bound {
                 self.resolve_type_expr(bound);
             }
+        }
+        for interface in &t.interfaces {
+            self.resolve_type_expr(interface);
         }
         match &t.kind {
             nether_ast::TypeDeclKind::Struct(fields) => {
@@ -209,6 +225,9 @@ impl Resolver<'_> {
                 self.resolve_type_expr(bound);
             }
         }
+        for interface in &e.interfaces {
+            self.resolve_type_expr(interface);
+        }
         for variant in &e.variants {
             for ty in &variant.payload {
                 self.resolve_type_expr(ty);
@@ -224,7 +243,7 @@ impl Resolver<'_> {
             .cloned()
             .unwrap_or_default();
         self.push_generics(&owner_generics);
-        if let Some(interface) = &b.interface {
+        for interface in &b.interfaces {
             self.resolve_type_expr(interface);
         }
         for method in &b.methods {
@@ -297,7 +316,13 @@ impl Resolver<'_> {
     fn resolve_type_path(&mut self, path: &Path) {
         let first = &path.segments[0];
         if path.segments.len() == 1 && self.is_generic_param(&first.name) {
-            self.path_res.insert(path.id, PathResolution { base: Resolution::GenericParam, consumed: 1 });
+            self.path_res.insert(
+                path.id,
+                PathResolution {
+                    base: Resolution::GenericParam,
+                    consumed: 1,
+                },
+            );
             return;
         }
         let named = path
@@ -312,16 +337,40 @@ impl Resolver<'_> {
             });
         match named {
             Some((index, id)) if index + 1 == path.segments.len() => {
-                self.path_res.insert(path.id, PathResolution { base: Resolution::Def(id), consumed: index + 1 });
+                self.path_res.insert(
+                    path.id,
+                    PathResolution {
+                        base: Resolution::Def(id),
+                        consumed: index + 1,
+                    },
+                );
             }
             Some(_) => {
-                self.error(path.span, "a type path cannot contain value/member segments after the type name");
-                self.path_res.insert(path.id, PathResolution { base: Resolution::Error, consumed: path.segments.len() });
+                self.error(
+                    path.span,
+                    "a type path cannot contain value/member segments after the type name",
+                );
+                self.path_res.insert(
+                    path.id,
+                    PathResolution {
+                        base: Resolution::Error,
+                        consumed: path.segments.len(),
+                    },
+                );
             }
             None => {
                 let name = path.segments.last().unwrap_or(first);
-                self.error(name.span, format!("cannot find type `{}` in this scope", name.name));
-                self.path_res.insert(path.id, PathResolution { base: Resolution::Error, consumed: path.segments.len() });
+                self.error(
+                    name.span,
+                    format!("cannot find type `{}` in this scope", name.name),
+                );
+                self.path_res.insert(
+                    path.id,
+                    PathResolution {
+                        base: Resolution::Error,
+                        consumed: path.segments.len(),
+                    },
+                );
             }
         }
     }
@@ -386,14 +435,29 @@ impl Resolver<'_> {
                 self.resolve_expr(target);
                 self.resolve_expr(value);
             }
-            ExprKind::Call { callee, args } => {
+            ExprKind::Call {
+                callee,
+                generic_args,
+                args,
+            } => {
                 self.resolve_expr(callee);
+                for ty in generic_args {
+                    self.resolve_type_expr(ty);
+                }
                 for a in args {
                     self.resolve_expr(a);
                 }
             }
-            ExprKind::MethodCall { receiver, args, .. } => {
+            ExprKind::MethodCall {
+                receiver,
+                generic_args,
+                args,
+                ..
+            } => {
                 self.resolve_expr(receiver);
+                for ty in generic_args {
+                    self.resolve_type_expr(ty);
+                }
                 for a in args {
                     self.resolve_expr(a);
                 }
@@ -403,7 +467,11 @@ impl Resolver<'_> {
                 self.resolve_expr(base);
                 self.resolve_expr(index);
             }
-            ExprKind::If { cond, then_branch, else_branch } => {
+            ExprKind::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
                 self.resolve_expr(cond);
                 self.resolve_block(then_branch);
                 if let Some(e) = else_branch {
@@ -424,7 +492,11 @@ impl Resolver<'_> {
                 self.resolve_expr(cond);
                 self.resolve_block(body);
             }
-            ExprKind::ForIn { pattern, iter, body } => {
+            ExprKind::ForIn {
+                pattern,
+                iter,
+                body,
+            } => {
                 self.resolve_expr(iter);
                 self.scopes.push();
                 self.resolve_pattern(pattern);
@@ -487,19 +559,24 @@ impl Resolver<'_> {
     /// Rust's own resolver treats a bare path pattern that happens to name
     /// a unit variant/const as that item rather than a new binding.
     fn resolve_binding_or_unit_variant(&mut self, id: NodeId, ident: &nether_ast::Ident) {
-        match find_unique_variant(
-            self.defs,
-            ident.span.file,
-            &ident.name,
-        ) {
+        match find_unique_variant(self.defs, ident.span.file, &ident.name) {
             Ok((enum_id, idx)) => {
-                self.path_res.insert(id, PathResolution { base: Resolution::EnumVariant(enum_id, idx), consumed: 1 });
+                self.path_res.insert(
+                    id,
+                    PathResolution {
+                        base: Resolution::EnumVariant(enum_id, idx),
+                        consumed: 1,
+                    },
+                );
             }
             Err(0) => self.bind_local(id, ident.name.clone()),
             Err(_) => {
                 self.error(
                     ident.span,
-                    format!("`{}` is ambiguous: more than one enum defines a variant with this name", ident.name),
+                    format!(
+                        "`{}` is ambiguous: more than one enum defines a variant with this name",
+                        ident.name
+                    ),
                 );
             }
         }
@@ -509,32 +586,47 @@ impl Resolver<'_> {
         if path.segments.len() >= 2 {
             let variant_name = path.segments.last().unwrap();
             let enum_name = &path.segments[path.segments.len() - 2];
-            match self
-                .defs
-                .lookup_in(path.span.file, &enum_name.name)
-            {
+            match self.defs.lookup_in(path.span.file, &enum_name.name) {
                 Some(id) if self.defs.get(id).kind == DefKind::Enum => {
                     match variant_index(self.defs.get(id), &variant_name.name) {
                         Some(idx) => {
                             self.path_res.insert(
                                 path.id,
-                                PathResolution { base: Resolution::EnumVariant(id, idx), consumed: path.segments.len() },
+                                PathResolution {
+                                    base: Resolution::EnumVariant(id, idx),
+                                    consumed: path.segments.len(),
+                                },
                             );
                         }
                         None => {
                             self.error(
                                 variant_name.span,
-                                format!("enum `{}` has no variant named `{}`", enum_name.name, variant_name.name),
+                                format!(
+                                    "enum `{}` has no variant named `{}`",
+                                    enum_name.name, variant_name.name
+                                ),
                             );
-                            self.path_res.insert(path.id, PathResolution { base: Resolution::Error, consumed: 2 });
+                            self.path_res.insert(
+                                path.id,
+                                PathResolution {
+                                    base: Resolution::Error,
+                                    consumed: 2,
+                                },
+                            );
                         }
                     }
                 }
                 _ => {
-                    self.error(enum_name.span, format!("cannot find enum `{}` in this scope", enum_name.name));
+                    self.error(
+                        enum_name.span,
+                        format!("cannot find enum `{}` in this scope", enum_name.name),
+                    );
                     self.path_res.insert(
                         path.id,
-                        PathResolution { base: Resolution::Error, consumed: path.segments.len() },
+                        PathResolution {
+                            base: Resolution::Error,
+                            consumed: path.segments.len(),
+                        },
                     );
                 }
             }
@@ -544,25 +636,44 @@ impl Resolver<'_> {
         // A bare `Custom(x)` pattern with no enum-name qualifier: search
         // every known enum for a unique variant with this name.
         let name = &path.segments[0];
-        match find_unique_variant(
-            self.defs,
-            name.span.file,
-            &name.name,
-        ) {
+        match find_unique_variant(self.defs, name.span.file, &name.name) {
             Ok((enum_id, idx)) => {
-                self.path_res
-                    .insert(path.id, PathResolution { base: Resolution::EnumVariant(enum_id, idx), consumed: 1 });
+                self.path_res.insert(
+                    path.id,
+                    PathResolution {
+                        base: Resolution::EnumVariant(enum_id, idx),
+                        consumed: 1,
+                    },
+                );
             }
             Err(0) => {
-                self.error(name.span, format!("no enum variant named `{}` found", name.name));
-                self.path_res.insert(path.id, PathResolution { base: Resolution::Error, consumed: 1 });
+                self.error(
+                    name.span,
+                    format!("no enum variant named `{}` found", name.name),
+                );
+                self.path_res.insert(
+                    path.id,
+                    PathResolution {
+                        base: Resolution::Error,
+                        consumed: 1,
+                    },
+                );
             }
             Err(_) => {
                 self.error(
                     name.span,
-                    format!("`{}` is ambiguous: more than one enum defines a variant with this name", name.name),
+                    format!(
+                        "`{}` is ambiguous: more than one enum defines a variant with this name",
+                        name.name
+                    ),
                 );
-                self.path_res.insert(path.id, PathResolution { base: Resolution::Error, consumed: 1 });
+                self.path_res.insert(
+                    path.id,
+                    PathResolution {
+                        base: Resolution::Error,
+                        consumed: 1,
+                    },
+                );
             }
         }
     }
@@ -571,19 +682,37 @@ impl Resolver<'_> {
         let first = &path.segments[0];
 
         if let Some(local_id) = self.scopes.lookup(&first.name) {
-            self.path_res.insert(path.id, PathResolution { base: Resolution::Local(local_id), consumed: 1 });
+            self.path_res.insert(
+                path.id,
+                PathResolution {
+                    base: Resolution::Local(local_id),
+                    consumed: 1,
+                },
+            );
             return;
         }
 
         let Some(id) = self.defs.lookup_in(path.span.file, &first.name) else {
             self.unresolved_value(first);
-            self.path_res.insert(path.id, PathResolution { base: Resolution::Error, consumed: path.segments.len() });
+            self.path_res.insert(
+                path.id,
+                PathResolution {
+                    base: Resolution::Error,
+                    consumed: path.segments.len(),
+                },
+            );
             return;
         };
 
         let def = self.defs.get(id);
         if path.segments.len() == 1 {
-            self.path_res.insert(path.id, PathResolution { base: Resolution::Def(id), consumed: 1 });
+            self.path_res.insert(
+                path.id,
+                PathResolution {
+                    base: Resolution::Def(id),
+                    consumed: 1,
+                },
+            );
             return;
         }
 
@@ -591,37 +720,88 @@ impl Resolver<'_> {
         match def.kind {
             DefKind::Enum => {
                 if let Some(idx) = variant_index(def, &second.name) {
-                    self.path_res
-                        .insert(path.id, PathResolution { base: Resolution::EnumVariant(id, idx), consumed: 2 });
+                    self.path_res.insert(
+                        path.id,
+                        PathResolution {
+                            base: Resolution::EnumVariant(id, idx),
+                            consumed: 2,
+                        },
+                    );
                 } else if let Some(idx) = method_index(def, &second.name) {
-                    self.path_res
-                        .insert(path.id, PathResolution { base: Resolution::StaticMember(id, idx), consumed: 2 });
+                    self.path_res.insert(
+                        path.id,
+                        PathResolution {
+                            base: Resolution::StaticMember(id, idx),
+                            consumed: 2,
+                        },
+                    );
                 } else {
                     self.error(
                         second.span,
-                        format!("enum `{}` has no variant or method named `{}`", first.name, second.name),
+                        format!(
+                            "enum `{}` has no variant or method named `{}`",
+                            first.name, second.name
+                        ),
                     );
-                    self.path_res.insert(path.id, PathResolution { base: Resolution::Error, consumed: 2 });
+                    self.path_res.insert(
+                        path.id,
+                        PathResolution {
+                            base: Resolution::Error,
+                            consumed: 2,
+                        },
+                    );
                 }
             }
             DefKind::Type => {
                 if let Some(idx) = method_index(def, &second.name) {
-                    self.path_res
-                        .insert(path.id, PathResolution { base: Resolution::StaticMember(id, idx), consumed: 2 });
+                    self.path_res.insert(
+                        path.id,
+                        PathResolution {
+                            base: Resolution::StaticMember(id, idx),
+                            consumed: 2,
+                        },
+                    );
                 } else {
-                    self.error(second.span, format!("type `{}` has no method named `{}`", first.name, second.name));
-                    self.path_res.insert(path.id, PathResolution { base: Resolution::Error, consumed: 2 });
+                    self.error(
+                        second.span,
+                        format!(
+                            "type `{}` has no method named `{}`",
+                            first.name, second.name
+                        ),
+                    );
+                    self.path_res.insert(
+                        path.id,
+                        PathResolution {
+                            base: Resolution::Error,
+                            consumed: 2,
+                        },
+                    );
                 }
             }
             DefKind::Interface | DefKind::Fn | DefKind::Primitive => {
-                self.error(second.span, format!("`{}` has no member named `{}`", first.name, second.name));
-                self.path_res.insert(path.id, PathResolution { base: Resolution::Error, consumed: 2 });
+                self.error(
+                    second.span,
+                    format!("`{}` has no member named `{}`", first.name, second.name),
+                );
+                self.path_res.insert(
+                    path.id,
+                    PathResolution {
+                        base: Resolution::Error,
+                        consumed: 2,
+                    },
+                );
             }
             DefKind::Imported => {
                 // Compatibility mode for callers that resolve a single
                 // parsed file without asking the driver to load imports.
                 // The imported declaration is opaque in that API.
-                self.path_res.insert(path.id, PathResolution { base: Resolution::Def(id), consumed: 1 });
+                self.path_res.insert(
+                    path.id,
+                    PathResolution {
+                        base: Resolution::Def(id),
+                        consumed: 1,
+                    },
+                );
             }
         }
     }
@@ -683,8 +863,7 @@ fn edit_distance(left: &str, right: &str) -> usize {
         let mut current = Vec::with_capacity(right.len() + 1);
         current.push(left_index + 1);
         for (right_index, right_char) in right.iter().enumerate() {
-            let substitution = previous[right_index]
-                + usize::from(left_char != *right_char);
+            let substitution = previous[right_index] + usize::from(left_char != *right_char);
             let insertion = current[right_index] + 1;
             let deletion = previous[right_index + 1] + 1;
             current.push(substitution.min(insertion).min(deletion));
@@ -695,7 +874,10 @@ fn edit_distance(left: &str, right: &str) -> usize {
 }
 
 fn variant_index(def: &def::Def, name: &Symbol) -> Option<u32> {
-    def.variants.iter().position(|v| v == name).map(|i| i as u32)
+    def.variants
+        .iter()
+        .position(|v| v == name)
+        .map(|i| i as u32)
 }
 
 fn method_index(def: &def::Def, name: &Symbol) -> Option<u32> {

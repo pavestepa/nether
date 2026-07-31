@@ -7,18 +7,41 @@ fn compile(source: &str) -> (nether_llvm::Codegen, String) {
         let mut map = nether_diagnostics::SourceMap::new();
         let file = map.add_file("test.nr", source);
         let (module, parse_diags) = nether_parser::parse_module(source, file);
-        assert!(parse_diags.is_empty(), "unexpected parse diagnostics: {parse_diags:?}");
+        assert!(
+            parse_diags.is_empty(),
+            "unexpected parse diagnostics: {parse_diags:?}"
+        );
         let (resolved, resolve_diags) = nether_resolver::resolve(&module);
-        assert!(resolve_diags.is_empty(), "unexpected resolve diagnostics: {resolve_diags:?}");
+        assert!(
+            resolve_diags.is_empty(),
+            "unexpected resolve diagnostics: {resolve_diags:?}"
+        );
         let (tables, check_diags) = nether_typecheck::check(&module, &resolved);
-        assert!(check_diags.is_empty(), "unexpected typecheck diagnostics: {check_diags:?}");
+        assert!(
+            check_diags.is_empty(),
+            "unexpected typecheck diagnostics: {check_diags:?}"
+        );
         let hir = nether_hir::lower(&module, &resolved, tables);
-        let main_id = *hir.fn_by_name.get(&Symbol::new("main")).expect("no `main` in test source");
+        let main_id = *hir
+            .fn_by_name
+            .get(&Symbol::new("main"))
+            .expect("no `main` in test source");
         let mono = nether_monomorphization::monomorphize(&hir, main_id);
         let mut functions = nether_mir::build_mir(&mono, &resolved.definitions, &hir.signatures);
         nether_mir::insert_arc(&mut functions);
-        let m = nether_codegen::generate(&cg, "test", &functions, &resolved.definitions, &hir.signatures);
-        m.verify().unwrap_or_else(|e| panic!("module failed to verify:\n{}\n\nerror: {e}", m.print_to_string()));
+        let m = nether_codegen::generate(
+            &cg,
+            "test",
+            &functions,
+            &resolved.definitions,
+            &hir.signatures,
+        );
+        m.verify().unwrap_or_else(|e| {
+            panic!(
+                "module failed to verify:\n{}\n\nerror: {e}",
+                m.print_to_string()
+            )
+        });
         m.print_to_string()
     };
     (cg, ir)
@@ -57,12 +80,30 @@ impl Lang: Into<String> {
 }
 "#,
     );
-    assert!(ir.contains("define"), "expected at least one defined function:\n{ir}");
-    assert!(ir.contains("declare"), "expected declared runtime functions:\n{ir}");
-    assert!(ir.contains("nether_rt_arc_alloc"), "expected a heap allocation call for Lang's construction:\n{ir}");
-    assert!(ir.contains("nether_rt_arc_retain"), "expected at least one Retain call:\n{ir}");
-    assert!(ir.contains("nether_rt_arc_release"), "expected at least one Release call:\n{ir}");
-    assert!(ir.contains("nether_rt_string_concat"), "expected the template string to lower to a concat call:\n{ir}");
+    assert!(
+        ir.contains("define"),
+        "expected at least one defined function:\n{ir}"
+    );
+    assert!(
+        ir.contains("declare"),
+        "expected declared runtime functions:\n{ir}"
+    );
+    assert!(
+        ir.contains("nether_rt_arc_alloc"),
+        "expected a heap allocation call for Lang's construction:\n{ir}"
+    );
+    assert!(
+        ir.contains("nether_rt_arc_retain"),
+        "expected at least one Retain call:\n{ir}"
+    );
+    assert!(
+        ir.contains("nether_rt_arc_release"),
+        "expected at least one Release call:\n{ir}"
+    );
+    assert!(
+        ir.contains("nether_rt_string_concat"),
+        "expected the template string to lower to a concat call:\n{ir}"
+    );
 }
 
 #[test]
@@ -84,7 +125,10 @@ fn main() {
 }
 "#,
     );
-    assert!(ir.contains("icmp slt"), "expected a signed less-than comparison:\n{ir}");
+    assert!(
+        ir.contains("icmp slt"),
+        "expected a signed less-than comparison:\n{ir}"
+    );
     assert!(ir.contains("br i1"), "expected a conditional branch:\n{ir}");
 }
 
@@ -102,9 +146,18 @@ fn main() {
 }
 "#,
     );
-    assert!(ir.contains("closure_call"), "expected an indirect closure call:\n{ir}");
-    assert!(ir.contains("nether_rt_arc_alloc"), "expected an ARC-managed closure environment:\n{ir}");
-    assert!(ir.contains("nether_rt_arc_retain"), "expected the heap capture to be retained:\n{ir}");
+    assert!(
+        ir.contains("closure_call"),
+        "expected an indirect closure call:\n{ir}"
+    );
+    assert!(
+        ir.contains("nether_rt_arc_alloc"),
+        "expected an ARC-managed closure environment:\n{ir}"
+    );
+    assert!(
+        ir.contains("nether_rt_arc_retain"),
+        "expected the heap capture to be retained:\n{ir}"
+    );
 }
 
 #[test]
@@ -118,8 +171,14 @@ fn main() {
 }
 "#,
     );
-    assert!(ir.contains("fn_adapter"), "expected a closure-ABI adapter for a named function value:\n{ir}");
-    assert!(ir.contains("closure_call"), "expected an indirect first-class function call:\n{ir}");
+    assert!(
+        ir.contains("fn_adapter"),
+        "expected a closure-ABI adapter for a named function value:\n{ir}"
+    );
+    assert!(
+        ir.contains("closure_call"),
+        "expected an indirect first-class function call:\n{ir}"
+    );
 }
 
 #[test]
@@ -147,8 +206,14 @@ fn main() {
 #[test]
 fn emits_a_c_abi_main_calling_nether_main() {
     let (_cg, ir) = compile("fn main() { println(\"hi\"); }");
-    assert!(ir.contains("define i32 @main()"), "expected a C-ABI main entry point:\n{ir}");
-    assert!(ir.contains("call void @nether_main()") || ir.contains("call { } @nether_main()"), "expected main to call nether_main:\n{ir}");
+    assert!(
+        ir.contains("define i32 @main()"),
+        "expected a C-ABI main entry point:\n{ir}"
+    );
+    assert!(
+        ir.contains("call void @nether_main()") || ir.contains("call { } @nether_main()"),
+        "expected main to call nether_main:\n{ir}"
+    );
 }
 
 #[test]
@@ -162,7 +227,10 @@ fn main() {
 }
 "#,
     );
-    assert!(ir.contains("define void @nether_shim_drop_"), "expected a generated drop shim releasing Dog's heap field:\n{ir}");
+    assert!(
+        ir.contains("define void @nether_shim_drop_"),
+        "expected a generated drop shim releasing Dog's heap field:\n{ir}"
+    );
     assert!(
         ir.contains("call ptr @nether_rt_arc_alloc(i64") && ir.contains("nether_shim_drop_"),
         "expected Dog's construction to pass its drop shim to nether_rt_arc_alloc:\n{ir}"
@@ -180,8 +248,14 @@ fn main() {
 }
 "#,
     );
-    assert!(!ir.contains("nether_shim_drop_"), "Point has no heap fields, so no drop shim should be generated:\n{ir}");
-    assert!(ir.contains("call ptr @nether_rt_arc_alloc(i64"), "expected Point's construction to still heap-allocate:\n{ir}");
+    assert!(
+        !ir.contains("nether_shim_drop_"),
+        "Point has no heap fields, so no drop shim should be generated:\n{ir}"
+    );
+    assert!(
+        ir.contains("call ptr @nether_rt_arc_alloc(i64"),
+        "expected Point's construction to still heap-allocate:\n{ir}"
+    );
 }
 
 #[test]
@@ -231,7 +305,10 @@ fn main() {
 }
 "#,
     );
-    assert!(ir.contains("call void @nether_rt_arc_weak_retain("), "expected the weak field's construction to call weak_retain:\n{ir}");
+    assert!(
+        ir.contains("call void @nether_rt_arc_weak_retain("),
+        "expected the weak field's construction to call weak_retain:\n{ir}"
+    );
 }
 
 #[test]
@@ -250,8 +327,14 @@ fn main() {
 }
 "#,
     );
-    assert!(ir.contains("call void @nether_rt_arc_weak_retain("), "expected weak_retain for the field's new value:\n{ir}");
-    assert!(ir.contains("call void @nether_rt_arc_weak_release("), "expected weak_release for the field's old value:\n{ir}");
+    assert!(
+        ir.contains("call void @nether_rt_arc_weak_retain("),
+        "expected weak_retain for the field's new value:\n{ir}"
+    );
+    assert!(
+        ir.contains("call void @nether_rt_arc_weak_release("),
+        "expected weak_release for the field's old value:\n{ir}"
+    );
 }
 
 #[test]
@@ -273,7 +356,10 @@ fn main() {
 }
 "#,
     );
-    assert!(ir.contains("call i8 @nether_rt_arc_weak_upgrade("), "expected the weak field read to call weak_upgrade:\n{ir}");
+    assert!(
+        ir.contains("call i8 @nether_rt_arc_weak_upgrade("),
+        "expected the weak field read to call weak_upgrade:\n{ir}"
+    );
 }
 
 #[test]
@@ -288,11 +374,17 @@ fn main() {
 }
 "#,
     );
-    assert!(ir.contains("define void @nether_shim_drop_"), "expected a generated drop shim for Parent:\n{ir}");
+    assert!(
+        ir.contains("define void @nether_shim_drop_"),
+        "expected a generated drop shim for Parent:\n{ir}"
+    );
     assert!(
         ir.split("define void @nether_shim_drop_")
             .skip(1)
-            .any(|shim| shim.split("\n}").next().is_some_and(|body| body.contains("nether_rt_arc_weak_release"))),
+            .any(|shim| shim
+                .split("\n}")
+                .next()
+                .is_some_and(|body| body.contains("nether_rt_arc_weak_release"))),
         "expected Parent's own drop shim to weak_release its `kid` field:\n{ir}"
     );
 }
@@ -315,7 +407,13 @@ fn emits_a_valid_object_file() {
     let mono = nether_monomorphization::monomorphize(&hir, main_id);
     let mut functions = nether_mir::build_mir(&mono, &resolved.definitions, &hir.signatures);
     nether_mir::insert_arc(&mut functions);
-    let m = nether_codegen::generate(&cg, "objtest", &functions, &resolved.definitions, &hir.signatures);
+    let m = nether_codegen::generate(
+        &cg,
+        "objtest",
+        &functions,
+        &resolved.definitions,
+        &hir.signatures,
+    );
     m.verify().expect("module should verify");
 
     let out = std::env::temp_dir().join("nether_codegen_test.o");
@@ -341,7 +439,10 @@ fn main() {
 }
 "#,
     );
-    assert!(ir.contains("payload"), "expected codegen for Option's payload field:\n{ir}");
+    assert!(
+        ir.contains("payload"),
+        "expected codegen for Option's payload field:\n{ir}"
+    );
 }
 
 #[test]
@@ -355,7 +456,10 @@ fn main() {
 }
 "#,
     );
-    assert!(ir.contains("nether_identity"), "expected specialized identity functions:\n{ir}");
+    assert!(
+        ir.contains("nether_identity"),
+        "expected specialized identity functions:\n{ir}"
+    );
 }
 
 #[test]
@@ -373,7 +477,10 @@ fn main() {
 }
 "#,
     );
-    assert!(ir.contains("into_string"), "expected conversion calls for Dog:\n{ir}");
+    assert!(
+        ir.contains("into_string"),
+        "expected conversion calls for Dog:\n{ir}"
+    );
 }
 
 #[test]
@@ -389,8 +496,14 @@ fn main() {
 }
 "#,
     );
-    assert!(ir.contains("nether_rt_i64_to_string"), "expected the primitive specialization to use ToString:\n{ir}");
-    assert!(ir.contains("nether_stringify"), "expected concrete stringify specializations:\n{ir}");
+    assert!(
+        ir.contains("nether_rt_i64_to_string"),
+        "expected the primitive specialization to use ToString:\n{ir}"
+    );
+    assert!(
+        ir.contains("nether_stringify"),
+        "expected concrete stringify specializations:\n{ir}"
+    );
 }
 
 #[test]
@@ -408,5 +521,8 @@ fn main() {
 }
 "#,
     );
-    assert!(ir.contains("nether_shim_drop_"), "Boxed<String> should receive a concrete field drop shim:\n{ir}");
+    assert!(
+        ir.contains("nether_shim_drop_"),
+        "Boxed<String> should receive a concrete field drop shim:\n{ir}"
+    );
 }

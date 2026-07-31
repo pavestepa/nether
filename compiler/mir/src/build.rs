@@ -2,11 +2,16 @@ use std::collections::{HashMap, HashSet};
 
 use nether_ast::SelfParam;
 use nether_hir::{HirLocalId, HirPattern};
-use nether_monomorphization::{MonoExpr, MonoExprKind, MonoFunction, MonoMatchArm, MonoModule, MonoStmtKind};
+use nether_monomorphization::{
+    MonoExpr, MonoExprKind, MonoFunction, MonoMatchArm, MonoModule, MonoStmtKind,
+};
 use nether_resolver::Definitions;
 use nether_typecheck::{alloc_kind, PrimitiveKind, Signatures, Type};
 
-use crate::node::{BasicBlock, BlockId, CallTarget, Instr, Local, LocalDecl, MirFunction, Operand, Place, Projection, Rvalue, Terminator};
+use crate::node::{
+    BasicBlock, BlockId, CallTarget, Instr, Local, LocalDecl, MirFunction, Operand, Place,
+    Projection, Rvalue, Terminator,
+};
 
 /// Lowers every function in `module` into an explicit control-flow graph
 /// (`docs/architecture/crates.md` § `compiler/mir`). `defs`/`sigs` are
@@ -136,7 +141,11 @@ impl<'a> FnBuilder<'a> {
             .blocks
             .into_iter()
             .enumerate()
-            .map(|(i, b)| BasicBlock { id: BlockId(i as u32), instrs: b.instrs, terminator: b.terminator.unwrap_or(Terminator::Unreachable) })
+            .map(|(i, b)| BasicBlock {
+                id: BlockId(i as u32),
+                instrs: b.instrs,
+                terminator: b.terminator.unwrap_or(Terminator::Unreachable),
+            })
             .collect();
 
         MirFunction {
@@ -157,13 +166,21 @@ impl<'a> FnBuilder<'a> {
         let alloc = alloc_kind(&ty, self.defs);
         let needs_drop = self.sigs.has_managed_content(&ty, self.defs);
         let id = Local(self.locals.len() as u32);
-        self.locals.push(LocalDecl { ty, mutable, alloc, needs_drop });
+        self.locals.push(LocalDecl {
+            ty,
+            mutable,
+            alloc,
+            needs_drop,
+        });
         id
     }
 
     fn new_block(&mut self) -> BlockId {
         let id = BlockId(self.blocks.len() as u32);
-        self.blocks.push(BlockBuilder { instrs: Vec::new(), terminator: None });
+        self.blocks.push(BlockBuilder {
+            instrs: Vec::new(),
+            terminator: None,
+        });
         id
     }
 
@@ -233,16 +250,6 @@ impl<'a> FnBuilder<'a> {
         }
     }
 
-    fn and_operands(&mut self, a: Operand, b: Operand) -> Operand {
-        if matches!(a, Operand::Literal(nether_ast::Literal::Bool(true), _)) {
-            return b;
-        }
-        if matches!(b, Operand::Literal(nether_ast::Literal::Bool(true), _)) {
-            return a;
-        }
-        Operand::Local(self.materialize(Rvalue::Binary(nether_ast::BinaryOp::And, a, b), Type::Primitive(PrimitiveKind::Bool)))
-    }
-
     /// Releases every heap-kind local in scopes `[from_depth..]` (deepest
     /// scope first, and within a scope, its locals in reverse declaration
     /// order — `arc-model.md` §3.2's drop order), skipping exactly one
@@ -279,10 +286,7 @@ impl<'a> FnBuilder<'a> {
             if self.borrowed_params.contains(&source)
                 && self.sigs.has_managed_content(&expr.ty, self.defs)
             {
-                let local = self.materialize(
-                    Rvalue::Use(Operand::Local(source)),
-                    expr.ty.clone(),
-                );
+                let local = self.materialize(Rvalue::Use(Operand::Local(source)), expr.ty.clone());
                 self.push_instr(Instr::Retain(local));
                 return Operand::Local(local);
             }
@@ -342,21 +346,16 @@ impl<'a> FnBuilder<'a> {
                     base: current.clone(),
                     index: index.clone(),
                 },
-                Projection::VariantField { variant, index } => {
-                    Rvalue::VariantField {
-                        base: current.clone(),
-                        variant: *variant,
-                        index: *index,
-                    }
-                }
+                Projection::VariantField { variant, index } => Rvalue::VariantField {
+                    base: current.clone(),
+                    variant: *variant,
+                    index: *index,
+                },
             };
             let next = self.materialize(rvalue, projected_ty.clone());
             if position > 0 {
                 if let Operand::Local(previous) = current {
-                    if self.sigs.has_managed_content(
-                        &current_ty,
-                        self.defs,
-                    ) {
+                    if self.sigs.has_managed_content(&current_ty, self.defs) {
                         intermediates.push(previous);
                     }
                 }
@@ -370,21 +369,11 @@ impl<'a> FnBuilder<'a> {
         current
     }
 
-    fn projected_type(
-        &self,
-        base: &Type,
-        projection: &Projection,
-    ) -> Option<Type> {
+    fn projected_type(&self, base: &Type, projection: &Projection) -> Option<Type> {
         match projection {
             Projection::Field(index) => match base {
-                Type::Tuple(items) => {
-                    items.get(*index as usize).cloned()
-                }
-                _ => self
-                    .sigs
-                    .type_fields(base)?
-                    .get(*index as usize)
-                    .cloned(),
+                Type::Tuple(items) => items.get(*index as usize).cloned(),
+                _ => self.sigs.type_fields(base)?.get(*index as usize).cloned(),
             },
             Projection::VariantField { variant, index } => self
                 .sigs
@@ -441,9 +430,7 @@ impl<'a> FnBuilder<'a> {
         operands: &[Operand],
         weak_sources: &[Option<Operand>],
     ) {
-        for ((arg, operand), weak_source) in
-            args.iter().zip(operands).zip(weak_sources)
-        {
+        for ((arg, operand), weak_source) in args.iter().zip(operands).zip(weak_sources) {
             if let Some(strong) = weak_source {
                 if let Operand::Local(local) = operand {
                     self.push_instr(Instr::Release(*local));
@@ -461,9 +448,7 @@ impl<'a> FnBuilder<'a> {
     /// owner. Constructors routed through `prepare_new_binding` transfer
     /// their credit instead and deliberately do not call this helper.
     fn release_temporary_value(&mut self, expr: &MonoExpr, operand: &Operand) {
-        if is_trivial_local_alias(expr)
-            || !self.sigs.has_managed_content(&expr.ty, self.defs)
-        {
+        if is_trivial_local_alias(expr) || !self.sigs.has_managed_content(&expr.ty, self.defs) {
             return;
         }
         if let Operand::Local(local) = operand {
@@ -546,7 +531,10 @@ impl<'a> FnBuilder<'a> {
             }
             MonoExprKind::Local(id) => Operand::Local(self.local_for(*id)),
             MonoExprKind::FnRef(id) => Operand::Local(self.materialize(
-                Rvalue::Closure { function: *id, captures: Vec::new() },
+                Rvalue::Closure {
+                    function: *id,
+                    captures: Vec::new(),
+                },
                 expr.ty.clone(),
             )),
             MonoExprKind::Unit => Operand::Unit,
@@ -560,9 +548,8 @@ impl<'a> FnBuilder<'a> {
                 // operands here and drop only freshly-computed input
                 // temporaries after construction.
                 let ops = self.lower_exprs(items);
-                let result = Operand::Local(
-                    self.materialize(Rvalue::Array(ops.clone()), expr.ty.clone()),
-                );
+                let result =
+                    Operand::Local(self.materialize(Rvalue::Array(ops.clone()), expr.ty.clone()));
                 for (item, operand) in items.iter().zip(&ops) {
                     self.release_temporary_value(item, operand);
                 }
@@ -570,9 +557,8 @@ impl<'a> FnBuilder<'a> {
             }
             MonoExprKind::Concat(items) => {
                 let ops = self.lower_exprs(items);
-                let result = Operand::Local(
-                    self.materialize(Rvalue::Concat(ops.clone()), expr.ty.clone()),
-                );
+                let result =
+                    Operand::Local(self.materialize(Rvalue::Concat(ops.clone()), expr.ty.clone()));
                 for (item, operand) in items.iter().zip(&ops) {
                     self.release_temporary_value(item, operand);
                 }
@@ -607,15 +593,14 @@ impl<'a> FnBuilder<'a> {
                     ref other => CallTarget::Dynamic(other.clone()),
                 };
                 let result = Operand::Local(self.materialize(
-                    Rvalue::Call { target, args: arg_ops.clone() },
+                    Rvalue::Call {
+                        target,
+                        args: arg_ops.clone(),
+                    },
                     expr.ty.clone(),
                 ));
                 self.release_temporary_value(callee, &callee_op);
-                self.release_call_arg_temporaries(
-                    args,
-                    &arg_ops,
-                    &weak_sources,
-                );
+                self.release_call_arg_temporaries(args, &arg_ops, &weak_sources);
                 result
             }
             MonoExprKind::CallStatic { fn_id, args } => {
@@ -627,20 +612,22 @@ impl<'a> FnBuilder<'a> {
                 params.extend(target.params.iter().map(|param| param.ty.clone()));
                 let (arg_ops, weak_sources) = self.lower_call_args(args, &params);
                 let result = Operand::Local(self.materialize(
-                    Rvalue::Call { target: CallTarget::Fn(*fn_id), args: arg_ops.clone() },
+                    Rvalue::Call {
+                        target: CallTarget::Fn(*fn_id),
+                        args: arg_ops.clone(),
+                    },
                     expr.ty.clone(),
                 ));
-                self.release_call_arg_temporaries(
-                    args,
-                    &arg_ops,
-                    &weak_sources,
-                );
+                self.release_call_arg_temporaries(args, &arg_ops, &weak_sources);
                 result
             }
             MonoExprKind::CallBuiltin { name, args } => {
                 let arg_ops = self.lower_exprs(args);
                 let result = Operand::Local(self.materialize(
-                    Rvalue::CallBuiltin { name: name.clone(), args: arg_ops.clone() },
+                    Rvalue::CallBuiltin {
+                        name: name.clone(),
+                        args: arg_ops.clone(),
+                    },
                     expr.ty.clone(),
                 ));
                 for (arg, operand) in args.iter().zip(&arg_ops) {
@@ -648,7 +635,11 @@ impl<'a> FnBuilder<'a> {
                 }
                 result
             }
-            MonoExprKind::CallArrayMethod { receiver, method, args } => {
+            MonoExprKind::CallArrayMethod {
+                receiver,
+                method,
+                args,
+            } => {
                 let recv_op = self.lower_expr(receiver);
                 let arg_ops = self.lower_exprs(args);
                 let result = Operand::Local(self.materialize(
@@ -668,7 +659,10 @@ impl<'a> FnBuilder<'a> {
             MonoExprKind::Field { base, index } => {
                 let base_op = self.lower_expr(base);
                 let result = Operand::Local(self.materialize(
-                    Rvalue::Field { base: base_op.clone(), index: *index },
+                    Rvalue::Field {
+                        base: base_op.clone(),
+                        index: *index,
+                    },
                     expr.ty.clone(),
                 ));
                 self.release_temporary_value(base, &base_op);
@@ -678,7 +672,10 @@ impl<'a> FnBuilder<'a> {
                 let base_op = self.lower_expr(base);
                 let index_op = self.lower_expr(index);
                 let result = Operand::Local(self.materialize(
-                    Rvalue::Index { base: base_op.clone(), index: index_op.clone() },
+                    Rvalue::Index {
+                        base: base_op.clone(),
+                        index: index_op.clone(),
+                    },
                     expr.ty.clone(),
                 ));
                 self.release_temporary_value(base, &base_op);
@@ -687,13 +684,34 @@ impl<'a> FnBuilder<'a> {
             }
             MonoExprKind::Construct { ty, fields } => {
                 let ops = self.lower_construct_fields(&expr.ty, fields);
-                Operand::Local(self.materialize(Rvalue::Construct { ty: *ty, fields: ops }, expr.ty.clone()))
+                Operand::Local(self.materialize(
+                    Rvalue::Construct {
+                        ty: *ty,
+                        fields: ops,
+                    },
+                    expr.ty.clone(),
+                ))
             }
-            MonoExprKind::ConstructVariant { enum_id, variant, payload } => {
+            MonoExprKind::ConstructVariant {
+                enum_id,
+                variant,
+                payload,
+            } => {
                 let ops = self.lower_stored_exprs(payload);
-                Operand::Local(self.materialize(Rvalue::ConstructVariant { enum_id: *enum_id, variant: *variant, payload: ops }, expr.ty.clone()))
+                Operand::Local(self.materialize(
+                    Rvalue::ConstructVariant {
+                        enum_id: *enum_id,
+                        variant: *variant,
+                        payload: ops,
+                    },
+                    expr.ty.clone(),
+                ))
             }
-            MonoExprKind::If { cond, then_branch, else_branch } => self.lower_if(expr, cond, then_branch, else_branch.as_deref()),
+            MonoExprKind::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => self.lower_if(expr, cond, then_branch, else_branch.as_deref()),
             MonoExprKind::Match { scrutinee, arms } => self.lower_match(expr, scrutinee, arms),
             MonoExprKind::Block(stmts, tail) => self.lower_block(stmts, tail.as_deref()),
             MonoExprKind::While { cond, body } => self.lower_while(cond, body),
@@ -703,14 +721,22 @@ impl<'a> FnBuilder<'a> {
                     let value = self.lower_expr(v);
                     self.release_temporary_value(v, &value);
                 }
-                let ctx_depth = self.loop_stack.last().expect("`break` outside a loop — typecheck rejects this").scope_depth;
+                let ctx_depth = self
+                    .loop_stack
+                    .last()
+                    .expect("`break` outside a loop — typecheck rejects this")
+                    .scope_depth;
                 let break_block = self.loop_stack.last().unwrap().break_block;
                 self.release_scopes(ctx_depth, None);
                 self.terminate_current(Terminator::Goto(break_block));
                 Operand::Unit
             }
             MonoExprKind::Continue => {
-                let ctx_depth = self.loop_stack.last().expect("`continue` outside a loop — typecheck rejects this").scope_depth;
+                let ctx_depth = self
+                    .loop_stack
+                    .last()
+                    .expect("`continue` outside a loop — typecheck rejects this")
+                    .scope_depth;
                 let continue_block = self.loop_stack.last().unwrap().continue_block;
                 self.release_scopes(ctx_depth, None);
                 self.terminate_current(Terminator::Goto(continue_block));
@@ -728,7 +754,10 @@ impl<'a> FnBuilder<'a> {
             MonoExprKind::Closure { function, captures } => {
                 let captures = self.lower_stored_exprs(captures);
                 Operand::Local(self.materialize(
-                    Rvalue::Closure { function: *function, captures },
+                    Rvalue::Closure {
+                        function: *function,
+                        captures,
+                    },
                     expr.ty.clone(),
                 ))
             }
@@ -757,10 +786,9 @@ impl<'a> FnBuilder<'a> {
                 // This is an ownership move, not an aliasing copy, so it
                 // deliberately receives no retain; the release below
                 // consumes the slot's previous credit.
-                Operand::Local(self.materialize(
-                    Rvalue::Use(Operand::Local(place.local)),
-                    value_ty.clone(),
-                ))
+                Operand::Local(
+                    self.materialize(Rvalue::Use(Operand::Local(place.local)), value_ty.clone()),
+                )
             } else {
                 self.read_place(&place, value_ty.clone())
             })
@@ -807,10 +835,7 @@ impl<'a> FnBuilder<'a> {
         let has_projection = !place.projection.is_empty();
         let weak_ty = Type::Weak(Box::new(value.ty.clone()));
         let old_op = if place.projection.is_empty() {
-            Operand::Local(self.materialize(
-                Rvalue::Use(Operand::Local(place.local)),
-                weak_ty,
-            ))
+            Operand::Local(self.materialize(Rvalue::Use(Operand::Local(place.local)), weak_ty))
         } else {
             self.read_place(&place, weak_ty)
         };
@@ -827,12 +852,22 @@ impl<'a> FnBuilder<'a> {
         }
     }
 
-    fn lower_if(&mut self, expr: &MonoExpr, cond: &MonoExpr, then_branch: &MonoExpr, else_branch: Option<&MonoExpr>) -> Operand {
+    fn lower_if(
+        &mut self,
+        expr: &MonoExpr,
+        cond: &MonoExpr,
+        then_branch: &MonoExpr,
+        else_branch: Option<&MonoExpr>,
+    ) -> Operand {
         let cond_op = self.lower_expr(cond);
         let then_block = self.new_block();
         let else_block = self.new_block();
         let merge_block = self.new_block();
-        self.terminate_current(Terminator::Branch { cond: cond_op, then_block, else_block });
+        self.terminate_current(Terminator::Branch {
+            cond: cond_op,
+            then_block,
+            else_block,
+        });
 
         let result = self.declare_local(expr.ty.clone(), false);
 
@@ -865,7 +900,11 @@ impl<'a> FnBuilder<'a> {
         // `terminate_current`.
     }
 
-    fn lower_block(&mut self, stmts: &[nether_monomorphization::MonoStmt], tail: Option<&MonoExpr>) -> Operand {
+    fn lower_block(
+        &mut self,
+        stmts: &[nether_monomorphization::MonoStmt],
+        tail: Option<&MonoExpr>,
+    ) -> Operand {
         self.scopes.push(Vec::new());
         for stmt in stmts {
             match &stmt.kind {
@@ -905,9 +944,17 @@ impl<'a> FnBuilder<'a> {
         let cond_op = self.lower_expr(cond);
         let body_block = self.new_block();
         let exit_block = self.new_block();
-        self.terminate_current(Terminator::Branch { cond: cond_op, then_block: body_block, else_block: exit_block });
+        self.terminate_current(Terminator::Branch {
+            cond: cond_op,
+            then_block: body_block,
+            else_block: exit_block,
+        });
 
-        self.loop_stack.push(LoopCtx { break_block: exit_block, continue_block: header, scope_depth: self.scopes.len() });
+        self.loop_stack.push(LoopCtx {
+            break_block: exit_block,
+            continue_block: header,
+            scope_depth: self.scopes.len(),
+        });
         self.current = body_block;
         self.lower_expr(body);
         self.terminate_current_to(header);
@@ -922,7 +969,11 @@ impl<'a> FnBuilder<'a> {
         self.terminate_current_to(header);
         let exit_block = self.new_block();
 
-        self.loop_stack.push(LoopCtx { break_block: exit_block, continue_block: header, scope_depth: self.scopes.len() });
+        self.loop_stack.push(LoopCtx {
+            break_block: exit_block,
+            continue_block: header,
+            scope_depth: self.scopes.len(),
+        });
         self.current = header;
         self.lower_expr(body);
         self.terminate_current_to(header);
@@ -935,7 +986,12 @@ impl<'a> FnBuilder<'a> {
         Operand::Unit
     }
 
-    fn lower_match(&mut self, expr: &MonoExpr, scrutinee: &MonoExpr, arms: &[MonoMatchArm]) -> Operand {
+    fn lower_match(
+        &mut self,
+        expr: &MonoExpr,
+        scrutinee: &MonoExpr,
+        arms: &[MonoMatchArm],
+    ) -> Operand {
         let scrutinee_ty = scrutinee.ty.clone();
         // Goes through `prepare_new_binding`, not the cheaper
         // `lower_expr_to_local`, for exactly the same reason a `let`
@@ -946,10 +1002,7 @@ impl<'a> FnBuilder<'a> {
         let scrutinee_local = self.as_local(scrutinee_op, scrutinee_ty.clone());
         let match_scope_depth = self.scopes.len();
         let mut match_scope = Vec::new();
-        if self
-            .sigs
-            .has_managed_content(&scrutinee_ty, self.defs)
-        {
+        if self.sigs.has_managed_content(&scrutinee_ty, self.defs) {
             match_scope.push(scrutinee_local);
         }
         self.scopes.push(match_scope);
@@ -957,11 +1010,15 @@ impl<'a> FnBuilder<'a> {
         let merge_block = self.new_block();
 
         for arm in arms {
-            let mut bindings = Vec::new();
-            let cond = self.lower_pattern_test(Operand::Local(scrutinee_local), &scrutinee_ty, &arm.pattern, &mut bindings);
             let body_block = self.new_block();
             let next_block = self.new_block();
-            self.terminate_current(Terminator::Branch { cond, then_block: body_block, else_block: next_block });
+            self.lower_pattern_branch(
+                Operand::Local(scrutinee_local),
+                &scrutinee_ty,
+                &arm.pattern,
+                body_block,
+                next_block,
+            );
 
             self.current = body_block;
             // Each arm's own pattern bindings form their own scope,
@@ -970,9 +1027,16 @@ impl<'a> FnBuilder<'a> {
             // heap-kind binding here, e.g. `Boxed(d) => ...`'s `d`, would
             // otherwise never be released at all: nothing else tracks
             // it, and `insert_arc` already gave it a bind-time retain via
-            // the `VariantField`/`Field` rvalue `lower_pattern_test` read
-            // it from).
+            // the `VariantField`/`Field` rvalue
+            // `lower_pattern_bindings` read it from).
             self.scopes.push(Vec::new());
+            let mut bindings = Vec::new();
+            self.lower_pattern_bindings(
+                Operand::Local(scrutinee_local),
+                &scrutinee_ty,
+                &arm.pattern,
+                &mut bindings,
+            );
             for (id, op, ty) in bindings {
                 let local = self.as_local(op, ty.clone());
                 self.local_map.insert(id, local);
@@ -1004,56 +1068,191 @@ impl<'a> FnBuilder<'a> {
         Operand::Local(result)
     }
 
-    /// Builds the boolean condition testing whether `scrutinee` (of
-    /// static type `scrutinee_ty`) matches `pattern`, collecting every
-    /// binding introduced along the way (as an operand to bind once the
-    /// match is confirmed, alongside the type it should be bound at) into
-    /// `bindings`. Mirrors `nether_resolver`/`nether_hir`'s own bare-
-    /// identifier binding-vs-unit-variant resolution — by this stage that
-    /// ambiguity is already resolved, `HirPattern::Binding` vs a
-    /// zero-payload `HirPattern::Variant` are already distinct node kinds.
-    fn lower_pattern_test(&mut self, scrutinee: Operand, scrutinee_ty: &Type, pattern: &HirPattern, bindings: &mut Vec<(HirLocalId, Operand, Type)>) -> Operand {
+    /// Emits the control-flow test for one pattern. Variant payloads are
+    /// deliberately visited only from the block reached after their tag
+    /// has matched: unused enum payload slots are not initialized, and
+    /// eagerly reading a managed payload from (for example) `Option.None`
+    /// would make ARC retain an arbitrary pointer.
+    fn lower_pattern_branch(
+        &mut self,
+        scrutinee: Operand,
+        scrutinee_ty: &Type,
+        pattern: &HirPattern,
+        success: BlockId,
+        failure: BlockId,
+    ) {
         let bool_ty = Type::Primitive(PrimitiveKind::Bool);
         match pattern {
-            HirPattern::Wildcard => Operand::Literal(nether_ast::Literal::Bool(true), bool_ty),
-            HirPattern::Binding(id) => {
-                bindings.push((*id, scrutinee, scrutinee_ty.clone()));
-                Operand::Literal(nether_ast::Literal::Bool(true), bool_ty)
+            HirPattern::Wildcard | HirPattern::Binding(_) => {
+                self.terminate_current_to(success);
             }
-            HirPattern::Literal(lit) => Operand::Local(self.materialize(
-                Rvalue::Binary(nether_ast::BinaryOp::Eq, scrutinee, Operand::Literal(lit.clone(), scrutinee_ty.clone())),
-                bool_ty,
-            )),
+            HirPattern::Literal(lit) => {
+                let cond = Operand::Local(self.materialize(
+                    Rvalue::Binary(
+                        nether_ast::BinaryOp::Eq,
+                        scrutinee,
+                        Operand::Literal(lit.clone(), scrutinee_ty.clone()),
+                    ),
+                    bool_ty,
+                ));
+                self.terminate_current(Terminator::Branch {
+                    cond,
+                    then_block: success,
+                    else_block: failure,
+                });
+            }
             HirPattern::Tuple(subs) => {
                 let elem_tys = match scrutinee_ty {
                     Type::Tuple(tys) => tys.clone(),
                     _ => vec![Type::Error; subs.len()],
                 };
-                let mut acc = Operand::Literal(nether_ast::Literal::Bool(true), bool_ty.clone());
                 for (i, sub) in subs.iter().enumerate() {
                     let elem_ty = elem_tys.get(i).cloned().unwrap_or(Type::Error);
-                    let field_val = Operand::Local(self.materialize(Rvalue::Field { base: scrutinee.clone(), index: i as u32 }, elem_ty.clone()));
-                    let sub_cond = self.lower_pattern_test(field_val, &elem_ty, sub, bindings);
-                    acc = self.and_operands(acc, sub_cond);
+                    let next = if i + 1 == subs.len() {
+                        success
+                    } else {
+                        self.new_block()
+                    };
+                    if matches!(sub, HirPattern::Wildcard | HirPattern::Binding(_)) {
+                        self.terminate_current_to(next);
+                    } else {
+                        let field_val = Operand::Local(self.materialize(
+                            Rvalue::Field {
+                                base: scrutinee.clone(),
+                                index: i as u32,
+                            },
+                            elem_ty.clone(),
+                        ));
+                        self.lower_pattern_branch(field_val, &elem_ty, sub, next, failure);
+                    }
+                    if next != success {
+                        self.current = next;
+                    }
                 }
-                acc
+                if subs.is_empty() {
+                    self.terminate_current_to(success);
+                }
             }
-            HirPattern::Variant { enum_id: _, variant, payload } => {
+            HirPattern::Variant {
+                enum_id: _,
+                variant,
+                payload,
+            } => {
                 let usize_ty = Type::Primitive(PrimitiveKind::Usize);
-                let tag = Operand::Local(self.materialize(Rvalue::Discriminant(scrutinee.clone()), usize_ty.clone()));
-                let mut acc = Operand::Local(self.materialize(
-                    Rvalue::Binary(nether_ast::BinaryOp::Eq, tag, Operand::Literal(nether_ast::Literal::Int(u128::from(*variant)), usize_ty)),
-                    bool_ty,
+                let tag = Operand::Local(
+                    self.materialize(Rvalue::Discriminant(scrutinee.clone()), usize_ty.clone()),
+                );
+                let tag_matches = Operand::Local(self.materialize(
+                    Rvalue::Binary(
+                        nether_ast::BinaryOp::Eq,
+                        tag,
+                        Operand::Literal(nether_ast::Literal::Int(u128::from(*variant)), usize_ty),
+                    ),
+                    bool_ty.clone(),
                 ));
-                let payload_tys = self.sigs.enum_payload(scrutinee_ty, *variant).unwrap_or_default();
+                let payload_block = if payload.is_empty() {
+                    success
+                } else {
+                    self.new_block()
+                };
+                self.terminate_current(Terminator::Branch {
+                    cond: tag_matches,
+                    then_block: payload_block,
+                    else_block: failure,
+                });
+                if payload.is_empty() {
+                    return;
+                }
+                self.current = payload_block;
+                let payload_tys = self
+                    .sigs
+                    .enum_payload(scrutinee_ty, *variant)
+                    .unwrap_or_default();
                 for (i, sub) in payload.iter().enumerate() {
                     let elem_ty = payload_tys.get(i).cloned().unwrap_or(Type::Error);
-                    let field_val =
-                        Operand::Local(self.materialize(Rvalue::VariantField { base: scrutinee.clone(), variant: *variant, index: i as u32 }, elem_ty.clone()));
-                    let sub_cond = self.lower_pattern_test(field_val, &elem_ty, sub, bindings);
-                    acc = self.and_operands(acc, sub_cond);
+                    let next = if i + 1 == payload.len() {
+                        success
+                    } else {
+                        self.new_block()
+                    };
+                    if matches!(sub, HirPattern::Wildcard | HirPattern::Binding(_)) {
+                        self.terminate_current_to(next);
+                    } else {
+                        let field_val = Operand::Local(self.materialize(
+                            Rvalue::VariantField {
+                                base: scrutinee.clone(),
+                                variant: *variant,
+                                index: i as u32,
+                            },
+                            elem_ty.clone(),
+                        ));
+                        self.lower_pattern_branch(field_val, &elem_ty, sub, next, failure);
+                    }
+                    if next != success {
+                        self.current = next;
+                    }
                 }
-                acc
+            }
+        }
+    }
+
+    /// Collects bindings after [`Self::lower_pattern_branch`] has proved
+    /// the complete pattern. Every variant payload read here is therefore
+    /// active and safe to retain.
+    fn lower_pattern_bindings(
+        &mut self,
+        scrutinee: Operand,
+        scrutinee_ty: &Type,
+        pattern: &HirPattern,
+        bindings: &mut Vec<(HirLocalId, Operand, Type)>,
+    ) {
+        match pattern {
+            HirPattern::Wildcard | HirPattern::Literal(_) => {}
+            HirPattern::Binding(id) => {
+                bindings.push((*id, scrutinee, scrutinee_ty.clone()));
+            }
+            HirPattern::Tuple(subs) => {
+                let elem_tys = match scrutinee_ty {
+                    Type::Tuple(tys) => tys.clone(),
+                    _ => vec![Type::Error; subs.len()],
+                };
+                for (i, sub) in subs.iter().enumerate() {
+                    if !pattern_has_bindings(sub) {
+                        continue;
+                    }
+                    let elem_ty = elem_tys.get(i).cloned().unwrap_or(Type::Error);
+                    let field = Operand::Local(self.materialize(
+                        Rvalue::Field {
+                            base: scrutinee.clone(),
+                            index: i as u32,
+                        },
+                        elem_ty.clone(),
+                    ));
+                    self.lower_pattern_bindings(field, &elem_ty, sub, bindings);
+                }
+            }
+            HirPattern::Variant {
+                variant, payload, ..
+            } => {
+                let payload_tys = self
+                    .sigs
+                    .enum_payload(scrutinee_ty, *variant)
+                    .unwrap_or_default();
+                for (i, sub) in payload.iter().enumerate() {
+                    if !pattern_has_bindings(sub) {
+                        continue;
+                    }
+                    let elem_ty = payload_tys.get(i).cloned().unwrap_or(Type::Error);
+                    let field = Operand::Local(self.materialize(
+                        Rvalue::VariantField {
+                            base: scrutinee.clone(),
+                            variant: *variant,
+                            index: i as u32,
+                        },
+                        elem_ty.clone(),
+                    ));
+                    self.lower_pattern_bindings(field, &elem_ty, sub, bindings);
+                }
             }
         }
     }
@@ -1063,6 +1262,15 @@ fn escaping_local(op: &Operand) -> Option<Local> {
     match op {
         Operand::Local(l) => Some(*l),
         _ => None,
+    }
+}
+
+fn pattern_has_bindings(pattern: &HirPattern) -> bool {
+    match pattern {
+        HirPattern::Binding(_) => true,
+        HirPattern::Tuple(items) => items.iter().any(pattern_has_bindings),
+        HirPattern::Variant { payload, .. } => payload.iter().any(pattern_has_bindings),
+        HirPattern::Wildcard | HirPattern::Literal(_) => false,
     }
 }
 

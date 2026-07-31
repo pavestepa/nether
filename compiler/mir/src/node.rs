@@ -108,7 +108,10 @@ pub struct Place {
 
 impl Place {
     pub fn local(local: Local) -> Place {
-        Place { local, projection: Vec::new() }
+        Place {
+            local,
+            projection: Vec::new(),
+        }
     }
 }
 
@@ -149,25 +152,55 @@ pub enum Rvalue {
     Use(Operand),
     Unary(UnaryOp, Operand),
     Binary(BinaryOp, Operand, Operand),
-    Call { target: CallTarget, args: Vec<Operand> },
-    CallBuiltin { name: Symbol, args: Vec<Operand> },
-    CallArrayMethod { receiver: Operand, method: Symbol, args: Vec<Operand> },
-    Field { base: Operand, index: u32 },
-    VariantField { base: Operand, variant: u32, index: u32 },
+    Call {
+        target: CallTarget,
+        args: Vec<Operand>,
+    },
+    CallBuiltin {
+        name: Symbol,
+        args: Vec<Operand>,
+    },
+    CallArrayMethod {
+        receiver: Operand,
+        method: Symbol,
+        args: Vec<Operand>,
+    },
+    Field {
+        base: Operand,
+        index: u32,
+    },
+    VariantField {
+        base: Operand,
+        variant: u32,
+        index: u32,
+    },
     /// Reads an enum value's variant tag as an integer — the basis for a
     /// `match` arm's discriminant test (`arc-model.md`'s scope note:
     /// enums are "tag + inline payload", language-spec §3.3).
     Discriminant(Operand),
-    Index { base: Operand, index: Operand },
-    Construct { ty: DefId, fields: Vec<Operand> },
-    ConstructVariant { enum_id: DefId, variant: u32, payload: Vec<Operand> },
+    Index {
+        base: Operand,
+        index: Operand,
+    },
+    Construct {
+        ty: DefId,
+        fields: Vec<Operand>,
+    },
+    ConstructVariant {
+        enum_id: DefId,
+        variant: u32,
+        payload: Vec<Operand>,
+    },
     Tuple(Vec<Operand>),
     Array(Vec<Operand>),
     Concat(Vec<Operand>),
     ToString(Operand),
     /// Allocates a closure environment containing a code pointer followed
     /// by the captured values in declaration order.
-    Closure { function: MonoFnId, captures: Vec<Operand> },
+    Closure {
+        function: MonoFnId,
+        captures: Vec<Operand>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -196,7 +229,11 @@ pub enum Instr {
 #[derive(Debug, Clone)]
 pub enum Terminator {
     Goto(BlockId),
-    Branch { cond: Operand, then_block: BlockId, else_block: BlockId },
+    Branch {
+        cond: Operand,
+        then_block: BlockId,
+        else_block: BlockId,
+    },
     /// Always carries an operand — `Operand::Unit` stands in for a
     /// unit-returning function's bare `return;`, so every `Return` edge
     /// is handled uniformly by [`crate::insert_arc`]'s retain rule (§3.4)

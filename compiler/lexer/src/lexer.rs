@@ -6,7 +6,13 @@ use crate::token::{keyword_from_str, Punct, SpannedToken, TemplatePartTok, Token
 /// contract; never fails outright — invalid input produces a
 /// [`Token::Error`] plus a diagnostic and lexing continues.
 pub fn tokenize(source: &str, file: FileId) -> (Vec<SpannedToken>, Vec<Diagnostic>) {
-    let mut lexer = Lexer { source, file, pos: 0, tokens: Vec::new(), diagnostics: Vec::new() };
+    let mut lexer = Lexer {
+        source,
+        file,
+        pos: 0,
+        tokens: Vec::new(),
+        diagnostics: Vec::new(),
+    };
     lexer.run();
     (lexer.tokens, lexer.diagnostics)
 }
@@ -51,7 +57,10 @@ impl Lexer<'_> {
             self.skip_whitespace();
             let start = self.pos;
             let Some(c) = self.peek() else {
-                self.tokens.push(SpannedToken { token: Token::Eof, span: Span::new(self.file, start, start) });
+                self.tokens.push(SpannedToken {
+                    token: Token::Eof,
+                    span: Span::new(self.file, start, start),
+                });
                 break;
             };
             if c == '/' && self.peek_at(1) == Some('/') {
@@ -103,9 +112,14 @@ impl Lexer<'_> {
             self.bump();
         }
         if is_doc {
-            let text = self.source[text_start as usize..self.pos as usize].trim().to_string();
+            let text = self.source[text_start as usize..self.pos as usize]
+                .trim()
+                .to_string();
             let span = self.span_from(text_start);
-            self.tokens.push(SpannedToken { token: Token::DocComment(text), span });
+            self.tokens.push(SpannedToken {
+                token: Token::DocComment(text),
+                span,
+            });
         }
     }
 
@@ -141,7 +155,8 @@ impl Lexer<'_> {
                 Ok(v) => Token::Float(v),
                 Err(_) => {
                     self.diagnostics.push(
-                        Diagnostic::error(format!("invalid float literal `{text}`")).with_label(span, "here"),
+                        Diagnostic::error(format!("invalid float literal `{text}`"))
+                            .with_label(span, "here"),
                     );
                     Token::Float(0.0)
                 }
@@ -151,7 +166,8 @@ impl Lexer<'_> {
                 Ok(v) => Token::Int(v),
                 Err(_) => {
                     self.diagnostics.push(
-                        Diagnostic::error(format!("integer literal `{text}` out of range")).with_label(span, "here"),
+                        Diagnostic::error(format!("integer literal `{text}` out of range"))
+                            .with_label(span, "here"),
                     );
                     Token::Int(0)
                 }
@@ -212,7 +228,10 @@ impl Lexer<'_> {
             }
         }
         let span = self.span_from(start);
-        self.tokens.push(SpannedToken { token: Token::Str(value), span });
+        self.tokens.push(SpannedToken {
+            token: Token::Str(value),
+            span,
+        });
     }
 
     fn lex_char(&mut self, start: u32) {
@@ -228,7 +247,8 @@ impl Lexer<'_> {
             }
             None => {
                 self.diagnostics.push(
-                    Diagnostic::error("unterminated char literal").with_label(self.span_from(start), "here"),
+                    Diagnostic::error("unterminated char literal")
+                        .with_label(self.span_from(start), "here"),
                 );
                 '\0'
             }
@@ -242,7 +262,10 @@ impl Lexer<'_> {
             );
         }
         let span = self.span_from(start);
-        self.tokens.push(SpannedToken { token: Token::Char(value), span });
+        self.tokens.push(SpannedToken {
+            token: Token::Char(value),
+            span,
+        });
     }
 
     fn lex_template_string(&mut self, start: u32) {
@@ -309,7 +332,10 @@ impl Lexer<'_> {
             parts.push(TemplatePartTok::Literal(literal));
         }
         let span = self.span_from(start);
-        self.tokens.push(SpannedToken { token: Token::TemplateStr(parts), span });
+        self.tokens.push(SpannedToken {
+            token: Token::TemplateStr(parts),
+            span,
+        });
     }
 
     fn lex_punct(&mut self, start: u32) {
@@ -366,12 +392,19 @@ impl Lexer<'_> {
         };
         let span = self.span_from(start);
         match punct {
-            Some(p) => self.tokens.push(SpannedToken { token: Token::Punct(p), span }),
+            Some(p) => self.tokens.push(SpannedToken {
+                token: Token::Punct(p),
+                span,
+            }),
             None => {
                 self.diagnostics.push(
-                    Diagnostic::error(format!("unexpected character {c:?}")).with_label(span, "not valid here"),
+                    Diagnostic::error(format!("unexpected character {c:?}"))
+                        .with_label(span, "not valid here"),
                 );
-                self.tokens.push(SpannedToken { token: Token::Error, span });
+                self.tokens.push(SpannedToken {
+                    token: Token::Error,
+                    span,
+                });
             }
         }
     }
@@ -393,7 +426,7 @@ mod tests {
 
     #[test]
     fn keywords_and_idents() {
-        let toks = tokens_of("let mut Dog self");
+        let toks = tokens_of("let mut Dog self mod");
         assert_eq!(
             toks,
             vec![
@@ -401,6 +434,7 @@ mod tests {
                 Token::Keyword(Keyword::Mut),
                 Token::Ident("Dog".into()),
                 Token::Keyword(Keyword::SelfLower),
+                Token::Keyword(Keyword::Mod),
                 Token::Eof,
             ]
         );
@@ -425,7 +459,15 @@ mod tests {
     #[test]
     fn integer_and_float_literals() {
         let toks = tokens_of("123 4.5 0");
-        assert_eq!(toks, vec![Token::Int(123), Token::Float(4.5), Token::Int(0), Token::Eof]);
+        assert_eq!(
+            toks,
+            vec![
+                Token::Int(123),
+                Token::Float(4.5),
+                Token::Int(0),
+                Token::Eof
+            ]
+        );
     }
 
     #[test]
@@ -435,14 +477,22 @@ mod tests {
         let toks = tokens_of("a.0");
         assert_eq!(
             toks,
-            vec![Token::Ident("a".into()), Token::Punct(Punct::Dot), Token::Int(0), Token::Eof]
+            vec![
+                Token::Ident("a".into()),
+                Token::Punct(Punct::Dot),
+                Token::Int(0),
+                Token::Eof
+            ]
         );
     }
 
     #[test]
     fn plain_string_literal_with_escapes() {
         let toks = tokens_of(r#""hello\nworld""#);
-        assert_eq!(toks, vec![Token::Str("hello\nworld".to_string()), Token::Eof]);
+        assert_eq!(
+            toks,
+            vec![Token::Str("hello\nworld".to_string()), Token::Eof]
+        );
     }
 
     #[test]

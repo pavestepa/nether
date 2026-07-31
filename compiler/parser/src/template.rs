@@ -25,10 +25,14 @@ impl Parser {
     /// concurrency, and nothing else observes `self.tokens` mid-swap.
     pub(crate) fn reparse_template_expr(&mut self, text: &str, span: Span) -> Expr {
         let (raw_tokens, lex_diags) = nether_lexer::tokenize(text, self.file);
-        self.diagnostics.extend(shift_diagnostics(lex_diags, span.start));
+        self.diagnostics
+            .extend(shift_diagnostics(lex_diags, span.start));
         let shifted: Vec<SpannedToken> = raw_tokens
             .into_iter()
-            .map(|t| SpannedToken { token: t.token, span: shift_span(t.span, span.start) })
+            .map(|t| SpannedToken {
+                token: t.token,
+                span: shift_span(t.span, span.start),
+            })
             .collect();
 
         let saved_tokens = std::mem::replace(&mut self.tokens, shifted);
@@ -39,7 +43,10 @@ impl Parser {
         let expr = self.parse_assign_expr();
         if !self.is_eof() {
             let bad_span = self.peek_span();
-            self.error(bad_span, "unexpected trailing tokens in this string interpolation");
+            self.error(
+                bad_span,
+                "unexpected trailing tokens in this string interpolation",
+            );
         }
 
         self.tokens = saved_tokens;

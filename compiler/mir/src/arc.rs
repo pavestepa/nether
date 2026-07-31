@@ -74,10 +74,7 @@ pub fn insert_arc(functions: &mut [MirFunction]) {
     }
 }
 
-fn insert_arc_fn(
-    f: &mut MirFunction,
-    mutable_params: &HashMap<MonoFnId, Vec<bool>>,
-) {
+fn insert_arc_fn(f: &mut MirFunction, mutable_params: &HashMap<MonoFnId, Vec<bool>>) {
     for block in &mut f.blocks {
         let old = std::mem::take(&mut block.instrs);
         let mut new_instrs = Vec::with_capacity(old.len());
@@ -158,9 +155,15 @@ fn call_operands(
 /// exit already releases its parameter) and `true` for `CallBuiltin`/
 /// `CallArrayMethod` (a native callee with no such mechanism of its own).
 fn releases_after_call(rvalue: &Rvalue) -> bool {
-    matches!(rvalue, Rvalue::CallBuiltin { .. } | Rvalue::CallArrayMethod { .. })
+    matches!(
+        rvalue,
+        Rvalue::CallBuiltin { .. } | Rvalue::CallArrayMethod { .. }
+    )
 }
 
 fn is_aliasing(rvalue: &Rvalue) -> bool {
-    matches!(rvalue, Rvalue::Field { .. } | Rvalue::VariantField { .. } | Rvalue::Index { .. })
+    matches!(
+        rvalue,
+        Rvalue::Field { .. } | Rvalue::VariantField { .. } | Rvalue::Index { .. }
+    )
 }

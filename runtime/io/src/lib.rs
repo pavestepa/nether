@@ -20,7 +20,9 @@ use std::io::Write;
 use nether_rt_string::{nether_rt_string_bytes, nether_rt_string_len};
 
 fn bytes_of(s: *mut u8) -> &'static [u8] {
-    unsafe { std::slice::from_raw_parts(nether_rt_string_bytes(s), nether_rt_string_len(s) as usize) }
+    unsafe {
+        std::slice::from_raw_parts(nether_rt_string_bytes(s), nether_rt_string_len(s) as usize)
+    }
 }
 
 #[no_mangle]

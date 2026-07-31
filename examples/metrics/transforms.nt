@@ -1,0 +1,19 @@
+fn map_values(values: [i32], mapper: (i32) => i32): [i32] {
+    let mut output: [i32] = [];
+    for value in values {
+        output.push(mapper(value));
+    }
+    output
+}
+
+fn square(value: i32): i32 {
+    value * value
+}
+
+fn increment(mut value: i32) {
+    value = value + 1;
+}
+
+fn identity<T>(value: T): T {
+    value
+}

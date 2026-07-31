@@ -90,29 +90,80 @@ pub enum MonoExprKind {
     Array(Vec<MonoExpr>),
     Concat(Vec<MonoExpr>),
     ToString(Box<MonoExpr>),
-    Unary { op: UnaryOp, expr: Box<MonoExpr> },
-    Binary { op: BinaryOp, lhs: Box<MonoExpr>, rhs: Box<MonoExpr> },
-    Assign { target: Box<MonoExpr>, value: Box<MonoExpr> },
-    Call { callee: Box<MonoExpr>, args: Vec<MonoExpr> },
-    CallStatic { fn_id: MonoFnId, args: Vec<MonoExpr> },
-    CallBuiltin { name: Symbol, args: Vec<MonoExpr> },
-    Field { base: Box<MonoExpr>, index: u32 },
-    Index { base: Box<MonoExpr>, index: Box<MonoExpr> },
-    Construct { ty: DefId, fields: Vec<MonoExpr> },
-    ConstructVariant { enum_id: DefId, variant: u32, payload: Vec<MonoExpr> },
-    CallArrayMethod { receiver: Box<MonoExpr>, method: Symbol, args: Vec<MonoExpr> },
-    If { cond: Box<MonoExpr>, then_branch: Box<MonoExpr>, else_branch: Option<Box<MonoExpr>> },
-    Match { scrutinee: Box<MonoExpr>, arms: Vec<MonoMatchArm> },
+    Unary {
+        op: UnaryOp,
+        expr: Box<MonoExpr>,
+    },
+    Binary {
+        op: BinaryOp,
+        lhs: Box<MonoExpr>,
+        rhs: Box<MonoExpr>,
+    },
+    Assign {
+        target: Box<MonoExpr>,
+        value: Box<MonoExpr>,
+    },
+    Call {
+        callee: Box<MonoExpr>,
+        args: Vec<MonoExpr>,
+    },
+    CallStatic {
+        fn_id: MonoFnId,
+        args: Vec<MonoExpr>,
+    },
+    CallBuiltin {
+        name: Symbol,
+        args: Vec<MonoExpr>,
+    },
+    Field {
+        base: Box<MonoExpr>,
+        index: u32,
+    },
+    Index {
+        base: Box<MonoExpr>,
+        index: Box<MonoExpr>,
+    },
+    Construct {
+        ty: DefId,
+        fields: Vec<MonoExpr>,
+    },
+    ConstructVariant {
+        enum_id: DefId,
+        variant: u32,
+        payload: Vec<MonoExpr>,
+    },
+    CallArrayMethod {
+        receiver: Box<MonoExpr>,
+        method: Symbol,
+        args: Vec<MonoExpr>,
+    },
+    If {
+        cond: Box<MonoExpr>,
+        then_branch: Box<MonoExpr>,
+        else_branch: Option<Box<MonoExpr>>,
+    },
+    Match {
+        scrutinee: Box<MonoExpr>,
+        arms: Vec<MonoMatchArm>,
+    },
     Block(Vec<MonoStmt>, Option<Box<MonoExpr>>),
-    While { cond: Box<MonoExpr>, body: Box<MonoExpr> },
-    Loop { body: Box<MonoExpr> },
+    While {
+        cond: Box<MonoExpr>,
+        body: Box<MonoExpr>,
+    },
+    Loop {
+        body: Box<MonoExpr>,
+    },
     Break(Option<Box<MonoExpr>>),
     Continue,
     Return(Option<Box<MonoExpr>>),
     /// A closure after conversion: the body has been lifted into
     /// `function`; evaluating this expression constructs an environment
     /// from the listed capture values.
-    Closure { function: MonoFnId, captures: Vec<MonoExpr> },
+    Closure {
+        function: MonoFnId,
+        captures: Vec<MonoExpr>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -122,7 +173,11 @@ pub struct MonoStmt {
 
 #[derive(Debug, Clone)]
 pub enum MonoStmtKind {
-    Let { local: HirLocalId, ty: Type, value: MonoExpr },
+    Let {
+        local: HirLocalId,
+        ty: Type,
+        value: MonoExpr,
+    },
     Expr(MonoExpr),
 }
 

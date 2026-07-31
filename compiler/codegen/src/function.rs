@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 
 use nether_ast::{BinaryOp, Literal, Symbol, UnaryOp};
-use nether_llvm::{Block, Func, FloatPredicate, IntPredicate, ModuleCx, Value};
-use nether_mir::{CallTarget, Instr, Local, MirFunction, Operand, Place, Projection, Rvalue, Terminator};
+use nether_llvm::{Block, FloatPredicate, Func, IntPredicate, ModuleCx, Value};
+use nether_mir::{
+    CallTarget, Instr, Local, MirFunction, Operand, Place, Projection, Rvalue, Terminator,
+};
 use nether_monomorphization::MonoFnId;
 use nether_typecheck::{alloc_kind, AllocKind, PrimitiveKind, Type};
 
@@ -28,10 +30,22 @@ pub fn build_function<'m, 'ctx>(
     runtime: &'m Runtime<'ctx>,
     shims: &'m Shims<'ctx>,
     funcs: &'m HashMap<MonoFnId, Func<'ctx>>,
+    mir_functions: &'m HashMap<MonoFnId, &'m MirFunction>,
     mir_fn: &'m MirFunction,
     llvm_fn: Func<'ctx>,
 ) {
-    let mut fc = FnCodegen { m, layout, runtime, shims, funcs, mir_fn, llvm_fn, locals: Vec::new(), blocks: HashMap::new() };
+    let mut fc = FnCodegen {
+        m,
+        layout,
+        runtime,
+        shims,
+        funcs,
+        mir_functions,
+        mir_fn,
+        llvm_fn,
+        locals: Vec::new(),
+        blocks: HashMap::new(),
+    };
     fc.build();
 }
 
@@ -41,6 +55,7 @@ struct FnCodegen<'m, 'ctx> {
     runtime: &'m Runtime<'ctx>,
     shims: &'m Shims<'ctx>,
     funcs: &'m HashMap<MonoFnId, Func<'ctx>>,
+    mir_functions: &'m HashMap<MonoFnId, &'m MirFunction>,
     mir_fn: &'m MirFunction,
     llvm_fn: Func<'ctx>,
     /// One `alloca` per MIR local, indexed by [`Local::index`] — see this
@@ -104,16 +119,11 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
         for (i, &local) in self.mir_fn.params.iter().enumerate() {
             let param_val = self.m.param(self.llvm_fn, (i + param_offset) as u32);
             let ty = self.local_ty(local);
-            if is_aggregate(&ty, self.defs()) {
-                // An aggregate parameter is passed by pointer (see
-                // `crate::declare`'s matching signature choice) — the
-                // incoming value already *is* the address to use as this
-                // local's own slot, no separate `alloca`/copy needed.
-                // This aliases the caller's own storage rather than
-                // copying it, which is exactly `mut`'s documented
-                // semantics for a stack-kind parameter (`arc-model.md`
-                // §3.6) and is unobservable for a non-`mut` one (never
-                // reassigned).
+            if self.mir_fn.local_decl(local).mutable || is_aggregate(&ty, self.defs()) {
+                // Aggregates and `mut` parameters are passed by pointer
+                // (see `crate::declare`'s matching signature choice).
+                // In particular, a mutable scalar aliases the caller's
+                // slot instead of receiving the previous by-value copy.
                 self.locals[local.index()] = param_val;
             } else {
                 self.m.store(self.locals[local.index()], param_val);
@@ -122,7 +132,8 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
 
         for block in &self.mir_fn.blocks {
             let name = format!("bb{}", block_num(block.id));
-            self.blocks.insert(block.id, self.m.append_block(self.llvm_fn, &name));
+            self.blocks
+                .insert(block.id, self.m.append_block(self.llvm_fn, &name));
         }
         self.m.br(self.blocks[&self.mir_fn.entry]);
 
@@ -170,12 +181,17 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
         let ty = self.local_ty(local);
         if alloc_kind(&ty, self.defs()) == AllocKind::Heap {
             let ptr = self.load_scalar(local);
-            let function = if retain { self.runtime.retain } else { self.runtime.release };
+            let function = if retain {
+                self.runtime.retain
+            } else {
+                self.runtime.release
+            };
             self.m.call(function, &[ptr], "");
             return;
         }
         let shim = if retain {
-            self.shims.retain_shim(self.m, self.layout, self.runtime, &ty)
+            self.shims
+                .retain_shim(self.m, self.layout, self.runtime, &ty)
         } else {
             self.shims.drop_shim(self.m, self.layout, self.runtime, &ty)
         };
@@ -257,7 +273,8 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
         match lit {
             Literal::Int(v) => {
                 let signed = matches!(ty, Type::Primitive(p) if Layout::is_signed(*p));
-                self.m.const_int(self.layout.llvm_type(ty), *v as u64, signed)
+                self.m
+                    .const_int(self.layout.llvm_type(ty), *v as u64, signed)
             }
             Literal::Float(v) => self.m.const_float(self.layout.llvm_type(ty), *v),
             Literal::Bool(b) => self.m.const_bool(*b),
@@ -265,7 +282,9 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
             Literal::Str(s) => {
                 let bytes = self.m.global_string_ptr(s, "str_lit");
                 let len = self.m.const_int(self.m.int_type(64), s.len() as u64, false);
-                self.m.call(self.runtime.string_from_bytes, &[bytes, len], "str").expect("nether_rt_string_from_utf8 returns a value")
+                self.m
+                    .call(self.runtime.string_from_bytes, &[bytes, len], "str")
+                    .expect("nether_rt_string_from_utf8 returns a value")
             }
         }
     }
@@ -277,45 +296,27 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
     /// aggregate), followed by every field/index projection in order.
     fn place_address(&self, place: &Place) -> Value<'ctx> {
         let mut current_ty = self.local_ty(place.local);
-        let mut current_addr =
-            self.base_address(place.local, &current_ty);
-        for (position, projection) in
-            place.projection.iter().enumerate()
-        {
+        let mut current_addr = self.base_address(place.local, &current_ty);
+        for (position, projection) in place.projection.iter().enumerate() {
             let next_ty = self
                 .projection_type(&current_ty, projection)
                 .unwrap_or(Type::Error);
             current_addr = match projection {
-                Projection::Field(index) => self
-                    .struct_field_address(
-                        &current_ty,
-                        current_addr,
-                        *index,
-                    ),
-                Projection::VariantField { variant, index } => self
-                    .variant_field_address(
-                        &current_ty,
-                        current_addr,
-                        *variant,
-                        *index,
-                ),
+                Projection::Field(index) => {
+                    self.struct_field_address(&current_ty, current_addr, *index)
+                }
+                Projection::VariantField { variant, index } => {
+                    self.variant_field_address(&current_ty, current_addr, *variant, *index)
+                }
                 Projection::Index(idx_op) => {
                     let idx_val = self.gen_array_index(idx_op);
                     self.m
-                        .call(
-                            self.runtime.array_get,
-                            &[current_addr, idx_val],
-                            "elem_ptr",
-                        )
-                        .expect(
-                            "nether_rt_array_get returns a value",
-                        )
+                        .call(self.runtime.array_get, &[current_addr, idx_val], "elem_ptr")
+                        .expect("nether_rt_array_get returns a value")
                 }
             };
             current_ty = next_ty;
-            if position + 1 < place.projection.len()
-                && !is_aggregate(&current_ty, self.defs())
-            {
+            if position + 1 < place.projection.len() && !is_aggregate(&current_ty, self.defs()) {
                 current_addr = self.m.load(
                     self.layout.llvm_type(&current_ty),
                     current_addr,
@@ -326,16 +327,10 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
         current_addr
     }
 
-    fn projection_type(
-        &self,
-        base: &Type,
-        projection: &Projection,
-    ) -> Option<Type> {
+    fn projection_type(&self, base: &Type, projection: &Projection) -> Option<Type> {
         match projection {
             Projection::Field(index) => match base {
-                Type::Tuple(items) => {
-                    items.get(*index as usize).cloned()
-                }
+                Type::Tuple(items) => items.get(*index as usize).cloned(),
                 _ => self
                     .layout
                     .sigs
@@ -369,11 +364,14 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
         }
     }
 
-    fn struct_field_address(&self, base_ty: &Type, base_addr: Value<'ctx>, index: u32) -> Value<'ctx> {
+    fn struct_field_address(
+        &self,
+        base_ty: &Type,
+        base_addr: Value<'ctx>,
+        index: u32,
+    ) -> Value<'ctx> {
         let struct_ty = match base_ty {
-            Type::Struct(_, _) | Type::TupleStruct(_, _) => {
-                self.layout.struct_layout(base_ty).ty
-            }
+            Type::Struct(_, _) | Type::TupleStruct(_, _) => self.layout.struct_layout(base_ty).ty,
             Type::Tuple(items) => {
                 let fields = items
                     .iter()
@@ -386,13 +384,22 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
         self.m.struct_gep(struct_ty, base_addr, index, "field")
     }
 
-    fn variant_field_address(&self, base_ty: &Type, base_addr: Value<'ctx>, variant: u32, index: u32) -> Value<'ctx> {
+    fn variant_field_address(
+        &self,
+        base_ty: &Type,
+        base_addr: Value<'ctx>,
+        variant: u32,
+        index: u32,
+    ) -> Value<'ctx> {
         match base_ty {
             Type::Enum(_, _) => {}
             other => panic!("variant-field projection on non-enum type {other:?}"),
         }
         let el = self.layout.enum_layout(base_ty);
-        let gep_index = *el.field_offsets.get(&(variant, index)).expect("valid variant/field index (typecheck already validated the pattern)");
+        let gep_index = *el
+            .field_offsets
+            .get(&(variant, index))
+            .expect("valid variant/field index (typecheck already validated the pattern)");
         self.m.struct_gep(el.ty, base_addr, gep_index, "payload")
     }
 
@@ -405,13 +412,25 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
             Rvalue::Binary(op, a, b) => self.gen_binary(*op, a, b),
             Rvalue::Call { target, args } => self.gen_call(target, args, dest_ty),
             Rvalue::CallBuiltin { name, args } => self.gen_call_builtin(name, args, dest_ty),
-            Rvalue::CallArrayMethod { receiver, method, args } => self.gen_call_array_method(receiver, method, args, dest_ty),
+            Rvalue::CallArrayMethod {
+                receiver,
+                method,
+                args,
+            } => self.gen_call_array_method(receiver, method, args, dest_ty),
             Rvalue::Field { base, index } => self.gen_field_read(base, *index, dest_ty),
-            Rvalue::VariantField { base, variant, index } => self.gen_variant_field_read(base, *variant, *index, dest_ty),
+            Rvalue::VariantField {
+                base,
+                variant,
+                index,
+            } => self.gen_variant_field_read(base, *variant, *index, dest_ty),
             Rvalue::Discriminant(base) => self.gen_discriminant(base),
             Rvalue::Index { base, index } => self.gen_index_read(base, index, dest_ty),
             Rvalue::Construct { ty, fields } => self.gen_construct(*ty, fields, dest_ty),
-            Rvalue::ConstructVariant { enum_id, variant, payload } => self.gen_construct_variant(*enum_id, *variant, payload, dest_ty),
+            Rvalue::ConstructVariant {
+                enum_id,
+                variant,
+                payload,
+            } => self.gen_construct_variant(*enum_id, *variant, payload, dest_ty),
             Rvalue::Tuple(items) => self.gen_tuple(items, dest_ty),
             Rvalue::Array(items) => self.gen_array_literal(items, dest_ty),
             Rvalue::Concat(items) => self.gen_concat(items),
@@ -450,7 +469,9 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
                 BinaryOp::Le => self.m.float_compare(FloatPredicate::OLE, av, bv, "le"),
                 BinaryOp::Gt => self.m.float_compare(FloatPredicate::OGT, av, bv, "gt"),
                 BinaryOp::Ge => self.m.float_compare(FloatPredicate::OGE, av, bv, "ge"),
-                BinaryOp::And | BinaryOp::Or => unreachable!("`&&`/`||` never operate on float operands (typecheck)"),
+                BinaryOp::And | BinaryOp::Or => {
+                    unreachable!("`&&`/`||` never operate on float operands (typecheck)")
+                }
             };
         }
         match op {
@@ -473,23 +494,81 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
             }
             BinaryOp::Eq => self.m.int_compare(IntPredicate::EQ, av, bv, "eq"),
             BinaryOp::Ne => self.m.int_compare(IntPredicate::NE, av, bv, "ne"),
-            BinaryOp::Lt => self.m.int_compare(if signed { IntPredicate::SLT } else { IntPredicate::ULT }, av, bv, "lt"),
-            BinaryOp::Le => self.m.int_compare(if signed { IntPredicate::SLE } else { IntPredicate::ULE }, av, bv, "le"),
-            BinaryOp::Gt => self.m.int_compare(if signed { IntPredicate::SGT } else { IntPredicate::UGT }, av, bv, "gt"),
-            BinaryOp::Ge => self.m.int_compare(if signed { IntPredicate::SGE } else { IntPredicate::UGE }, av, bv, "ge"),
+            BinaryOp::Lt => self.m.int_compare(
+                if signed {
+                    IntPredicate::SLT
+                } else {
+                    IntPredicate::ULT
+                },
+                av,
+                bv,
+                "lt",
+            ),
+            BinaryOp::Le => self.m.int_compare(
+                if signed {
+                    IntPredicate::SLE
+                } else {
+                    IntPredicate::ULE
+                },
+                av,
+                bv,
+                "le",
+            ),
+            BinaryOp::Gt => self.m.int_compare(
+                if signed {
+                    IntPredicate::SGT
+                } else {
+                    IntPredicate::UGT
+                },
+                av,
+                bv,
+                "gt",
+            ),
+            BinaryOp::Ge => self.m.int_compare(
+                if signed {
+                    IntPredicate::SGE
+                } else {
+                    IntPredicate::UGE
+                },
+                av,
+                bv,
+                "ge",
+            ),
             BinaryOp::And => self.m.int_and(av, bv, "and"),
             BinaryOp::Or => self.m.int_or(av, bv, "or"),
         }
     }
 
     fn gen_call(&mut self, target: &CallTarget, args: &[Operand], dest_ty: &Type) -> Value<'ctx> {
-        let arg_vals: Vec<Value<'ctx>> = args.iter().map(|a| self.gen_operand(a)).collect();
         let result = match target {
             CallTarget::Fn(id) => {
-                let f = *self.funcs.get(id).expect("every CallTarget::Fn refers to a function declared in this same module");
-                self.m.call(f, &arg_vals, "call").unwrap_or_else(|| self.gen_unit())
+                let f = *self.funcs.get(id).expect(
+                    "every CallTarget::Fn refers to a function declared in this same module",
+                );
+                let mir_target = self
+                    .mir_functions
+                    .get(id)
+                    .expect("every CallTarget::Fn refers to MIR in this same module");
+                let arg_vals: Vec<Value<'ctx>> = args
+                    .iter()
+                    .zip(&mir_target.params)
+                    .map(|(arg, &param)| {
+                        if mir_target.local_decl(param).mutable {
+                            let Operand::Local(local) = arg else {
+                                panic!("a mutable parameter requires a local argument");
+                            };
+                            self.locals[local.index()]
+                        } else {
+                            self.gen_operand(arg)
+                        }
+                    })
+                    .collect();
+                self.m
+                    .call(f, &arg_vals, "call")
+                    .unwrap_or_else(|| self.gen_unit())
             }
             CallTarget::Dynamic(callee) => {
+                let arg_vals: Vec<Value<'ctx>> = args.iter().map(|a| self.gen_operand(a)).collect();
                 let closure = self.gen_operand(callee);
                 let code = self.m.load(self.m.ptr_type(), closure, "closure_fn");
                 let (params, ret) = match self.operand_ty(callee) {
@@ -513,7 +592,9 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
                 let mut dynamic_args = Vec::with_capacity(arg_vals.len() + 1);
                 dynamic_args.push(closure);
                 dynamic_args.extend(arg_vals);
-                self.m.indirect_call(fn_ty, code, &dynamic_args, "closure_call").unwrap_or_else(|| self.gen_unit())
+                self.m
+                    .indirect_call(fn_ty, code, &dynamic_args, "closure_call")
+                    .unwrap_or_else(|| self.gen_unit())
             }
         };
         if is_aggregate(dest_ty, self.defs()) {
@@ -530,21 +611,29 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
     }
 
     fn gen_closure(&self, function: MonoFnId, captures: &[Operand]) -> Value<'ctx> {
-        let capture_tys: Vec<Type> = captures.iter().map(|capture| self.operand_ty(capture)).collect();
+        let capture_tys: Vec<Type> = captures
+            .iter()
+            .map(|capture| self.operand_ty(capture))
+            .collect();
         let mut fields = vec![self.m.ptr_type()];
         fields.extend(capture_tys.iter().map(|ty| self.layout.llvm_type(ty)));
         let env_ty = self.m.struct_type(&fields);
         let size = self.m.size_of(env_ty.into());
-        let drop_fn = self.func_ptr_or_null(
-            self.shims
-                .closure_drop_shim(self.m, self.layout, self.runtime, &capture_tys),
-        );
+        let drop_fn = self.func_ptr_or_null(self.shims.closure_drop_shim(
+            self.m,
+            self.layout,
+            self.runtime,
+            &capture_tys,
+        ));
         let env = self
             .m
             .call(self.runtime.alloc, &[size, drop_fn], "closure")
             .expect("nether_rt_arc_alloc returns a closure environment");
         let code_field = self.m.struct_gep(env_ty, env, 0, "code");
-        let code = self.funcs[&function].as_global_value().as_pointer_value().into();
+        let code = self.funcs[&function]
+            .as_global_value()
+            .as_pointer_value()
+            .into();
         self.m.store(code_field, code);
         for (index, (capture, ty)) in captures.iter().zip(capture_tys.iter()).enumerate() {
             let field = self.m.struct_gep(env_ty, env, index as u32 + 1, "capture");
@@ -603,9 +692,17 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
         // `nether_rt_arc_weak_upgrade` returns `i8` (0/1), not LLVM's
         // native `i1` — see `runtime.rs`'s module docs; `select` needs an
         // actual `i1` condition.
-        let has_value_i8 =
-            self.m.call(self.runtime.weak_upgrade, &[weak_ptr, out_slot], "has_value").expect("nether_rt_arc_weak_upgrade returns a value");
-        let has_value = self.m.int_cast(has_value_i8, self.m.bool_type(), false, "has_value");
+        let has_value_i8 = self
+            .m
+            .call(
+                self.runtime.weak_upgrade,
+                &[weak_ptr, out_slot],
+                "has_value",
+            )
+            .expect("nether_rt_arc_weak_upgrade returns a value");
+        let has_value = self
+            .m
+            .int_cast(has_value_i8, self.m.bool_type(), false, "has_value");
 
         let result_slot = self.m.alloca(el.ty.into(), "upgrade_result");
         let tag_ptr = self.m.struct_gep(el.ty, result_slot, 0, "tag_ptr");
@@ -617,7 +714,9 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
         self.m.store(tag_ptr, tag);
 
         if let Some(&payload_index) = el.field_offsets.get(&(0, 0)) {
-            let payload_ptr = self.m.struct_gep(el.ty, result_slot, payload_index, "payload_ptr");
+            let payload_ptr = self
+                .m
+                .struct_gep(el.ty, result_slot, payload_index, "payload_ptr");
             // `elem_ty` is always heap-kind (`weak T` only ever wraps a
             // heap type — `nether_typecheck`'s own validation), so the
             // upgraded pointer `nether_rt_arc_weak_upgrade` wrote into
@@ -629,16 +728,27 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
         result_slot
     }
 
-    fn gen_call_array_method(&mut self, receiver: &Operand, method: &Symbol, args: &[Operand], dest_ty: &Type) -> Value<'ctx> {
+    fn gen_call_array_method(
+        &mut self,
+        receiver: &Operand,
+        method: &Symbol,
+        args: &[Operand],
+        dest_ty: &Type,
+    ) -> Value<'ctx> {
         let recv = self.gen_operand(receiver);
         match method.as_str() {
-            "len" => self.m.call(self.runtime.array_len, &[recv], "len").expect("nether_rt_array_len returns a value"),
+            "len" => self
+                .m
+                .call(self.runtime.array_len, &[recv], "len")
+                .expect("nether_rt_array_len returns a value"),
             "push" => {
                 let elem_ty = self.operand_ty(&args[0]);
                 let elem_val = self.gen_operand(&args[0]);
                 let elem_slot = self.m.alloca(self.layout.llvm_type(&elem_ty), "push_elem");
                 self.store_at(elem_slot, &elem_ty, elem_val);
-                self.m.call(self.runtime.array_push, &[recv, elem_slot], "").unwrap_or_else(|| self.gen_unit())
+                self.m
+                    .call(self.runtime.array_push, &[recv, elem_slot], "")
+                    .unwrap_or_else(|| self.gen_unit())
             }
             "pop" => {
                 // `dest_ty` is `Option<T>` — construct it directly from
@@ -660,8 +770,13 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
         // `nether_rt_array_pop` returns `i8` (0/1), not LLVM's `i1` — see
         // `runtime.rs`'s module docs on why `bool` crosses this ABI
         // boundary as a byte; `select` needs an actual `i1` condition.
-        let has_value_i8 = self.m.call(self.runtime.array_pop, &[recv, out_slot], "has_value").expect("nether_rt_array_pop returns a value");
-        let has_value = self.m.int_cast(has_value_i8, self.m.bool_type(), false, "has_value");
+        let has_value_i8 = self
+            .m
+            .call(self.runtime.array_pop, &[recv, out_slot], "has_value")
+            .expect("nether_rt_array_pop returns a value");
+        let has_value = self
+            .m
+            .int_cast(has_value_i8, self.m.bool_type(), false, "has_value");
 
         let result_slot = self.m.alloca(el.ty.into(), "pop_result");
         let tag_ptr = self.m.struct_gep(el.ty, result_slot, 0, "tag_ptr");
@@ -673,8 +788,12 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
         self.m.store(tag_ptr, tag);
 
         if let Some(&payload_index) = el.field_offsets.get(&(0, 0)) {
-            let payload_ptr = self.m.struct_gep(el.ty, result_slot, payload_index, "payload_ptr");
-            let elem_val = self.m.load(self.layout.llvm_type(&elem_ty), out_slot, "elem");
+            let payload_ptr = self
+                .m
+                .struct_gep(el.ty, result_slot, payload_index, "payload_ptr");
+            let elem_val = self
+                .m
+                .load(self.layout.llvm_type(&elem_ty), out_slot, "elem");
             self.store_at(payload_ptr, &elem_ty, elem_val);
         }
         result_slot
@@ -687,7 +806,13 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
         self.load_value(addr, dest_ty)
     }
 
-    fn gen_variant_field_read(&self, base: &Operand, variant: u32, index: u32, dest_ty: &Type) -> Value<'ctx> {
+    fn gen_variant_field_read(
+        &self,
+        base: &Operand,
+        variant: u32,
+        index: u32,
+        dest_ty: &Type,
+    ) -> Value<'ctx> {
         let base_ty = self.operand_ty(base);
         let base_val = self.gen_operand(base);
         let addr = self.variant_field_address(&base_ty, base_val, variant, index);
@@ -717,15 +842,17 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
     fn gen_index_read(&self, base: &Operand, index: &Operand, dest_ty: &Type) -> Value<'ctx> {
         let base_val = self.gen_operand(base);
         let idx_val = self.gen_array_index(index);
-        let addr = self.m.call(self.runtime.array_get, &[base_val, idx_val], "elem_ptr").expect("nether_rt_array_get returns a value");
+        let addr = self
+            .m
+            .call(self.runtime.array_get, &[base_val, idx_val], "elem_ptr")
+            .expect("nether_rt_array_get returns a value");
         self.load_value(addr, dest_ty)
     }
 
     fn gen_array_index(&self, index: &Operand) -> Value<'ctx> {
         let value = self.gen_operand(index);
         match self.operand_ty(index) {
-            Type::Primitive(PrimitiveKind::Usize)
-            | Type::Primitive(PrimitiveKind::U64) => value,
+            Type::Primitive(PrimitiveKind::Usize) | Type::Primitive(PrimitiveKind::U64) => value,
             Type::Primitive(kind) if kind.is_integer() => self.m.int_cast(
                 value,
                 self.m.int_type(64),
@@ -736,7 +863,12 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
         }
     }
 
-    fn gen_construct(&mut self, _id: nether_resolver::DefId, fields: &[Operand], dest_ty: &Type) -> Value<'ctx> {
+    fn gen_construct(
+        &mut self,
+        _id: nether_resolver::DefId,
+        fields: &[Operand],
+        dest_ty: &Type,
+    ) -> Value<'ctx> {
         let sl = self.layout.struct_layout(dest_ty);
         let field_vals: Vec<Value<'ctx>> = fields.iter().map(|f| self.gen_operand(f)).collect();
         let field_tys: Vec<Type> = self.layout.sigs.type_fields(dest_ty).unwrap_or_default();
@@ -744,8 +876,15 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
         let heap = alloc_kind(dest_ty, self.defs()) == AllocKind::Heap;
         let addr = if heap {
             let size = self.m.size_of(sl.ty.into());
-            let drop_fn = self.func_ptr_or_null(self.shims.own_drop_shim(self.m, self.layout, self.runtime, dest_ty));
-            self.m.call(self.runtime.alloc, &[size, drop_fn], "obj").expect("nether_rt_arc_alloc returns a value")
+            let drop_fn = self.func_ptr_or_null(self.shims.own_drop_shim(
+                self.m,
+                self.layout,
+                self.runtime,
+                dest_ty,
+            ));
+            self.m
+                .call(self.runtime.alloc, &[size, drop_fn], "obj")
+                .expect("nether_rt_arc_alloc returns a value")
         } else {
             self.m.alloca(sl.ty.into(), "agg")
         };
@@ -757,18 +896,35 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
         addr
     }
 
-    fn gen_construct_variant(&mut self, enum_id: nether_resolver::DefId, variant: u32, payload: &[Operand], dest_ty: &Type) -> Value<'ctx> {
+    fn gen_construct_variant(
+        &mut self,
+        enum_id: nether_resolver::DefId,
+        variant: u32,
+        payload: &[Operand],
+        dest_ty: &Type,
+    ) -> Value<'ctx> {
         debug_assert!(matches!(dest_ty, Type::Enum(id, _) if *id == enum_id));
         let el = self.layout.enum_layout(dest_ty);
-        let payload_tys = self.layout.sigs.enum_payload(dest_ty, variant).unwrap_or_default();
+        let payload_tys = self
+            .layout
+            .sigs
+            .enum_payload(dest_ty, variant)
+            .unwrap_or_default();
         let payload_vals: Vec<Value<'ctx>> = payload.iter().map(|p| self.gen_operand(p)).collect();
 
         let _ = dest_ty;
         let slot = self.m.alloca(el.ty.into(), "variant");
         let tag_ptr = self.m.struct_gep(el.ty, slot, 0, "tag_ptr");
-        self.m.store(tag_ptr, self.m.const_int(self.m.int_type(64), u64::from(variant), false));
+        self.m.store(
+            tag_ptr,
+            self.m
+                .const_int(self.m.int_type(64), u64::from(variant), false),
+        );
         for (i, val) in payload_vals.into_iter().enumerate() {
-            let gep_index = *el.field_offsets.get(&(variant, i as u32)).expect("valid variant/field index");
+            let gep_index = *el
+                .field_offsets
+                .get(&(variant, i as u32))
+                .expect("valid variant/field index");
             let field_ptr = self.m.struct_gep(el.ty, slot, gep_index, "payload_field");
             let field_ty = payload_tys.get(i).cloned().unwrap_or(Type::Error);
             self.store_at(field_ptr, &field_ty, val);
@@ -803,12 +959,28 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
         };
         let elem_llvm_ty = self.layout.llvm_type(&elem_ty);
         let elem_size = self.m.size_of(elem_llvm_ty);
-        let cap = self.m.const_int(self.m.int_type(64), items.len() as u64, false);
-        let elem_retain = self.func_ptr_or_null(self.shims.retain_shim(self.m, self.layout, self.runtime, &elem_ty));
-        let elem_drop = self.func_ptr_or_null(self.shims.drop_shim(self.m, self.layout, self.runtime, &elem_ty));
+        let cap = self
+            .m
+            .const_int(self.m.int_type(64), items.len() as u64, false);
+        let elem_retain = self.func_ptr_or_null(self.shims.retain_shim(
+            self.m,
+            self.layout,
+            self.runtime,
+            &elem_ty,
+        ));
+        let elem_drop = self.func_ptr_or_null(self.shims.drop_shim(
+            self.m,
+            self.layout,
+            self.runtime,
+            &elem_ty,
+        ));
         let arr = self
             .m
-            .call(self.runtime.array_new, &[elem_size, cap, elem_retain, elem_drop], "arr")
+            .call(
+                self.runtime.array_new,
+                &[elem_size, cap, elem_retain, elem_drop],
+                "arr",
+            )
             .expect("nether_rt_array_new returns a value");
         let elem_slot = self.m.alloca(elem_llvm_ty, "elem");
         for item in items {
@@ -821,7 +993,9 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
 
     fn gen_concat(&mut self, items: &[Operand]) -> Value<'ctx> {
         let mut iter = items.iter();
-        let first = iter.next().expect("Concat always has at least one piece (nether_hir's own desugaring)");
+        let first = iter
+            .next()
+            .expect("Concat always has at least one piece (nether_hir's own desugaring)");
         let mut acc = self.gen_operand(first);
         let Some(second) = iter.next() else {
             // `Concat` is a constructing rvalue and therefore owes its
@@ -855,21 +1029,34 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
         let val = self.gen_operand(op);
         match &ty {
             Type::Primitive(p) if Layout::is_float(*p) => {
-                let widened = if matches!(p, PrimitiveKind::F32) { self.m.float_ext(val, self.m.f64_type(), "widen") } else { val };
-                self.m.call(self.runtime.f64_to_string, &[widened], "s").expect("nether_rt_f64_to_string returns a value")
+                let widened = if matches!(p, PrimitiveKind::F32) {
+                    self.m.float_ext(val, self.m.f64_type(), "widen")
+                } else {
+                    val
+                };
+                self.m
+                    .call(self.runtime.f64_to_string, &[widened], "s")
+                    .expect("nether_rt_f64_to_string returns a value")
             }
             Type::Primitive(PrimitiveKind::Bool) => {
                 // `val` is Nether's own `i1` bool; `nether_rt_bool_to_string`
                 // takes `i8` (see `runtime.rs`'s module docs).
                 let widened = self.m.int_cast(val, self.m.int_type(8), false, "widen");
-                self.m.call(self.runtime.bool_to_string, &[widened], "s").expect("nether_rt_bool_to_string returns a value")
+                self.m
+                    .call(self.runtime.bool_to_string, &[widened], "s")
+                    .expect("nether_rt_bool_to_string returns a value")
             }
-            Type::Primitive(PrimitiveKind::Char) => {
-                self.m.call(self.runtime.char_to_string, &[val], "s").expect("nether_rt_char_to_string returns a value")
-            }
+            Type::Primitive(PrimitiveKind::Char) => self
+                .m
+                .call(self.runtime.char_to_string, &[val], "s")
+                .expect("nether_rt_char_to_string returns a value"),
             Type::Primitive(p) => {
-                let widened = self.m.int_cast(val, self.m.int_type(64), Layout::is_signed(*p), "widen");
-                self.m.call(self.runtime.i64_to_string, &[widened], "s").expect("nether_rt_i64_to_string returns a value")
+                let widened =
+                    self.m
+                        .int_cast(val, self.m.int_type(64), Layout::is_signed(*p), "widen");
+                self.m
+                    .call(self.runtime.i64_to_string, &[widened], "s")
+                    .expect("nether_rt_i64_to_string returns a value")
             }
             Type::String => val,
             other => panic!("nether_codegen: ToString isn't implemented for {other:?} yet"),
@@ -881,9 +1068,14 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
     fn gen_terminator(&mut self, term: &Terminator) {
         match term {
             Terminator::Goto(target) => self.m.br(self.blocks[target]),
-            Terminator::Branch { cond, then_block, else_block } => {
+            Terminator::Branch {
+                cond,
+                then_block,
+                else_block,
+            } => {
                 let cond_val = self.gen_operand(cond);
-                self.m.cond_br(cond_val, self.blocks[then_block], self.blocks[else_block]);
+                self.m
+                    .cond_br(cond_val, self.blocks[then_block], self.blocks[else_block]);
             }
             Terminator::Return(op) => {
                 let ret_ty = self.mir_fn.ret.clone();

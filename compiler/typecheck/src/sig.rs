@@ -79,6 +79,11 @@ pub struct Signatures {
     /// order; a call site recovers the name from
     /// `Definitions::get(owner).methods[idx]` and looks it up here.
     pub methods: HashMap<(DefId, Symbol), FnSig>,
+    /// Fully inherited interface method signatures.
+    pub interface_methods: HashMap<(DefId, Symbol), FnSig>,
+    /// Generic parameter names and direct parent templates for interfaces.
+    pub interface_generics: HashMap<DefId, Vec<Symbol>>,
+    pub interface_parents: HashMap<DefId, Vec<GenericBound>>,
     /// `(owner type pattern, interface + arguments)` pairs with a declared
     /// implementation. The owner can contain `Type::Generic` arguments,
     /// e.g. `Boxed<T>`, so one impl applies to every monomorphization.
@@ -87,6 +92,8 @@ pub struct Signatures {
     /// The interface body is type-checked once in its generic form, then
     /// HIR uses this map when lowering the copy attached to an impl.
     pub default_method_substitutions: HashMap<(DefId, Symbol), HashMap<Symbol, Type>>,
+    /// Interface declaration that supplies each inherited default body.
+    pub default_method_sources: HashMap<(DefId, Symbol), DefId>,
 }
 
 impl Signatures {
@@ -100,14 +107,62 @@ impl Signatures {
             if !collect_pattern_bindings(owner_pattern, ty, &mut subst) {
                 return false;
             }
-            implemented.interface == bound.interface
-                && implemented.args.len() == bound.args.len()
-                && implemented
+            let implemented = GenericBound {
+                interface: implemented.interface,
+                args: implemented
                     .args
                     .iter()
                     .map(|arg| substitute(arg, &subst))
-                    .eq(bound.args.iter().cloned())
+                    .collect(),
+            };
+            self.bound_satisfies(&implemented, bound)
         })
+    }
+
+    pub fn bound_satisfies(&self, actual: &GenericBound, required: &GenericBound) -> bool {
+        self.bound_satisfies_inner(actual, required, &mut HashSet::new())
+    }
+
+    fn bound_satisfies_inner(
+        &self,
+        actual: &GenericBound,
+        required: &GenericBound,
+        visiting: &mut HashSet<GenericBound>,
+    ) -> bool {
+        if actual == required {
+            return true;
+        }
+        if !visiting.insert(actual.clone()) {
+            return false;
+        }
+        let generics = self
+            .interface_generics
+            .get(&actual.interface)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let subst: HashMap<Symbol, Type> = generics
+            .iter()
+            .cloned()
+            .zip(actual.args.iter().cloned())
+            .collect();
+        let found = self
+            .interface_parents
+            .get(&actual.interface)
+            .into_iter()
+            .flatten()
+            .any(|parent| {
+                let parent = GenericBound {
+                    interface: parent.interface,
+                    args: parent
+                        .args
+                        .iter()
+                        .map(|arg| substitute(arg, &subst))
+                        .collect(),
+                };
+                self.bound_satisfies_inner(&parent, required, visiting)
+            });
+        visiting.remove(actual);
+        found
     }
 
     /// Returns a struct/tuple-struct's fields after substituting the
@@ -117,16 +172,23 @@ impl Signatures {
             Type::Struct(id, args) | Type::TupleStruct(id, args) => (*id, args),
             _ => return None,
         };
-        let generics = self.type_generics.get(&id).map(Vec::as_slice).unwrap_or(&[]);
+        let generics = self
+            .type_generics
+            .get(&id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         if generics.len() != args.len() {
             return None;
         }
         let subst: HashMap<Symbol, Type> =
             generics.iter().cloned().zip(args.iter().cloned()).collect();
         match self.type_shapes.get(&id)? {
-            TypeShape::Struct(fields) => {
-                Some(fields.iter().map(|(_, ty)| substitute(ty, &subst)).collect())
-            }
+            TypeShape::Struct(fields) => Some(
+                fields
+                    .iter()
+                    .map(|(_, ty)| substitute(ty, &subst))
+                    .collect(),
+            ),
             TypeShape::TupleStruct(fields) => {
                 Some(fields.iter().map(|ty| substitute(ty, &subst)).collect())
             }
@@ -203,7 +265,12 @@ impl Signatures {
         };
         let sig = self.enum_sigs.get(id)?;
         let (_, payload) = sig.variants.get(variant as usize)?;
-        let subst: HashMap<Symbol, Type> = sig.generics.iter().cloned().zip(args.iter().cloned()).collect();
+        let subst: HashMap<Symbol, Type> = sig
+            .generics
+            .iter()
+            .cloned()
+            .zip(args.iter().cloned())
+            .collect();
         Some(payload.iter().map(|ty| substitute(ty, &subst)).collect())
     }
 }
@@ -261,7 +328,9 @@ fn substitute(ty: &Type, subst: &HashMap<Symbol, Type>) -> Type {
             Type::TupleStruct(*id, args.iter().map(|ty| substitute(ty, subst)).collect())
         }
         Type::Tuple(items) => Type::Tuple(items.iter().map(|ty| substitute(ty, subst)).collect()),
-        Type::Enum(id, args) => Type::Enum(*id, args.iter().map(|ty| substitute(ty, subst)).collect()),
+        Type::Enum(id, args) => {
+            Type::Enum(*id, args.iter().map(|ty| substitute(ty, subst)).collect())
+        }
         Type::Array(elem) => Type::Array(Box::new(substitute(elem, subst))),
         Type::Function(params, ret) => Type::Function(
             params.iter().map(|ty| substitute(ty, subst)).collect(),

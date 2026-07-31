@@ -119,7 +119,12 @@ pub extern "C" fn nether_rt_arc_alloc(size: i64, drop: Option<extern "C" fn(*mut
         if base.is_null() {
             handle_alloc_error(layout);
         }
-        base.cast::<Header>().write(Header { strong: 1, weak: 0, size, drop });
+        base.cast::<Header>().write(Header {
+            strong: 1,
+            weak: 0,
+            size,
+            drop,
+        });
         base.add(HEADER_SIZE)
     }
 }
@@ -222,7 +227,10 @@ pub unsafe extern "C" fn nether_rt_arc_weak_release(payload: *mut u8) {
 /// already-weak-retained reference); `out_payload` must point at a
 /// writable pointer-sized slot.
 #[no_mangle]
-pub unsafe extern "C" fn nether_rt_arc_weak_upgrade(payload: *mut u8, out_payload: *mut *mut u8) -> u8 {
+pub unsafe extern "C" fn nether_rt_arc_weak_upgrade(
+    payload: *mut u8,
+    out_payload: *mut *mut u8,
+) -> u8 {
     if payload.is_null() {
         return 0;
     }
@@ -267,7 +275,11 @@ mod tests {
             nether_rt_arc_retain(p);
             nether_rt_arc_release(p);
         }
-        assert_eq!(DROPS.load(Ordering::SeqCst), before, "still one live reference");
+        assert_eq!(
+            DROPS.load(Ordering::SeqCst),
+            before,
+            "still one live reference"
+        );
         unsafe { nether_rt_arc_release(p) };
         assert_eq!(DROPS.load(Ordering::SeqCst), before + 1);
     }
@@ -286,7 +298,10 @@ mod tests {
             nether_rt_arc_weak_retain(std::ptr::null_mut());
             nether_rt_arc_weak_release(std::ptr::null_mut());
             let mut out = std::ptr::null_mut();
-            assert_eq!(nether_rt_arc_weak_upgrade(std::ptr::null_mut(), &mut out), 0);
+            assert_eq!(
+                nether_rt_arc_weak_upgrade(std::ptr::null_mut(), &mut out),
+                0
+            );
         }
     }
 
@@ -318,10 +333,17 @@ mod tests {
             // upgrade attempt can safely read it rather than touching
             // freed memory.
             nether_rt_arc_release(p);
-            assert_eq!(DROPS.load(Ordering::SeqCst), before + 1, "drop callback should have run already");
+            assert_eq!(
+                DROPS.load(Ordering::SeqCst),
+                before + 1,
+                "drop callback should have run already"
+            );
             let mut out: *mut u8 = std::ptr::null_mut();
             let ok = nether_rt_arc_weak_upgrade(p, &mut out);
-            assert_eq!(ok, 0, "the referent is gone, upgrade must report failure, not read freed memory");
+            assert_eq!(
+                ok, 0,
+                "the referent is gone, upgrade must report failure, not read freed memory"
+            );
             nether_rt_arc_weak_release(p);
         }
     }

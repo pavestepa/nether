@@ -16,7 +16,11 @@ pub enum Pattern {
     Literal(Literal, Span),
     Tuple(Vec<Pattern>, Span),
     /// `Color.Custom(name)`, `Option.Some(x)`.
-    Variant { path: Path, payload: Vec<Pattern>, span: Span },
+    Variant {
+        path: Path,
+        payload: Vec<Pattern>,
+        span: Span,
+    },
 }
 
 impl Pattern {

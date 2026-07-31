@@ -44,8 +44,8 @@ instead of aborting the process.
 
 Uses recursive descent for declarations/statements/patterns and Pratt
 parsing for expressions. It represents closures, generics, interfaces,
-enums, `match`, loops, weak types and `use` syntax without attempting name
-or type resolution.
+enums, `match`, loops, weak types and `mod`/`use` syntax without attempting
+name or type resolution.
 
 Public entry point:
 
@@ -57,8 +57,9 @@ pub fn parse_module(source: &str, file: FileId)
 ## `compiler/resolver`
 
 Builds built-in and per-file namespaces, lexical local scopes and
-`NodeId -> Resolution` side tables. The driver first loads the transitive
-local module graph and records every `use` edge, so imports resolve to an
+`NodeId -> Resolution` side tables. The driver first follows `mod`
+declarations, loads the transitive file graph, and records every `use`
+edge. Imports through `self`, `super`, and `crate` therefore resolve to an
 exact declaration in the target file. Equal private top-level names in
 different files do not collide.
 
@@ -68,8 +69,8 @@ The resolver also disambiguates:
 - static functions/constructors from instance member paths;
 - declaration and function generic parameters.
 
-Current module limits are explicit imports only, no aliases/re-exports or
-package manager.
+Current module limits are file modules only, explicit single-name imports,
+and no inline modules, aliases, globs, re-exports or package manager.
 
 ## `compiler/typecheck`
 
@@ -79,8 +80,10 @@ expression/local needed by HIR. It checks:
 - calls, returns, assignments and mutable-argument rules;
 - structs, tuples, arrays, enums, patterns and match exhaustiveness;
 - weak references and implicit weak reads as `Option<T>`;
-- generic inference, declaration bounds and generic interface arguments;
-- interface implementation completeness and method signatures;
+- inferred and explicit call-site generic arguments, declaration bounds
+  and generic interface arguments;
+- interface inheritance, implementation completeness, default conflicts
+  and method signatures;
 - `Into<String>` for interpolation and variadic print calls;
 - finite value layouts, legal entry-point signatures and loop control.
 
@@ -99,8 +102,10 @@ Lowers a successful typed AST to a smaller typed representation. It:
 - resolves calls to declaration IDs;
 - desugars method calls, interpolation, weak upgrades and `for`;
 - performs closure capture analysis and closure conversion;
-- copies interface default bodies into concrete implementations;
-- preserves generics for the monomorphization pass.
+- copies declaration-opted-in interface default bodies, including
+  inherited and specialized defaults, into concrete implementations;
+- preserves generics and resolved call-site specializations for the
+  monomorphization pass.
 
 Capturing closures carry a generated environment; non-capturing closures
 and named function values use the same callable ABI.
@@ -158,9 +163,10 @@ union. This is correct but can waste space.
 
 ## `compiler/driver`
 
-Loads an entry file and its transitive local/stdlib imports, gives every
-file a namespace, sequences all compiler stages, emits an object and
-optionally links a host executable.
+Loads an entry file, follows Rust-style `mod child;` declarations and
+relative `use self`/`super`/`crate` imports, gives every file a namespace,
+loads bundled stdlib roots, sequences all compiler stages, emits an object
+and optionally links a host executable.
 
 ```rust
 pub struct CompileOptions {

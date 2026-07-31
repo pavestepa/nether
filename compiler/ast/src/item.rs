@@ -7,9 +7,9 @@ use crate::ident::{Ident, Path};
 use crate::ids::NodeId;
 use crate::ty::TypeExpr;
 
-/// One parsed source file: language-spec §10's module system treats each
-/// file as a module: it is `resolver`'s job to knit multiple `Module`s
-/// together via `use` imports, not this crate's.
+/// One parsed source file: language-spec §10 treats each file as a module.
+/// The driver follows `mod` declarations and maps `use` imports before
+/// resolver operates on the combined module graph.
 #[derive(Debug, Clone)]
 pub struct Module {
     pub file: FileId,
@@ -28,6 +28,7 @@ pub enum Item {
     Interface(InterfaceDecl),
     Fn(FnDecl),
     Use(UseDecl),
+    Mod(ModDecl),
 }
 
 /// `type Dog { name: String }` / `type Point(i32, i32);` / `type Unit;`
@@ -42,6 +43,9 @@ pub struct TypeDecl {
     /// `Box<T>` — language-spec §8 lists "generic types" as supported;
     /// empty for a non-generic declaration.
     pub generics: Vec<GenericParam>,
+    /// Interfaces opted into on the declaration (`type Dog: Sound, Clone`).
+    /// Missing default methods are inherited only through this list.
+    pub interfaces: Vec<TypeExpr>,
     pub kind: TypeDeclKind,
     /// Joined text of any leading `///` doc comments (language-spec §2.1).
     pub doc: Option<String>,
@@ -69,11 +73,11 @@ pub struct Field {
 pub struct ImplBlock {
     pub id: NodeId,
     pub target: Ident,
-    /// The `Sound` in `impl Dog: Sound`, or `Into<String>` in
-    /// `impl Dog: Into<String>` — a full type expression (not a bare
+    /// The interfaces in `impl Dog: Sound, Clone` — full type expressions
+    /// (not bare
     /// [`Path`]) because an interface name may itself be generic
     /// (language-spec §7.1).
-    pub interface: Option<TypeExpr>,
+    pub interfaces: Vec<TypeExpr>,
     pub methods: Vec<FnDecl>,
     pub span: Span,
 }
@@ -86,6 +90,8 @@ pub struct EnumDecl {
     pub id: NodeId,
     pub name: Ident,
     pub generics: Vec<GenericParam>,
+    /// Interfaces opted into on the declaration (`enum State: Display`).
+    pub interfaces: Vec<TypeExpr>,
     pub variants: Vec<EnumVariant>,
     pub doc: Option<String>,
     pub span: Span,
@@ -124,6 +130,8 @@ pub struct InterfaceDecl {
     /// language-spec §8 lists "generic interfaces" as supported; empty for
     /// a non-generic declaration.
     pub generics: Vec<GenericParam>,
+    /// Direct parent interfaces (`interface Child: ParentA, ParentB`).
+    pub parents: Vec<TypeExpr>,
     /// A method with `body: None` has no default implementation and must
     /// be provided by every `impl`; a method with `body: Some(_)` is a
     /// default, overridable per-impl.
@@ -183,5 +191,15 @@ pub struct Param {
 pub struct UseDecl {
     pub id: NodeId,
     pub path: Path,
+    pub span: Span,
+}
+
+/// `mod child;` declares and loads a child file module. The driver maps
+/// it to `child.nt`/`child.nr` or `child/mod.nt`/`child/mod.nr` relative
+/// to the declaring module.
+#[derive(Debug, Clone)]
+pub struct ModDecl {
+    pub id: NodeId,
+    pub name: Ident,
     pub span: Span,
 }

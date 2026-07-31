@@ -81,17 +81,36 @@ impl<'ctx> Shims<'ctx> {
     /// A retain shim usable as `Array<ty>`'s `elem_retain` callback, or
     /// `None` if `ty` never owns any heap-kind content (nothing to
     /// retain).
-    pub fn retain_shim(&self, m: &ModuleCx<'ctx>, layout: &Layout<'_, 'ctx>, runtime: &Runtime<'ctx>, ty: &Type) -> Option<Func<'ctx>> {
+    pub fn retain_shim(
+        &self,
+        m: &ModuleCx<'ctx>,
+        layout: &Layout<'_, 'ctx>,
+        runtime: &Runtime<'ctx>,
+        ty: &Type,
+    ) -> Option<Func<'ctx>> {
         self.reference_shim(m, layout, runtime, ty, true)
     }
 
     /// The drop-shim counterpart of [`Self::retain_shim`] — usable as
     /// `Array<ty>`'s `elem_drop` callback.
-    pub fn drop_shim(&self, m: &ModuleCx<'ctx>, layout: &Layout<'_, 'ctx>, runtime: &Runtime<'ctx>, ty: &Type) -> Option<Func<'ctx>> {
+    pub fn drop_shim(
+        &self,
+        m: &ModuleCx<'ctx>,
+        layout: &Layout<'_, 'ctx>,
+        runtime: &Runtime<'ctx>,
+        ty: &Type,
+    ) -> Option<Func<'ctx>> {
         self.reference_shim(m, layout, runtime, ty, false)
     }
 
-    fn reference_shim(&self, m: &ModuleCx<'ctx>, layout: &Layout<'_, 'ctx>, runtime: &Runtime<'ctx>, ty: &Type, retain: bool) -> Option<Func<'ctx>> {
+    fn reference_shim(
+        &self,
+        m: &ModuleCx<'ctx>,
+        layout: &Layout<'_, 'ctx>,
+        runtime: &Runtime<'ctx>,
+        ty: &Type,
+        retain: bool,
+    ) -> Option<Func<'ctx>> {
         if !has_heap_content(ty, layout.defs, layout.sigs) {
             return None;
         }
@@ -104,7 +123,13 @@ impl<'ctx> Shims<'ctx> {
         let entry = m.append_block(f, "entry");
         m.position_at_end(entry);
         let base = m.param(f, 0);
-        let cx = ShimCx { m, layout, runtime, f, retain };
+        let cx = ShimCx {
+            m,
+            layout,
+            runtime,
+            f,
+            retain,
+        };
         cx.emit_walk(base, ty);
         m.ret(None);
         m.position_at_end(saved_block);
@@ -115,9 +140,18 @@ impl<'ctx> Shims<'ctx> {
     /// heap-kind `ty` (a `Struct`/`TupleStruct` with `alloc_kind ==
     /// Heap`) — see module docs for why this can't just be
     /// [`Self::drop_shim`] applied to the same `ty`.
-    pub fn own_drop_shim(&self, m: &ModuleCx<'ctx>, layout: &Layout<'_, 'ctx>, runtime: &Runtime<'ctx>, ty: &Type) -> Option<Func<'ctx>> {
+    pub fn own_drop_shim(
+        &self,
+        m: &ModuleCx<'ctx>,
+        layout: &Layout<'_, 'ctx>,
+        runtime: &Runtime<'ctx>,
+        ty: &Type,
+    ) -> Option<Func<'ctx>> {
         let field_tys = fields_of(ty, layout.sigs);
-        if !field_tys.iter().any(|t| has_heap_content(t, layout.defs, layout.sigs)) {
+        if !field_tys
+            .iter()
+            .any(|t| has_heap_content(t, layout.defs, layout.sigs))
+        {
             return None;
         }
         if let Some(&f) = self.own_drop.borrow().get(ty) {
@@ -129,7 +163,13 @@ impl<'ctx> Shims<'ctx> {
         let entry = m.append_block(f, "entry");
         m.position_at_end(entry);
         let base = m.param(f, 0);
-        let cx = ShimCx { m, layout, runtime, f, retain: false };
+        let cx = ShimCx {
+            m,
+            layout,
+            runtime,
+            f,
+            retain: false,
+        };
         cx.emit_struct_fields(base, ty);
         m.ret(None);
         m.position_at_end(saved_block);
@@ -145,7 +185,10 @@ impl<'ctx> Shims<'ctx> {
         runtime: &Runtime<'ctx>,
         capture_tys: &[Type],
     ) -> Option<Func<'ctx>> {
-        if !capture_tys.iter().any(|ty| has_heap_content(ty, layout.defs, layout.sigs)) {
+        if !capture_tys
+            .iter()
+            .any(|ty| has_heap_content(ty, layout.defs, layout.sigs))
+        {
             return None;
         }
         if let Some(&f) = self.closure_drop.borrow().get(capture_tys) {
@@ -153,14 +196,22 @@ impl<'ctx> Shims<'ctx> {
         }
         let saved_block = m.current_block();
         let f = self.declare_shim(m, false);
-        self.closure_drop.borrow_mut().insert(capture_tys.to_vec(), f);
+        self.closure_drop
+            .borrow_mut()
+            .insert(capture_tys.to_vec(), f);
         let entry = m.append_block(f, "entry");
         m.position_at_end(entry);
         let base = m.param(f, 0);
         let mut fields = vec![m.ptr_type()];
         fields.extend(capture_tys.iter().map(|ty| layout.llvm_type(ty)));
         let env_ty = m.struct_type(&fields);
-        let cx = ShimCx { m, layout, runtime, f, retain: false };
+        let cx = ShimCx {
+            m,
+            layout,
+            runtime,
+            f,
+            retain: false,
+        };
         for (index, capture_ty) in capture_tys.iter().enumerate() {
             if has_heap_content(capture_ty, layout.defs, layout.sigs) {
                 let field = m.struct_gep(env_ty, base, index as u32 + 1, "capture");
@@ -175,7 +226,11 @@ impl<'ctx> Shims<'ctx> {
     fn declare_shim(&self, m: &ModuleCx<'ctx>, retain: bool) -> Func<'ctx> {
         let mut c = self.counter.borrow_mut();
         *c += 1;
-        let name = format!("nether_shim_{}_{}", if retain { "retain" } else { "drop" }, *c);
+        let name = format!(
+            "nether_shim_{}_{}",
+            if retain { "retain" } else { "drop" },
+            *c
+        );
         let fn_ty = m.fn_type(&[m.ptr_type()], None);
         m.declare_function(&name, fn_ty)
     }
@@ -203,13 +258,21 @@ impl<'ctx> ShimCx<'_, 'ctx> {
             // strong count (spec §13) — see `runtime/arc`'s own module
             // docs on why the two counts are tracked separately.
             let ptr = m.load(m.ptr_type(), base, "weak_leaf");
-            let leaf_fn = if self.retain { self.runtime.weak_retain } else { self.runtime.weak_release };
+            let leaf_fn = if self.retain {
+                self.runtime.weak_retain
+            } else {
+                self.runtime.weak_release
+            };
             m.call(leaf_fn, &[ptr], "");
             return;
         }
         if is_heap_leaf(ty, layout.defs) {
             let ptr = m.load(m.ptr_type(), base, "leaf");
-            let leaf_fn = if self.retain { self.runtime.retain } else { self.runtime.release };
+            let leaf_fn = if self.retain {
+                self.runtime.retain
+            } else {
+                self.runtime.release
+            };
             m.call(leaf_fn, &[ptr], "");
             return;
         }
@@ -257,30 +320,36 @@ impl<'ctx> ShimCx<'_, 'ctx> {
 
     fn emit_enum_variants(&self, base: nether_llvm::Value<'ctx>, enum_ty: &Type) {
         let (m, layout) = (self.m, self.layout);
-        let Type::Enum(id, _) = enum_ty else { unreachable!() };
-        let el = layout.enum_layout(enum_ty);
-        let variants_with_content: Vec<(u32, Vec<(u32, Type)>)> = match layout.sigs.enum_sigs.get(id) {
-            Some(sig) => sig
-                .variants
-                .iter()
-                .enumerate()
-                .filter_map(|(vi, _)| {
-                    let payload = layout.sigs.enum_payload(enum_ty, vi as u32).unwrap_or_default();
-                    let fields: Vec<(u32, Type)> = payload
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, t)| has_heap_content(t, layout.defs, layout.sigs))
-                        .map(|(fi, t)| (fi as u32, t.clone()))
-                        .collect();
-                    if fields.is_empty() {
-                        None
-                    } else {
-                        Some((vi as u32, fields))
-                    }
-                })
-                .collect(),
-            None => Vec::new(),
+        let Type::Enum(id, _) = enum_ty else {
+            unreachable!()
         };
+        let el = layout.enum_layout(enum_ty);
+        let variants_with_content: Vec<(u32, Vec<(u32, Type)>)> =
+            match layout.sigs.enum_sigs.get(id) {
+                Some(sig) => sig
+                    .variants
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(vi, _)| {
+                        let payload = layout
+                            .sigs
+                            .enum_payload(enum_ty, vi as u32)
+                            .unwrap_or_default();
+                        let fields: Vec<(u32, Type)> = payload
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, t)| has_heap_content(t, layout.defs, layout.sigs))
+                            .map(|(fi, t)| (fi as u32, t.clone()))
+                            .collect();
+                        if fields.is_empty() {
+                            None
+                        } else {
+                            Some((vi as u32, fields))
+                        }
+                    })
+                    .collect(),
+                None => Vec::new(),
+            };
         if variants_with_content.is_empty() {
             return;
         }
@@ -294,11 +363,18 @@ impl<'ctx> ShimCx<'_, 'ctx> {
             let variant_tag = m.const_int(m.int_type(64), u64::from(*variant), false);
             let is_variant = m.int_compare(IntPredicate::EQ, tag, variant_tag, "is_variant");
             let body = m.append_block(self.f, "shim_body");
-            let next = if i + 1 < variants_with_content.len() { m.append_block(self.f, "shim_check") } else { merge };
+            let next = if i + 1 < variants_with_content.len() {
+                m.append_block(self.f, "shim_check")
+            } else {
+                merge
+            };
             m.cond_br(is_variant, body, next);
             m.position_at_end(body);
             for (field_idx, field_ty) in fields {
-                let gep_index = *el.field_offsets.get(&(*variant, *field_idx)).expect("valid variant/field index");
+                let gep_index = *el
+                    .field_offsets
+                    .get(&(*variant, *field_idx))
+                    .expect("valid variant/field index");
                 let field_ptr = m.struct_gep(el.ty, base, gep_index, "payload_field");
                 self.emit_walk(field_ptr, field_ty);
             }
@@ -319,12 +395,17 @@ fn has_heap_content(ty: &Type, defs: &Definitions, sigs: &Signatures) -> bool {
         Type::String | Type::Array(_) | Type::Function(_, _) | Type::Weak(_) => true,
         Type::Struct(_, _) | Type::TupleStruct(_, _) => match alloc_kind(ty, defs) {
             AllocKind::Heap => true,
-            AllocKind::Stack => fields_of(ty, sigs).iter().any(|t| has_heap_content(t, defs, sigs)),
+            AllocKind::Stack => fields_of(ty, sigs)
+                .iter()
+                .any(|t| has_heap_content(t, defs, sigs)),
         },
         Type::Tuple(elems) => elems.iter().any(|t| has_heap_content(t, defs, sigs)),
         Type::Enum(_, _) => sigs
             .enum_sigs
-            .get(match ty { Type::Enum(id, _) => id, _ => unreachable!() })
+            .get(match ty {
+                Type::Enum(id, _) => id,
+                _ => unreachable!(),
+            })
             .map(|sig| {
                 sig.variants.iter().enumerate().any(|(variant, _)| {
                     sigs.enum_payload(ty, variant as u32)
