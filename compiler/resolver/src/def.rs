@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use nether_ast::{Item, Module, Symbol, TypeExpr};
 use nether_diagnostics::{Diagnostic, FileId};
 
+use crate::resolve::variant_index;
+
 /// Identifies one top-level definition (a primitive, a `type`, an `enum`,
 /// an `interface`, or a `fn`) for the lifetime of one [`resolve`](crate::resolve)
 /// call.
@@ -19,7 +21,8 @@ pub enum DefKind {
     /// A struct, tuple-struct, or unit `type` declaration, or a built-in
     /// heap type (`String`, `Array`).
     Type,
-    /// An `enum` declaration, or a built-in enum (`Option`, `Result`).
+    /// An `enum` declaration — including `Option`/`Result`, ordinary
+    /// generic enums declared in the bundled prelude, not builtins.
     Enum,
     Interface,
     /// A standalone `fn`, or a built-in function (`println`, `print`).
@@ -52,6 +55,23 @@ pub struct Definitions {
     builtins: HashMap<Symbol, DefId>,
     by_file_name: HashMap<(FileId, Symbol), DefId>,
     imports: HashMap<(FileId, Symbol), DefId>,
+    /// Names re-exported by the bundled prelude file (`stdlib/mod.nt`'s
+    /// own top-level `use` declarations) — visible from every file with no
+    /// `use` of their own, like `builtins`, but with lower priority: a
+    /// local declaration of the same name is a legal shadow, not a
+    /// duplicate-definition error (see [`Self::insert_checked`], which
+    /// deliberately does not consult this map). Populated by
+    /// [`collect`](super::collect) once name resolution knows the
+    /// prelude file's own imports.
+    prelude: HashMap<Symbol, DefId>,
+    /// A name bound by `use module.Enum.Variant;` — a variant has no
+    /// `DefId` of its own (unlike a top-level `type`/`enum`/`fn`), so
+    /// this maps straight to its owning enum's `DefId` plus its variant
+    /// index, mirroring `imports`/`prelude` one level down.
+    variant_imports: HashMap<(FileId, Symbol), (DefId, u32)>,
+    /// Like `prelude`, but for a variant name re-exported by the bundled
+    /// prelude file's own `use module.Enum.Variant;` (e.g. `Some`/`None`).
+    variant_prelude: HashMap<Symbol, (DefId, u32)>,
 }
 
 impl Definitions {
@@ -68,11 +88,13 @@ impl Definitions {
             .get(&(file, name.clone()))
             .or_else(|| self.imports.get(&(file, name.clone())))
             .or_else(|| self.builtins.get(name))
+            .or_else(|| self.prelude.get(name))
             .copied()
     }
 
     pub fn visible_in(&self, file: FileId) -> Vec<DefId> {
         let mut ids = self.builtins.values().copied().collect::<Vec<_>>();
+        ids.extend(self.prelude.values().copied());
         ids.extend(
             self.by_file_name
                 .iter()
@@ -86,6 +108,42 @@ impl Definitions {
         ids.sort_by_key(|id| id.0);
         ids.dedup();
         ids
+    }
+
+    /// Re-exports `name` (resolved as seen from the prelude file itself)
+    /// so every other file can see it with no `use`. Never overrides a
+    /// true builtin/primitive of the same name — `lookup_in` already
+    /// checks `builtins` first, but keeping the map itself conflict-free
+    /// avoids depending on lookup order.
+    pub(crate) fn promote_to_prelude(&mut self, name: Symbol, id: DefId) {
+        if !self.builtins.contains_key(&name) {
+            self.prelude.entry(name).or_insert(id);
+        }
+    }
+
+    /// A variant name bound by `use module.Enum.Variant;`, visible from
+    /// `file` — checks a local `use` first, then the prelude's own,
+    /// mirroring [`Self::lookup_in`]'s precedence one level down.
+    pub fn lookup_variant_in(&self, file: FileId, name: &Symbol) -> Option<(DefId, u32)> {
+        self.variant_imports
+            .get(&(file, name.clone()))
+            .or_else(|| self.variant_prelude.get(name))
+            .copied()
+    }
+
+    fn import_variant(&mut self, file: FileId, name: Symbol, target: (DefId, u32)) {
+        if !self.by_file_name.contains_key(&(file, name.clone())) {
+            self.variant_imports.insert((file, name), target);
+        }
+    }
+
+    /// Re-exports a variant name (resolved as seen from the prelude file
+    /// itself) so every other file can see it with no `use` — mirrors
+    /// [`Self::promote_to_prelude`] one level down.
+    pub(crate) fn promote_variant_to_prelude(&mut self, name: Symbol, target: (DefId, u32)) {
+        if !self.builtins.contains_key(&name) {
+            self.variant_prelude.entry(name).or_insert(target);
+        }
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (DefId, &Def)> {
@@ -177,13 +235,18 @@ fn builtin_definitions() -> Definitions {
         defs.insert_builtin(Symbol::new(name), DefKind::Primitive);
     }
     defs.insert_builtin(Symbol::new("String"), DefKind::Type);
-    defs.insert_builtin(Symbol::new("Array"), DefKind::Type);
 
-    let option_id = defs.insert_builtin(Symbol::new("Option"), DefKind::Enum);
-    defs.defs[option_id.0 as usize].variants = vec![Symbol::new("Some"), Symbol::new("None")];
-
-    let result_id = defs.insert_builtin(Symbol::new("Result"), DefKind::Enum);
-    defs.defs[result_id.0 as usize].variants = vec![Symbol::new("Ok"), Symbol::new("Error")];
+    // `Array`, like `Option`/`Result`, is *not* seeded here — it's an
+    // ordinary generic `type Array<T>;` declaration in
+    // `stdlib/array.nt`, reachable everywhere the same way any other name
+    // in the bundled prelude is (`stdlib/mod.nt`'s own `use`, promoted by
+    // `Definitions::promote_to_prelude` — see `nether_driver`'s module
+    // docs). This is what a compiler-builtin generic type actually needs
+    // to be written in Nether source with no special support at all:
+    // `type`/`enum` + `impl<T> Owner<T> { ... }` already exists as
+    // ordinary language features. `String` stays a true builtin above —
+    // it has no user-facing generic parameter and no user `impl` blocks
+    // are expected to extend it.
 
     defs.insert_builtin(Symbol::new("println"), DefKind::Fn);
     defs.insert_builtin(Symbol::new("print"), DefKind::Fn);
@@ -204,7 +267,10 @@ fn builtin_definitions() -> Definitions {
 /// Duplicate top-level names produce a diagnostic and keep the first
 /// definition (so name resolution can still proceed for the rest of the
 /// module rather than cascading unresolved-name errors).
-pub fn collect(module: &Module) -> (Definitions, Vec<Diagnostic>) {
+pub fn collect(
+    module: &Module,
+    prelude_file: Option<FileId>,
+) -> (Definitions, Vec<Diagnostic>) {
     let mut defs = builtin_definitions();
     let mut diags = Vec::new();
 
@@ -323,6 +389,14 @@ pub fn collect(module: &Module) -> (Definitions, Vec<Diagnostic>) {
 
     for item in &module.items {
         let Item::Use(use_decl) = item else { continue };
+        // `use module.Enum.Variant;` is handled by its own loop below —
+        // it's tracked in `variant_imports`, not `imports`, so it must
+        // not also fall into this loop's `declare_imported` fallback
+        // (which would otherwise bind the variant name to a bogus opaque
+        // `DefKind::Imported` placeholder, shadowing the real resolution).
+        if module.variant_imports.contains_key(&use_decl.id) {
+            continue;
+        }
         let Some(imported_name) = use_decl.path.segments.last() else {
             continue;
         };
@@ -340,6 +414,83 @@ pub fn collect(module: &Module) -> (Definitions, Vec<Diagnostic>) {
             }
         } else {
             defs.declare_imported(use_decl.span.file, imported_name.name.clone());
+        }
+    }
+
+    // `use module.Enum.Variant;` — the trailing *two* segments name an
+    // enum and one of its variants within the target file, rather than
+    // the trailing one plain name the loop above handles.
+    for item in &module.items {
+        let Item::Use(use_decl) = item else { continue };
+        let Some(target_file) = module.variant_imports.get(&use_decl.id) else {
+            continue;
+        };
+        let segments = &use_decl.path.segments;
+        let Some(enum_seg) = segments.get(segments.len().wrapping_sub(2)) else {
+            continue;
+        };
+        let Some(variant_seg) = segments.last() else {
+            continue;
+        };
+        match defs
+            .by_file_name
+            .get(&(*target_file, enum_seg.name.clone()))
+            .copied()
+        {
+            Some(id) if defs.get(id).kind == DefKind::Enum => {
+                match variant_index(defs.get(id), &variant_seg.name) {
+                    Some(idx) => defs.import_variant(
+                        use_decl.span.file,
+                        variant_seg.name.clone(),
+                        (id, idx),
+                    ),
+                    None => diags.push(
+                        Diagnostic::error(format!(
+                            "enum `{}` has no member `{}`",
+                            enum_seg.name, variant_seg.name
+                        ))
+                        .with_label(variant_seg.span, "not found in this enum"),
+                    ),
+                }
+            }
+            Some(_) => diags.push(
+                Diagnostic::error(format!("`{}` is not an enum", enum_seg.name))
+                    .with_label(enum_seg.span, "expected an enum"),
+            ),
+            None => diags.push(
+                Diagnostic::error(format!("module does not define `{}`", enum_seg.name))
+                    .with_label(enum_seg.span, "not found in this module"),
+            ),
+        }
+    }
+
+    // The bundled prelude (`stdlib/mod.nt`) re-exports its own top-level
+    // `use` names to every file with no `use` of their own — see
+    // `Definitions::promote_to_prelude`.
+    if let Some(prelude_file) = prelude_file {
+        for item in &module.items {
+            let Item::Use(use_decl) = item else { continue };
+            if use_decl.span.file != prelude_file {
+                continue;
+            }
+            let Some(imported_name) = use_decl.path.segments.last() else {
+                continue;
+            };
+            if let Some(id) = defs.lookup_in(prelude_file, &imported_name.name) {
+                defs.promote_to_prelude(imported_name.name.clone(), id);
+            }
+        }
+        for item in &module.items {
+            let Item::Use(use_decl) = item else { continue };
+            if use_decl.span.file != prelude_file || !module.variant_imports.contains_key(&use_decl.id) {
+                continue;
+            }
+            let Some(name) = use_decl.path.segments.last() else {
+                continue;
+            };
+            if let Some(target) = defs.lookup_variant_in(prelude_file, &name.name) {
+                defs.promote_variant_to_prelude(name.name.clone(), target);
+            }
         }
     }
 

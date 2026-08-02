@@ -1,7 +1,30 @@
 use nether_diagnostics::{Diagnostic, SourceMap};
 use nether_typecheck::check;
 
+/// `Option`/`Result`/`Array` are ordinary prelude declarations now
+/// (`stdlib/option.nt`/`result.nt`/`array.nt`), not compiler builtins —
+/// `check_source` resolves a bare, self-contained `Module` directly
+/// (`nether_resolver::resolve`, no driver, no prelude loading), so every
+/// test source is prepended with a stand-in declaration to keep every
+/// existing test's use of bare `Option`/`Result`/`Array` working
+/// unchanged. Genuinely testing the bundled prelude itself belongs in
+/// `nether_driver`'s own integration tests (e.g.
+/// `bundled_option_and_result_stdlib_runs_end_to_end`).
+const PRELUDE_STUB: &str = r#"
+enum Option<T> {
+    Some(T),
+    None,
+}
+enum Result<T, E> {
+    Ok(T),
+    Error(E),
+}
+type Array<T>;
+"#;
+
 fn check_source(source: &str) -> Vec<Diagnostic> {
+    let source = format!("{PRELUDE_STUB}\n{source}");
+    let source = source.as_str();
     let mut map = SourceMap::new();
     let file = map.add_file("test.nr", source);
     let (module, parse_diags) = nether_parser::parse_module(source, file);
@@ -51,7 +74,7 @@ fn canonical_spec_example_type_checks_cleanly() {
 use lang.Lang;
 
 fn main() {
-    let a = Lang.new("Bobby");
+    let mut a = Lang.new("Bobby");
     a.set_name("Husky");
     println(a.into_string());
 }
@@ -711,6 +734,265 @@ interface B: A {}
 }
 
 #[test]
+fn explicit_generic_impl_block_on_a_builtin_owner_type_checks_and_runs() {
+    // `impl<T> Option<T> { ... }` — the only way to write methods for a
+    // compiler-builtin owner with no local declaration.
+    assert_ok(
+        r#"
+impl<T> Option<T> {
+    unwrap_or(self, fallback: T): T {
+        match self {
+            Some(item) => item,
+            None => fallback,
+        }
+    }
+}
+fn main() {
+    let value: Option<i32> = Option.Some(4);
+    println(`${value.unwrap_or(0)}`);
+}
+"#,
+    );
+}
+
+#[test]
+fn explicit_impl_generics_reject_a_concrete_target_argument_when_impl_has_its_own_generics() {
+    // `impl<T> Option<i32>` mixes the explicit-generic form (`<T>` after
+    // `impl`) with a concrete target argument — neither a pure rename nor
+    // a concrete specialization (which never writes `impl<...>` at all;
+    // see `impl_concrete_specialization_type_checks_and_runs` below), so
+    // it stays rejected.
+    assert_err(
+        "impl<T> Option<i32> { foo(self): bool { true } }\n",
+        "must name each of",
+    );
+}
+
+#[test]
+fn explicit_impl_generics_reject_a_repeated_target_argument() {
+    assert_err(
+        "impl<T> Result<T, T> { foo(self): bool { true } }\n",
+        "must name each of",
+    );
+}
+
+#[test]
+fn explicit_impl_generics_reject_an_unused_impl_parameter() {
+    assert_err(
+        "impl<T, U> Option<T> { foo(self): bool { true } }\n",
+        "must appear",
+    );
+}
+
+#[test]
+fn explicit_impl_generic_owner_infers_from_receiver_with_no_other_use_of_t() {
+    // Regression: `is_some` doesn't mention `T` in its params/return, so
+    // its only source for `T` is the receiver's own concrete type
+    // (`Option<i32>` -> `T = i32`), not structural inference over the
+    // call's ordinary arguments (there are none here).
+    assert_ok(
+        r#"
+impl<T> Option<T> {
+    is_some(self): bool {
+        match self {
+            Some(_) => true,
+            None => false,
+        }
+    }
+}
+fn main() {
+    let value: Option<i32> = Option.Some(4);
+    println(`${value.is_some()}`);
+}
+"#,
+    );
+}
+
+#[test]
+fn explicit_impl_generics_reject_wrong_arity() {
+    assert_err(
+        "impl<T> Result<T> { foo(self): bool { true } }\n",
+        "takes 2 type argument(s), found 1",
+    );
+}
+
+#[test]
+fn impl_concrete_specialization_type_checks_and_runs() {
+    // `impl Option<i32> { ... }` — a concrete specialization, coexisting
+    // with the generic `impl<T> Option<T> { ... }` version. Positional
+    // renaming (Phase 1) rejected this shape; specialization (Phase 3)
+    // accepts it as long as the specialized method's signature matches
+    // the generic one once substituted (below).
+    assert_ok(
+        r#"
+impl<T> Option<T> {
+    describe(self): String {
+        "generic"
+    }
+}
+impl Option<i32> {
+    describe(self): String {
+        "int"
+    }
+}
+fn main() {
+    println(Option.Some(4).describe());
+    println(Option.Some("text").describe());
+}
+"#,
+    );
+}
+
+#[test]
+fn impl_specialization_only_method_is_visible_only_on_its_own_concrete_type() {
+    // A method that exists *only* as a specialization (no generic
+    // counterpart) is a legal, narrower inherent method — but only
+    // callable on that exact concrete instantiation.
+    assert_ok(
+        r#"
+impl Option<i32> {
+    double(self): i32 {
+        match self {
+            Some(item) => item * 2,
+            None => 0,
+        }
+    }
+}
+fn main() {
+    println(`${Option.Some(4).double()}`);
+}
+"#,
+    );
+    assert_err(
+        r#"
+impl Option<i32> {
+    double(self): i32 { 0 }
+}
+fn main() {
+    let value: Option<String> = Option.Some("x");
+    value.double();
+}
+"#,
+        "has no method named `double`",
+    );
+}
+
+#[test]
+fn impl_specialization_rejects_duplicate_registration() {
+    assert_err(
+        r#"
+impl Option<i32> { double(self): i32 { 0 } }
+impl Option<i32> { double(self): i32 { 1 } }
+"#,
+        "defined more than once for this specialization",
+    );
+}
+
+#[test]
+fn impl_specialization_rejects_a_signature_mismatch_with_the_generic_impl() {
+    assert_err(
+        r#"
+impl<T> Option<T> {
+    describe(self): String { "generic" }
+}
+impl Option<i32> {
+    describe(self): i32 { 0 }
+}
+"#,
+        "must have the same signature",
+    );
+}
+
+#[test]
+fn impl_specialization_rejects_static_methods() {
+    assert_err(
+        "impl Option<i32> { make(): i32 { 0 } }\n",
+        "cannot override a static method",
+    );
+}
+
+#[test]
+fn impl_specialization_rejects_interfaces() {
+    assert_err(
+        r#"
+interface Sound { sound(self): String; }
+impl Option<i32>: Sound {
+    sound(self): String { "beep" }
+}
+"#,
+        "cannot also implement an interface",
+    );
+}
+
+#[test]
+fn variadic_parameter_accepts_zero_or_more_trailing_arguments() {
+    assert_ok(
+        r#"
+fn count(items: ...i32): usize {
+    items.len()
+}
+fn main() {
+    let a = count();
+    let b = count(1);
+    let c = count(1, 2, 3);
+}
+"#,
+    );
+}
+
+#[test]
+fn variadic_element_type_is_array_inside_the_function_body() {
+    assert_ok(
+        r#"
+fn first_len(items: ...i32): usize {
+    let arr: Array<i32> = items;
+    arr.len()
+}
+"#,
+    );
+}
+
+#[test]
+fn variadic_string_element_accepts_any_into_string_value() {
+    // Mirrors template-string interpolation's coercion — a variadic
+    // `...String` parameter isn't limited to literal `String` arguments.
+    assert_ok(
+        r#"
+fn show(args: ...String) {}
+fn main() {
+    show(1, true, "text");
+}
+"#,
+    );
+}
+
+#[test]
+fn variadic_non_string_element_still_requires_a_compatible_type() {
+    assert_err(
+        r#"
+fn count(items: ...i32) {}
+fn main() {
+    count("not a number");
+}
+"#,
+        "expected `i32`, found `String`",
+    );
+}
+
+#[test]
+fn variadic_call_requires_at_least_the_fixed_argument_count() {
+    assert_err(
+        r#"
+fn f(a: i32, rest: ...i32) {}
+fn main() {
+    f();
+}
+"#,
+        "expected at least 1 argument(s), found 0",
+    );
+}
+
+#[test]
 fn generic_type_bounds_are_enforced_after_inference() {
     assert_ok(
         r#"
@@ -931,8 +1213,145 @@ fn assigning_to_immutable_binding_is_rejected() {
 }
 
 #[test]
+fn field_assignment_through_an_immutable_binding_is_rejected() {
+    // Rust-like mutation enforcement: a binding must be `mut` to mutate
+    // through it — directly, via a field (at any depth), or via a `mut
+    // self` method call — for both stack and heap types, with no
+    // heap-only exemption.
+    assert_err(
+        r#"
+type Dog { name: String }
+impl Dog {
+    rename(mut self, new_name: String) {
+        self.name = new_name;
+    }
+}
+fn main() {
+    let d = Dog { name: "Rex" };
+    d.name = "Buddy";
+}
+"#,
+        "declare it with `let mut`",
+    );
+    assert_ok(
+        r#"
+type Dog { name: String }
+fn main() {
+    let mut d = Dog { name: "Rex" };
+    d.name = "Buddy";
+}
+"#,
+    );
+}
+
+#[test]
+fn calling_a_mut_self_method_through_an_immutable_receiver_is_rejected() {
+    assert_err(
+        r#"
+type Dog { name: String }
+impl Dog {
+    rename(mut self, new_name: String) {
+        self.name = new_name;
+    }
+}
+fn main() {
+    let d = Dog { name: "Rex" };
+    d.rename("Buddy");
+}
+"#,
+        "cannot call a `mut self` method",
+    );
+    assert_ok(
+        r#"
+type Dog { name: String }
+impl Dog {
+    rename(mut self, new_name: String) {
+        self.name = new_name;
+    }
+}
+fn main() {
+    let mut d = Dog { name: "Rex" };
+    d.rename("Buddy");
+}
+"#,
+    );
+}
+
+#[test]
+fn mut_self_method_call_on_a_field_of_mut_self_is_allowed() {
+    // A nested field-path rooted at a `mut self` receiver is itself a
+    // mutable place — `self.dog.rename()` is legal inside a `mut self`
+    // method, matching `self.field = x`'s own root-local rule.
+    assert_ok(
+        r#"
+type Dog { name: String }
+impl Dog {
+    rename(mut self, new_name: String) {
+        self.name = new_name;
+    }
+}
+type Holder { dog: Dog }
+impl Holder {
+    rename_dog(mut self, new_name: String) {
+        self.dog.rename(new_name);
+    }
+}
+fn main() {
+    let mut h = Holder { dog: Dog { name: "Rex" } };
+    h.rename_dog("Buddy");
+}
+"#,
+    );
+}
+
+#[test]
+fn array_push_and_pop_require_a_mutable_binding() {
+    assert_err(
+        "fn main() { let a = [1, 2]; a.push(3); }",
+        "cannot call a `mut self` method",
+    );
+    assert_err(
+        "fn main() { let a = [1, 2]; a.pop(); }",
+        "cannot call a `mut self` method",
+    );
+    assert_ok("fn main() { let mut a = [1, 2]; a.push(3); a.pop(); }");
+    // `len` doesn't mutate, so it stays legal on a non-`mut` binding.
+    assert_ok("fn main() { let a = [1, 2]; let n = a.len(); }");
+}
+
+#[test]
 fn return_type_mismatch_is_reported() {
     assert_err("fn f(): i32 { return \"x\"; }", "expected return type");
+}
+
+#[test]
+fn block_with_no_tail_but_a_diverging_last_statement_types_as_never() {
+    // A block with no explicit tail expression used to always type as
+    // `()`, even when its last (or only) statement unconditionally
+    // diverges — `return`/`break`/`continue` written with a trailing
+    // semicolon are ordinary `Stmt::Expr`s, whose `Type::Never` was
+    // computed and then discarded.
+    assert_ok("fn foo(a: i32): i32 { return a; }");
+    // There's no dead-code diagnostic in this language, so a diverging
+    // statement isn't necessarily the last one — the block must still
+    // type as `Never`, not fall back to `()`, when an earlier statement
+    // diverges.
+    assert_ok("fn foo(a: i32): i32 { return a; let y = 1; }");
+    // Both `if`/`else` branches diverging, as ordinary statements inside
+    // a fn body with no tail.
+    assert_ok(
+        r#"
+fn foo(a: i32): i32 {
+    if a > 0 {
+        return a;
+    } else {
+        return 0 - a;
+    }
+}
+"#,
+    );
+    // A diverging `let` initializer also propagates.
+    assert_ok("fn foo(a: i32): i32 { let x = return a; }");
 }
 
 #[test]
@@ -952,6 +1371,62 @@ fn array_builtin_methods_type_check() {
     );
     assert_err(
         "fn main() { let mut a = [1, 2]; a.push(\"x\"); }",
+        "found `String`",
+    );
+}
+
+#[test]
+fn user_defined_impl_on_array_type_checks_and_self_sees_builtin_operations() {
+    // `Array<T>` is an ordinary generic type declared in the bundled
+    // prelude (`stdlib/array.nt`) now, not a closed compiler builtin — a
+    // user `impl<T> Array<T>` block's `self` types as `Array<T>` and can
+    // freely mix a user-defined method (`sum`, calling itself indirectly
+    // via `for_each`) with the still-runtime-backed builtins (`len`,
+    // indexing).
+    assert_ok(
+        r#"
+impl<T> Array<T> {
+    for_each(mut self, f: (T) => ()) {
+        let mut i: usize = 0;
+        while i < self.len() {
+            f(self[i]);
+            i = i + 1;
+        }
+    }
+}
+
+fn main() {
+    let mut a = [1, 2, 3];
+    a.for_each((v: i32) => {
+        println(`${v}`);
+    });
+}
+"#,
+    );
+}
+
+#[test]
+fn user_defined_array_method_rejects_a_receiver_type_mismatch() {
+    // The user method's own parameter types are still checked normally —
+    // `Array<T>`'s builtin fast path (`len`/`push`/`pop`/indexing) staying
+    // hardcoded doesn't exempt everything else from ordinary type checking.
+    assert_err(
+        r#"
+impl<T> Array<T> {
+    first_or(self, fallback: T): T {
+        if self.len() > 0 {
+            self[0]
+        } else {
+            fallback
+        }
+    }
+}
+
+fn main() {
+    let a = [1, 2, 3];
+    let x = a.first_or("nope");
+}
+"#,
         "found `String`",
     );
 }

@@ -1,7 +1,7 @@
-fn main(): () {
-    let a = foo<u32>(2);
+fn main() {
+    println(`${foo(2)}`);
 }
 
-fn foo<T>(a: T): T {
-    a
+fn foo(a: i32): i32 {
+    return a;
 }

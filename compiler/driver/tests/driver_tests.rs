@@ -59,7 +59,7 @@ fn explicit<T>(value: i32): i32 {
 }
 
 fn main() {
-    let a = Dog.new("Bobby");
+    let mut a = Dog.new("Bobby");
     a.set_name("Husky");
     println(a.into_string());
     println(a.name);
@@ -300,19 +300,21 @@ fn bundled_option_and_result_stdlib_runs_end_to_end() {
     let dir = std::env::temp_dir().join(format!("nether_stdlib_test_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let entry = dir.join("main.nr");
+    // `Option.unwrap_or`/`.map` and `Result.unwrap_or`/`.map` both come
+    // from the bundled prelude (`stdlib/mod.nt` always loads
+    // `stdlib/option.nt`/`stdlib/result.nt`, which declare them with the
+    // explicit `impl<T> Option<T> { ... }`/`impl<T, E> Result<T, E> {
+    // ... }` form — the only way to bind a type parameter for a builtin
+    // owner with no local declaration) — no `use`/`impl` of their own
+    // methods needed here at all.
     std::fs::write(
         &entry,
         r#"
-use stdlib.option.option_map;
-use stdlib.option.option_unwrap_or;
-use stdlib.result.result_map;
-use stdlib.result.result_unwrap_or;
-
 fn main() {
-    let mapped = option_map(Option.Some(4), (x: i32) => { x + 1 });
-    println(`${option_unwrap_or(mapped, 0)}`);
-    let result: Result<i32, String> = result_map(Result.Ok(6), (x: i32) => { x + 1 });
-    println(`${result_unwrap_or(result, 0)}`);
+    let mapped = Option.Some(4).map((x: i32) => { x + 1 });
+    println(`${mapped.unwrap_or(0)}`);
+    let ok: Result<i32, String> = Result.Ok(6);
+    println(`${ok.map((x: i32) => { x + 1 }).unwrap_or(0)}`);
 }
 "#,
     )
@@ -331,6 +333,353 @@ fn main() {
         .unwrap();
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), "5\n7\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn bare_enum_variant_names_from_use_module_enum_variant_run_end_to_end() {
+    // `stdlib/mod.nt` writes `use option.Option.Some;` / `use
+    // option.Option.None;` / `use result.Result.Ok;` / `use
+    // result.Result.Error;` — a 3-segment `use module.Enum.Variant;`
+    // path reaching one level into an enum for one of its variants,
+    // promoted into the bundled prelude so every file gets bare
+    // `Some`/`None`/`Ok`/`Error` in *expression* position (not just in
+    // `match` patterns, which already worked via `find_unique_variant`
+    // with no `use` needed at all).
+    ensure_runtime_built();
+    let dir = std::env::temp_dir().join(format!("nether_bare_variant_test_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.nr");
+    std::fs::write(
+        &entry,
+        r#"
+fn describe(x: Option<i32>): String {
+    match x {
+        Some(v) => `got ${v}`,
+        None => "nothing",
+    }
+}
+
+fn main() {
+    let a = Some(4);
+    let b: Option<i32> = None;
+    println(describe(a));
+    println(describe(b));
+
+    let r: Result<i32, String> = Ok(7);
+    match r {
+        Ok(v) => println(`ok ${v}`),
+        Error(e) => println(`err ${e}`),
+    }
+}
+"#,
+    )
+    .unwrap();
+    let result = nether_driver::check(&entry).unwrap();
+    assert!(
+        !result
+            .diagnostics
+            .iter()
+            .any(nether_diagnostics::Diagnostic::is_error),
+        "unexpected diagnostics: {:?}",
+        result.diagnostics
+    );
+    let output = Command::new(result.executable_path.unwrap())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "got 4\nnothing\nok 7\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn use_enum_variant_path_rejects_an_unknown_module_member() {
+    let dir = std::env::temp_dir().join(format!("nether_variant_bad_member_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("helper.nt"), "enum Color { Red, Green }\n").unwrap();
+    let entry = dir.join("main.nt");
+    std::fs::write(
+        &entry,
+        "mod helper;\nuse self.helper.Bogus.Thing;\nfn main() {}\n",
+    )
+    .unwrap();
+    let result = nether_driver::check(&entry).unwrap();
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("module does not define `Bogus`")),
+        "{:?}",
+        result.diagnostics
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn use_enum_variant_path_rejects_an_unknown_variant() {
+    let dir = std::env::temp_dir().join(format!("nether_variant_bad_variant_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("helper.nt"), "enum Color { Red, Green }\n").unwrap();
+    let entry = dir.join("main.nt");
+    std::fs::write(
+        &entry,
+        "mod helper;\nuse self.helper.Color.Purple;\nfn main() {}\n",
+    )
+    .unwrap();
+    let result = nether_driver::check(&entry).unwrap();
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("enum `Color` has no member `Purple`")),
+        "{:?}",
+        result.diagnostics
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn use_enum_variant_path_rejects_a_non_enum_target() {
+    let dir = std::env::temp_dir().join(format!("nether_variant_not_enum_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("helper.nt"), "type Shape;\n").unwrap();
+    let entry = dir.join("main.nt");
+    std::fs::write(
+        &entry,
+        "mod helper;\nuse self.helper.Shape.Thing;\nfn main() {}\n",
+    )
+    .unwrap();
+    let result = nether_driver::check(&entry).unwrap();
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("`Shape` is not an enum")),
+        "{:?}",
+        result.diagnostics
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn mod_std_alias_loads_the_bundled_stdlib_root_without_conflict() {
+    // `mod std;` mounts the same bundled `stdlib/` tree the always-on
+    // prelude already loads (`load_module_graph`), under the name `std` —
+    // `resolve_use_module`'s `std`/`stdlib` fallback branches both point
+    // at the same `bundled_stdlib_root()`. Everything currently bundled
+    // (`stdlib/option.nt`/`result.nt`) is `impl`-only with no top-level
+    // name to `use`, so this exercises the *file-loading* half of the
+    // alias specifically: an explicit `mod std;` must not conflict with
+    // (double-register, duplicate-diagnostic) the same file the prelude
+    // already loaded unconditionally, and `Option`/`Result`'s bundled
+    // methods must keep working with it present.
+    ensure_runtime_built();
+    let dir = std::env::temp_dir().join(format!("nether_std_alias_test_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.nr");
+    std::fs::write(
+        &entry,
+        r#"
+mod std;
+
+fn main() {
+    println(`${Option.Some(4).unwrap_or(0)}`);
+    let ok: Result<i32, String> = Result.Ok(6);
+    println(`${ok.map((x: i32) => { x + 1 }).unwrap_or(0)}`);
+}
+"#,
+    )
+    .unwrap();
+    let result = nether_driver::check(&entry).unwrap();
+    assert!(
+        !result
+            .diagnostics
+            .iter()
+            .any(nether_diagnostics::Diagnostic::is_error),
+        "unexpected diagnostics: {:?}",
+        result.diagnostics
+    );
+    let output = Command::new(result.executable_path.unwrap())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "4\n7\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn concrete_specialization_overrides_the_generic_impl() {
+    // `impl Option<i32> { ... }` overrides `impl<T> Option<T> { ... }`
+    // only for `T = i32`; every other `T` keeps using the generic
+    // version. Monomorphization re-resolves the call after receiver-type
+    // substitution rather than trusting a fixed target picked once at HIR
+    // lowering time (`HirExprKind::CallMethod`) specifically so this
+    // override can also apply *through* a call site inside another
+    // still-generic function — not exercised here, since Nether cannot
+    // currently call a generic method/function from inside another
+    // still-generic one at all (`collect_generic_bindings` refuses to
+    // bind one generic parameter to another still-symbolic one — a
+    // separate, pre-existing gap unrelated to specialization; e.g. even
+    // `fn wrap<U>(x: U): U { identity(x) }` is rejected today). This test
+    // covers every call shape that gap does not block.
+    ensure_runtime_built();
+    let dir = std::env::temp_dir().join(format!("nether_specialization_test_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.nr");
+    std::fs::write(
+        &entry,
+        r#"
+impl<T> Option<T> {
+    describe(self): String {
+        "generic"
+    }
+}
+
+impl Option<i32> {
+    describe(self): String {
+        "int"
+    }
+}
+
+fn main() {
+    println(Option.Some(4).describe());
+    println(Option.Some("text").describe());
+    println(Option.Some(true).describe());
+}
+"#,
+    )
+    .unwrap();
+    let result = nether_driver::check(&entry).unwrap();
+    assert!(
+        !result
+            .diagnostics
+            .iter()
+            .any(nether_diagnostics::Diagnostic::is_error),
+        "unexpected diagnostics: {:?}",
+        result.diagnostics
+    );
+    let output = Command::new(result.executable_path.unwrap())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "int\ngeneric\ngeneric\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn variadic_parameter_collects_trailing_arguments_into_an_array() {
+    // `args: ...i32` is sugar for an ordinary `Array<i32>` parameter — the
+    // call site collects zero or more trailing arguments into it
+    // automatically (`nether_hir::lower::lower_variadic_aware_args`).
+    // Called repeatedly with different argument counts in one program,
+    // since a real (now-fixed) bug only showed up under exactly that
+    // pattern — see this repo's `docs/generics.md` note on it for the
+    // details of what does and doesn't reproduce it.
+    ensure_runtime_built();
+    let dir = std::env::temp_dir().join(format!("nether_variadic_test_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.nr");
+    std::fs::write(
+        &entry,
+        r#"
+fn sum(items: ...i32): i32 {
+    let mut total = 0;
+    for item in items {
+        total = total + item;
+    }
+    total
+}
+
+fn main() {
+    println(`${sum()}`);
+    println(`${sum(1)}`);
+    println(`${sum(1, 2, 3)}`);
+    println(`${sum(1, 2, 3, 4, 5)}`);
+}
+"#,
+    )
+    .unwrap();
+    let result = nether_driver::check(&entry).unwrap();
+    assert!(
+        !result
+            .diagnostics
+            .iter()
+            .any(nether_diagnostics::Diagnostic::is_error),
+        "unexpected diagnostics: {:?}",
+        result.diagnostics
+    );
+    let output = Command::new(result.executable_path.unwrap())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "0\n1\n6\n15\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Known, unresolved, pre-existing memory-safety bug — `#[ignore]`d
+/// because it reliably `SIGSEGV`s (or `SIGBUS`es) the *whole* test
+/// process if run without isolation (all `#[test]` fns in this binary
+/// share one process), not because it's slow. Run in isolation with
+/// `cargo test -p nether-driver --test driver_tests -- --ignored
+/// string_concatenation_by_reassignment_inside_a_loop_over_an_array_parameter_corrupts_memory`
+/// to reproduce; do not remove `#[ignore]` until it's fixed.
+///
+/// Minimal repro: a function taking an `Array<String>` (or `...String`
+/// — variadics are not implicated; see `docs/generics.md`), iterated with
+/// `for x in items { result = \`${result}${x}\`; }`, reassigning a
+/// `String` local via template-string concatenation each turn. Called
+/// once from `main` with an already-concrete receiver it's fine; called
+/// from inside another function taking the array as its own parameter,
+/// it corrupts memory non-deterministically (sometimes wrong output,
+/// sometimes a crash, depending on unrelated heap state). Predates every
+/// change in this session — reproduces on plain arrays with no
+/// specialization, no `impl` blocks, and no variadics involved at all.
+#[test]
+#[ignore]
+fn string_concatenation_by_reassignment_inside_a_loop_over_an_array_parameter_corrupts_memory() {
+    ensure_runtime_built();
+    let dir = std::env::temp_dir().join(format!("nether_known_bug_test_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.nr");
+    std::fs::write(
+        &entry,
+        r#"
+fn joined(parts: Array<String>): String {
+    let mut result = "";
+    for part in parts {
+        result = `${result}${part}`;
+    }
+    result
+}
+
+fn main() {
+    println(joined([]));
+    println(joined(["a"]));
+    println(joined(["a", "b", "c"]));
+}
+"#,
+    )
+    .unwrap();
+    let result = nether_driver::check(&entry).unwrap();
+    assert!(!result
+        .diagnostics
+        .iter()
+        .any(nether_diagnostics::Diagnostic::is_error));
+    let output = Command::new(result.executable_path.unwrap())
+        .output()
+        .unwrap();
+    // Expected once fixed. Today this either fails this assertion with
+    // garbled stdout or the whole process dies to a signal first.
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "\na\nabc\n");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -411,7 +760,7 @@ fn main() {
     println(`${tuple.1}`);
 
     let child = Child { name: "live" };
-    let holder = Holder { child: Child { name: "old" } };
+    let mut holder = Holder { child: Child { name: "old" } };
     holder.child.name = "changed";
     println(holder.child.name);
     let parent = Parent { child };

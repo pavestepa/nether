@@ -46,7 +46,7 @@ fn quest_text(state: QuestState): String {
     }
 }
 
-fn apply_event(hero: Hero, event: Event): String {
+fn apply_event(mut hero: Hero, event: Event): String {
     match event {
         Event.Found(points) => {
             hero.add_score(points);

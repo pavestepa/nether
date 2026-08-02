@@ -1,13 +1,14 @@
 use std::collections::{HashMap, HashSet};
 
 use nether_ast::{
-    BinaryOp, Block, EnumDecl, Expr, ExprKind, FnDecl, Ident, InterfaceDecl, Item, Literal, Module,
-    NodeId, Path, Pattern, Stmt, Symbol, TemplatePart, TypeDecl, TypeDeclKind, TypeExpr, UnaryOp,
+    BinaryOp, Block, EnumDecl, Expr, ExprKind, FnDecl, Ident, ImplBlock, InterfaceDecl, Item,
+    Literal, Module, NodeId, Path, Pattern, SelfParam, Stmt, Symbol, TemplatePart, TypeDecl,
+    TypeDeclKind, TypeExpr, UnaryOp,
 };
 use nether_diagnostics::{Diagnostic, Span};
 use nether_resolver::{DefId, DefKind, Resolution, ResolvedNames};
 
-use crate::sig::{EnumSig, FnSig, GenericBound, Signatures, TypeShape};
+use crate::sig::{EnumSig, FnSig, GenericBound, MethodSet, Signatures, TypeShape};
 use crate::ty::{PrimitiveKind, Type};
 
 /// Every result of one [`check`] call.
@@ -157,15 +158,15 @@ fn lower_named_type(
             }
             match def.kind {
                 DefKind::Enum => {
+                    // `Option`/`Result` are ordinary prelude `enum`s now
+                    // (`stdlib/option.nt`/`result.nt`), so they always
+                    // have a `decls.enum_decls` entry like any other enum
+                    // — no builtin-arity fallback needed.
                     let expected = decls
                         .enum_decls
                         .get(&id)
                         .map(|decl| decl.generics.len())
-                        .unwrap_or_else(|| match name {
-                            "Option" => 1,
-                            "Result" => 2,
-                            _ => 0,
-                        });
+                        .unwrap_or(0);
                     if generics.len() != expected {
                         diags.push(
                             Diagnostic::error(format!(
@@ -327,6 +328,7 @@ fn build_fn_sig(
         .map(|p| crate::sig::ParamSig {
             name: p.name.name.clone(),
             mutable: p.mutable,
+            variadic: p.variadic,
             ty: lower_type_expr(&p.ty, resolved, decls, diags),
         })
         .collect();
@@ -394,38 +396,10 @@ fn build_enum_sigs(
     sigs: &mut Signatures,
     diags: &mut Vec<Diagnostic>,
 ) {
-    // Option/Result are ordinary built-in generic enums.  They have no AST
-    // declarations, so their structural signatures must be seeded here
-    // explicitly just like their names/variants are seeded by resolver.
-    if let Some(id) = resolved.definitions.lookup(&Symbol::new("Option")) {
-        let t = Symbol::new("T");
-        sigs.enum_sigs.insert(
-            id,
-            EnumSig {
-                generics: vec![t.clone()],
-                variants: vec![
-                    (Symbol::new("Some"), vec![Type::Generic(t)]),
-                    (Symbol::new("None"), Vec::new()),
-                ],
-            },
-        );
-        sigs.generic_type_bounds.insert(id, vec![None]);
-    }
-    if let Some(id) = resolved.definitions.lookup(&Symbol::new("Result")) {
-        let t = Symbol::new("T");
-        let e = Symbol::new("E");
-        sigs.enum_sigs.insert(
-            id,
-            EnumSig {
-                generics: vec![t.clone(), e.clone()],
-                variants: vec![
-                    (Symbol::new("Ok"), vec![Type::Generic(t)]),
-                    (Symbol::new("Error"), vec![Type::Generic(e)]),
-                ],
-            },
-        );
-        sigs.generic_type_bounds.insert(id, vec![None, None]);
-    }
+    // `Option`/`Result` need no seeding here — they're ordinary `enum`
+    // items in the bundled prelude (`stdlib/option.nt`/`result.nt`), so
+    // the loop below already covers them exactly like any user-declared
+    // generic enum.
     for item in &module.items {
         let Item::Enum(e) = item else { continue };
         let Some(id) = resolved.definitions.lookup_in(e.span.file, &e.name.name) else {
@@ -504,6 +478,7 @@ fn specialize_fn_sig(sig: &FnSig, subst: &HashMap<Symbol, Type>) -> FnSig {
             .map(|param| crate::sig::ParamSig {
                 name: param.name.clone(),
                 mutable: param.mutable,
+                variadic: param.variadic,
                 ty: substitute_generic(&param.ty, subst),
             })
             .collect(),
@@ -571,6 +546,223 @@ fn owner_generic_params(
             )
         })
         .collect()
+}
+
+/// The number of type arguments `owner` takes — a declared type's or
+/// enum's own `generics.len()` (`Option`/`Result` included: ordinary
+/// prelude `enum`s, not builtins, so they always have a declaration to
+/// read here), `0` for anything else (a primitive, an interface, ...).
+fn owner_arity(owner: DefId, decls: &DeclIndex) -> usize {
+    decls
+        .type_decls
+        .get(&owner)
+        .map(|decl| decl.generics.len())
+        .or_else(|| decls.enum_decls.get(&owner).map(|decl| decl.generics.len()))
+        .unwrap_or(0)
+}
+
+/// Owner generics for `impl<T, ...> Target<...> { ... }` — the explicit
+/// Rust-like form ([`nether_ast::ImplBlock::generics`] non-empty). Unlike
+/// the implicit form (whose scope is read straight off the target's own
+/// declaration, see [`owner_generic_params`]), this form is the only way
+/// to bind a name for a builtin owner such as `Option`/`Result` that has
+/// no declaration to read parameters from.
+///
+/// `target_args` is deliberately restricted to a bare permutation of the
+/// impl's own declared generic names, in the owner's positional order —
+/// pure renaming, not specialization. `impl Option<i32>` (a concrete
+/// argument) or `impl<T, U> Option<T>` (an unused impl parameter) are
+/// rejected; only `impl<T> Option<T>` is accepted here (MVP scope —
+/// concrete/specialized impls are a separate, not-yet-supported feature).
+fn explicit_impl_owner_generics(
+    block: &ImplBlock,
+    owner: DefId,
+    decls: &DeclIndex,
+    resolved: &ResolvedNames,
+    diags: &mut Vec<Diagnostic>,
+) -> Vec<(Symbol, Option<GenericBound>)> {
+    let owner_name = resolved.definitions.get(owner).name.clone();
+    let expected = owner_arity(owner, decls);
+
+    let fallback = |diags: &mut Vec<Diagnostic>| {
+        block
+            .generics
+            .iter()
+            .map(|g| {
+                (
+                    g.name.name.clone(),
+                    g.bound
+                        .as_ref()
+                        .and_then(|bound| lower_generic_bound(bound, resolved, decls, diags)),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    if block.target_args.len() != expected {
+        diags.push(
+            Diagnostic::error(format!(
+                "`{owner_name}` takes {expected} type argument(s), found {}",
+                block.target_args.len()
+            ))
+            .with_label(block.span, "in this `impl` block"),
+        );
+        return fallback(diags);
+    }
+
+    let mut used = HashSet::new();
+    let mut ordered_names = Vec::with_capacity(block.target_args.len());
+    let mut ok = true;
+    for arg in &block.target_args {
+        let named = match arg {
+            TypeExpr::Named {
+                path, generics, ..
+            } if generics.is_empty() && path.segments.len() == 1 => block
+                .generics
+                .iter()
+                .find(|g| g.name.name == path.segments[0].name)
+                .map(|g| g.name.name.clone()),
+            _ => None,
+        };
+        match named {
+            Some(name) if used.insert(name.clone()) => ordered_names.push(name),
+            _ => {
+                ok = false;
+                diags.push(
+                    Diagnostic::error(
+                        "an explicit `impl<...> Target<...>` argument list must name each of \
+                         the impl's own generic parameters exactly once (no concrete types, no \
+                         repeats)",
+                    )
+                    .with_label(arg.span(), "not one of this impl's generic parameters"),
+                );
+            }
+        }
+    }
+    if ok && ordered_names.len() != block.generics.len() {
+        ok = false;
+        diags.push(
+            Diagnostic::error(format!(
+                "every one of this `impl`'s generic parameters must appear in `{owner_name}<...>`"
+            ))
+            .with_label(block.span, "in this `impl` block"),
+        );
+    }
+    if !ok {
+        return fallback(diags);
+    }
+
+    ordered_names
+        .into_iter()
+        .map(|name| {
+            let bound = block
+                .generics
+                .iter()
+                .find(|g| g.name.name == name)
+                .and_then(|g| g.bound.as_ref())
+                .and_then(|bound| lower_generic_bound(bound, resolved, decls, diags));
+            (name, bound)
+        })
+        .collect()
+}
+
+/// Dispatches to the implicit, explicit-generic, or concrete-specialization
+/// form depending on what `block` wrote — the one place `build_impl_methods`
+/// needs to look up an impl block's generic scope. A concrete
+/// specialization (`impl Option<i32> { ... }`, [`impl_specialization_args`])
+/// has no generic parameters at all in scope for its own methods: every
+/// field the `self` receiver could mention is already a concrete type.
+fn owner_generics_for_impl(
+    block: &ImplBlock,
+    owner: DefId,
+    decls: &DeclIndex,
+    resolved: &ResolvedNames,
+    diags: &mut Vec<Diagnostic>,
+) -> Vec<(Symbol, Option<GenericBound>)> {
+    if !block.generics.is_empty() {
+        explicit_impl_owner_generics(block, owner, decls, resolved, diags)
+    } else if block.target_args.is_empty() {
+        owner_generic_params(owner, decls, resolved, diags)
+    } else {
+        Vec::new()
+    }
+}
+
+/// Whether `block` is a concrete specialization — `impl Option<i32> {
+/// ... }`, no `impl<...>` generics of its own but a fully concrete
+/// `target_args` list (necessarily concrete: with no generics pushed into
+/// scope for this block, `resolver` could only have resolved each
+/// `target_args` entry to an actual declared type, never a generic
+/// parameter — see `resolver::resolve_impl_block`'s explicit-form
+/// branch). `None` for every other block shape, including on an arity
+/// mismatch (already diagnosed here; the caller falls back to treating it
+/// as an ordinary non-specialized block).
+fn impl_specialization_args(
+    block: &ImplBlock,
+    owner: DefId,
+    decls: &DeclIndex,
+    resolved: &ResolvedNames,
+    diags: &mut Vec<Diagnostic>,
+) -> Option<Vec<Type>> {
+    if !block.generics.is_empty() || block.target_args.is_empty() {
+        return None;
+    }
+    let owner_name = resolved.definitions.get(owner).name.clone();
+    let expected = owner_arity(owner, decls);
+    if block.target_args.len() != expected {
+        diags.push(
+            Diagnostic::error(format!(
+                "`{owner_name}` takes {expected} type argument(s), found {}",
+                block.target_args.len()
+            ))
+            .with_label(block.span, "in this `impl` block"),
+        );
+        return None;
+    }
+    Some(
+        block
+            .target_args
+            .iter()
+            .map(|arg| lower_type_expr(arg, resolved, decls, diags))
+            .collect(),
+    )
+}
+
+/// Whether a concrete specialization's method signature (`concrete_sig`,
+/// declared with no generics of its own beyond the method's own extra
+/// ones) matches the generic impl's signature for the same method name,
+/// once the generic impl's own owner parameters are substituted with
+/// `concrete_args`. Specialization may only override a method's body, not
+/// its externally observable type — required so that a still-generic
+/// caller (which can only ever see the generic signature, since it
+/// doesn't know which concrete override will apply until monomorphized)
+/// never disagrees with what actually runs.
+fn specialization_matches_generic(
+    owner: DefId,
+    decls: &DeclIndex,
+    generic_sig: &FnSig,
+    concrete_args: &[Type],
+    concrete_sig: &FnSig,
+) -> bool {
+    let owner_arity = owner_arity(owner, decls);
+    if generic_sig.self_param != concrete_sig.self_param
+        || generic_sig.params.len() != concrete_sig.params.len()
+        || generic_sig.generics.len() != owner_arity + concrete_sig.generics.len()
+    {
+        return false;
+    }
+    let subst: HashMap<Symbol, Type> = generic_sig.generics[..owner_arity]
+        .iter()
+        .map(|(name, _)| name.clone())
+        .zip(concrete_args.iter().cloned())
+        .collect();
+    let expected = specialize_fn_sig(generic_sig, &subst);
+    expected
+        .params
+        .iter()
+        .zip(&concrete_sig.params)
+        .all(|(expected, actual)| expected.mutable == actual.mutable && expected.ty == actual.ty)
+        && expected.ret == concrete_sig.ret
 }
 
 fn build_interface_method_table(
@@ -735,36 +927,125 @@ fn build_impl_methods(
     diags: &mut Vec<Diagnostic>,
 ) {
     // All user-written methods share one namespace per owner, regardless
-    // of which freely mixed impl block contains them.
+    // of which freely mixed impl block contains them — except a concrete
+    // specialization's own bucket, which only overrides its exact owner
+    // arguments (`MethodSet`).
+    struct RawMethod {
+        owner: DefId,
+        owner_name: Symbol,
+        name: Symbol,
+        name_span: Span,
+        specialization: Option<Vec<Type>>,
+        sig: FnSig,
+    }
+    let mut raw = Vec::new();
     for item in &module.items {
         let Item::Impl(b) = item else { continue };
         let Some(owner) = resolved.definitions.lookup_in(b.span.file, &b.target.name) else {
             continue;
         };
-        let owner_generics = owner_generic_params(owner, decls, resolved, diags);
+        let owner_generics = owner_generics_for_impl(b, owner, decls, resolved, diags);
+        let specialization = impl_specialization_args(b, owner, decls, resolved, diags);
+        if let Some(args) = &specialization {
+            sigs.impl_specializations.insert(b.id, args.clone());
+            if !b.interfaces.is_empty() {
+                diags.push(
+                    Diagnostic::error(
+                        "a concrete specialization (`impl Owner<ConcreteArgs>`) cannot also \
+                         implement an interface yet",
+                    )
+                    .with_label(b.span, "in this `impl` block"),
+                );
+            }
+        }
         for m in &b.methods {
+            if specialization.is_some() && m.self_param.is_none() {
+                diags.push(
+                    Diagnostic::error(
+                        "a concrete specialization cannot override a static method yet — only \
+                         `self`/`mut self` methods",
+                    )
+                    .with_label(m.name.span, "here"),
+                );
+                continue;
+            }
             let mut sig = build_fn_sig(m, resolved, decls, diags);
             sig.generics.splice(0..0, owner_generics.clone());
-            let key = (owner, m.name.name.clone());
-            if sigs.methods.contains_key(&key) {
-                diags.push(
-                    Diagnostic::error(format!(
-                        "method `{}` is defined more than once for `{}`",
-                        m.name.name, b.target.name
-                    ))
-                    .with_label(m.name.span, "redefined here"),
-                );
-            } else {
-                sigs.methods.insert(key, sig);
+            raw.push(RawMethod {
+                owner,
+                owner_name: b.target.name.clone(),
+                name: m.name.name.clone(),
+                name_span: m.name.span,
+                specialization: specialization.clone(),
+                sig,
+            });
+        }
+    }
+
+    let mut sets: HashMap<(DefId, Symbol), MethodSet> = HashMap::new();
+    for entry in &raw {
+        let key = (entry.owner, entry.name.clone());
+        let set = sets.entry(key).or_default();
+        match &entry.specialization {
+            None => {
+                if set.generic.is_some() {
+                    diags.push(
+                        Diagnostic::error(format!(
+                            "method `{}` is defined more than once for `{}`",
+                            entry.name, entry.owner_name
+                        ))
+                        .with_label(entry.name_span, "redefined here"),
+                    );
+                } else {
+                    set.generic = Some(entry.sig.clone());
+                }
+            }
+            Some(args) => {
+                if set
+                    .specializations
+                    .iter()
+                    .any(|(existing, _)| existing == args)
+                {
+                    diags.push(
+                        Diagnostic::error(format!(
+                            "method `{}` is defined more than once for this specialization of `{}`",
+                            entry.name, entry.owner_name
+                        ))
+                        .with_label(entry.name_span, "redefined here"),
+                    );
+                } else {
+                    set.specializations.push((args.clone(), entry.sig.clone()));
+                }
             }
         }
     }
+    for entry in &raw {
+        let Some(args) = &entry.specialization else {
+            continue;
+        };
+        let key = (entry.owner, entry.name.clone());
+        let Some(generic_sig) = sets.get(&key).and_then(|set| set.generic.as_ref()) else {
+            continue;
+        };
+        if !specialization_matches_generic(entry.owner, decls, generic_sig, args, &entry.sig) {
+            diags.push(
+                Diagnostic::error(format!(
+                    "method `{}` on this specialization of `{}` must have the same signature as \
+                     the generic `impl<...> {}<...>` version",
+                    entry.name, entry.owner_name, entry.owner_name
+                ))
+                .with_label(entry.name_span, "signature does not match"),
+            );
+        }
+    }
+    sigs.methods = sets;
 
     struct Request {
         owner: DefId,
         owner_ty: Type,
         owner_name: Symbol,
         owner_span: Span,
+        owner_generics: Vec<(Symbol, Option<GenericBound>)>,
         bound: GenericBound,
         allow_defaults: bool,
     }
@@ -773,11 +1054,13 @@ fn build_impl_methods(
     for (&owner, decl) in &decls.type_decls {
         for interface in &decl.interfaces {
             if let Some(bound) = lower_generic_bound(interface, resolved, decls, diags) {
+                let owner_generics = owner_generic_params(owner, decls, resolved, diags);
                 requests.push(Request {
                     owner,
-                    owner_ty: owner_as_type(owner, resolved, decls),
+                    owner_ty: owner_as_type_from_generics(owner, resolved, decls, &owner_generics),
                     owner_name: decl.name.name.clone(),
                     owner_span: interface.span(),
+                    owner_generics,
                     bound,
                     allow_defaults: true,
                 });
@@ -787,11 +1070,13 @@ fn build_impl_methods(
     for (&owner, decl) in &decls.enum_decls {
         for interface in &decl.interfaces {
             if let Some(bound) = lower_generic_bound(interface, resolved, decls, diags) {
+                let owner_generics = owner_generic_params(owner, decls, resolved, diags);
                 requests.push(Request {
                     owner,
-                    owner_ty: owner_as_type(owner, resolved, decls),
+                    owner_ty: owner_as_type_from_generics(owner, resolved, decls, &owner_generics),
                     owner_name: decl.name.name.clone(),
                     owner_span: interface.span(),
+                    owner_generics,
                     bound,
                     allow_defaults: true,
                 });
@@ -808,11 +1093,13 @@ fn build_impl_methods(
         };
         for interface in &block.interfaces {
             if let Some(bound) = lower_generic_bound(interface, resolved, decls, diags) {
+                let owner_generics = owner_generics_for_impl(block, owner, decls, resolved, diags);
                 requests.push(Request {
                     owner,
-                    owner_ty: owner_as_type(owner, resolved, decls),
+                    owner_ty: owner_as_type_from_generics(owner, resolved, decls, &owner_generics),
                     owner_name: block.target.name.clone(),
                     owner_span: interface.span(),
+                    owner_generics,
                     bound,
                     allow_defaults: false,
                 });
@@ -870,13 +1157,13 @@ fn build_impl_methods(
             .cloned()
             .zip(request.bound.args.iter().cloned())
             .collect();
-        let owner_generics = owner_generic_params(request.owner, decls, resolved, diags);
+        let owner_generics = request.owner_generics.clone();
 
         for (name, method) in methods {
             let mut expected = specialize_fn_sig(&method.sig, &interface_subst);
             expected.generics.splice(0..0, owner_generics.clone());
             let key = (request.owner, name.clone());
-            if let Some(actual) = sigs.methods.get(&key) {
+            if let Some(actual) = sigs.methods.get(&key).and_then(|set| set.generic.as_ref()) {
                 if !method_signatures_match(actual, &expected) {
                     diags.push(
                         Diagnostic::error(format!(
@@ -948,7 +1235,7 @@ fn build_impl_methods(
                 .with_label(need.span, "ambiguous default"),
             );
         } else if let Some(default) = need.defaults.into_iter().next() {
-            sigs.methods.insert((owner, name.clone()), default.sig);
+            sigs.methods.entry((owner, name.clone())).or_default().generic = Some(default.sig);
             sigs.default_method_substitutions
                 .insert((owner, name.clone()), default.subst);
             sigs.default_method_sources
@@ -966,7 +1253,7 @@ fn build_impl_methods(
 }
 
 fn owner_as_type(id: DefId, resolved: &ResolvedNames, decls: &DeclIndex) -> Type {
-    let args = decls
+    let args: Vec<Type> = decls
         .type_decls
         .get(&id)
         .map(|decl| {
@@ -984,6 +1271,45 @@ fn owner_as_type(id: DefId, resolved: &ResolvedNames, decls: &DeclIndex) -> Type
             })
         })
         .unwrap_or_default();
+    // `Array<T>` still lowers to the distinct `Type::Array` representation
+    // (codegen/ARC layout depend on it), not `Type::Struct` — even though
+    // it's now an ordinary `type Array<T>;` declaration like any other.
+    if resolved.definitions.get(id).name.as_str() == "Array" {
+        return Type::Array(Box::new(
+            args.into_iter().next().unwrap_or(Type::Error),
+        ));
+    }
+    match resolved.definitions.get(id).kind {
+        DefKind::Enum => Type::Enum(id, args),
+        _ => match decls.type_decls.get(&id).map(|t| &t.kind) {
+            Some(TypeDeclKind::TupleStruct(_)) => Type::TupleStruct(id, args),
+            _ => Type::Struct(id, args),
+        },
+    }
+}
+
+/// Like [`owner_as_type`], but takes its generic argument names from an
+/// already-resolved owner-generics list instead of re-reading a
+/// declaration. The only way to get a non-empty owner's type for a
+/// declaration-less builtin (`Option`, `Result`) under an explicit
+/// `impl<T> Option<T>: SomeInterface { ... }` block.
+fn owner_as_type_from_generics(
+    id: DefId,
+    resolved: &ResolvedNames,
+    decls: &DeclIndex,
+    owner_generics: &[(Symbol, Option<GenericBound>)],
+) -> Type {
+    let args: Vec<Type> = owner_generics
+        .iter()
+        .map(|(name, _)| Type::Generic(name.clone()))
+        .collect();
+    // See `owner_as_type`'s matching comment: `Array<T>` keeps its own
+    // distinct `Type` variant regardless of generic-scope source.
+    if resolved.definitions.get(id).name.as_str() == "Array" {
+        return Type::Array(Box::new(
+            args.into_iter().next().unwrap_or(Type::Error),
+        ));
+    }
     match resolved.definitions.get(id).kind {
         DefKind::Enum => Type::Enum(id, args),
         _ => match decls.type_decls.get(&id).map(|t| &t.kind) {
@@ -1511,7 +1837,16 @@ impl<'a> Checker<'a> {
         }
         for (param_ast, param_sig) in f.params.iter().zip(&sig.params) {
             self.validate_type_bounds(&param_sig.ty, param_ast.ty.span());
-            self.bind_local(param_ast.id, param_sig.ty.clone(), param_ast.mutable);
+            // `param_sig.ty` is the *element* type for a variadic
+            // parameter — the body sees an ordinary `Array<element>`
+            // local, matching what the call site actually passes in
+            // (`nether_hir::lower::lower_variadic_aware_args`).
+            let local_ty = if param_sig.variadic {
+                Type::Array(Box::new(param_sig.ty.clone()))
+            } else {
+                param_sig.ty.clone()
+            };
+            self.bind_local(param_ast.id, local_ty, param_ast.mutable);
         }
         self.return_ty = sig.ret.clone();
         if let Some(ret) = &f.ret {
@@ -1536,16 +1871,29 @@ impl<'a> Checker<'a> {
     }
 
     fn check_block_with_expected(&mut self, block: &Block, expected: Option<&Type>) -> Type {
+        // No explicit tail means the block would ordinarily be `()` — but
+        // if a statement unconditionally diverges (`return`/`break`/
+        // `continue`, `Type::Never`), the block never actually falls
+        // through to "after the last statement" at all, so its type
+        // should be `Never` too (compatible with anything, per
+        // `Type::compatible`'s own doc) rather than a spurious `()`. There
+        // is no dead-code diagnostic in this language, so a diverging
+        // statement isn't necessarily the *last* one — track any, not
+        // just the final one.
+        let mut diverges = false;
         for stmt in &block.stmts {
-            self.check_stmt(stmt);
+            if matches!(self.check_stmt(stmt), Type::Never) {
+                diverges = true;
+            }
         }
         match &block.tail {
             Some(tail) => self.check_expr_with_expected(tail, expected),
+            None if diverges => Type::Never,
             None => Type::unit(),
         }
     }
 
-    fn check_stmt(&mut self, stmt: &Stmt) {
+    fn check_stmt(&mut self, stmt: &Stmt) -> Type {
         match stmt {
             Stmt::Let(let_stmt) => {
                 let declared_ty = let_stmt
@@ -1554,6 +1902,7 @@ impl<'a> Checker<'a> {
                     .map(|t| lower_type_expr(t, self.resolved, self.decls, self.diagnostics));
                 let has_declared_type = declared_ty.is_some();
                 let value_ty = self.check_expr_with_expected(&let_stmt.value, declared_ty.as_ref());
+                let diverges = matches!(value_ty, Type::Never);
                 let final_ty = match declared_ty {
                     Some(declared) => {
                         if !value_ty.compatible(&declared) {
@@ -1575,6 +1924,11 @@ impl<'a> Checker<'a> {
                     );
                 }
                 self.bind_local(let_stmt.id, final_ty, let_stmt.mutable);
+                if diverges {
+                    Type::Never
+                } else {
+                    Type::unit()
+                }
             }
             Stmt::Expr(expr) => {
                 let ty = self.check_expr(expr);
@@ -1584,6 +1938,7 @@ impl<'a> Checker<'a> {
                         "cannot infer all generic type arguments for this expression",
                     );
                 }
+                ty
             }
         }
     }
@@ -1664,6 +2019,7 @@ impl<'a> Checker<'a> {
             } => {
                 let generic_args = self.lower_call_generic_args(generic_args);
                 let receiver_ty = self.check_expr(receiver);
+                let receiver_mutable = self.place_root_mutable(receiver);
                 self.check_method_call_on(
                     &receiver_ty,
                     method,
@@ -1671,6 +2027,7 @@ impl<'a> Checker<'a> {
                     args,
                     method.span,
                     Some(expr.id),
+                    receiver_mutable,
                 )
             }
             ExprKind::Field { base, field } => {
@@ -1922,23 +2279,43 @@ impl<'a> Checker<'a> {
         current_ty
     }
 
-    fn check_assign_target_mutable(&mut self, target: &Expr) {
-        match &target.kind {
+    /// The mutability of `expr`'s root local, or `None` if `expr` isn't a
+    /// traceable place (a dotted Path/Field/Index chain rooted at a local)
+    /// — e.g. a temporary (struct literal, call result), which can't
+    /// satisfy a mutation requirement either way.
+    ///
+    /// `self.field`/`x.a.b.c` is one multi-segment `Path` node, not
+    /// nested `ExprKind::Field`s (doc comment on
+    /// [`Self::check_assign_target_type`]), so the `Path` arm below
+    /// deliberately ignores `PathResolution::consumed`: `res.base`
+    /// already identifies the root local regardless of how many trailing
+    /// field segments follow it, and mutability of everything reachable
+    /// through that root — a direct field write, or a `mut self` method
+    /// call anywhere along the chain — is governed by that one root,
+    /// exactly like Rust's own field-mutation rule (`holder.child.name =
+    /// x` requires `holder` itself to be `mut`, transitively).
+    fn place_root_mutable(&self, expr: &Expr) -> Option<bool> {
+        match &expr.kind {
             ExprKind::Path(path) => {
-                if let Some(res) = self.resolved.path_res.get(&path.id) {
-                    if res.consumed == path.segments.len() {
-                        if let Resolution::Local(id) = res.base {
-                            if let Some((_, false)) = self.locals.get(&id) {
-                                self.err(target.span, "cannot assign to an immutable binding — declare it with `let mut`");
-                            }
-                        }
-                    }
+                let res = self.resolved.path_res.get(&path.id)?;
+                match res.base {
+                    Resolution::Local(id) => self.locals.get(&id).map(|(_, m)| *m),
+                    _ => None,
                 }
             }
             ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => {
-                self.check_assign_target_mutable(base)
+                self.place_root_mutable(base)
             }
-            _ => {}
+            _ => None,
+        }
+    }
+
+    fn check_assign_target_mutable(&mut self, target: &Expr) {
+        if let Some(false) = self.place_root_mutable(target) {
+            self.err(
+                target.span,
+                "cannot assign to an immutable binding — declare it with `let mut`",
+            );
         }
     }
 
@@ -2073,6 +2450,10 @@ impl<'a> Checker<'a> {
             let is_last = i + 1 == total;
             if is_last {
                 if let Some(args) = call_args {
+                    let receiver_mutable = match res.base {
+                        Resolution::Local(id) => self.locals.get(&id).map(|(_, m)| *m),
+                        _ => None,
+                    };
                     return self.check_method_call_on(
                         &current_ty,
                         seg,
@@ -2080,6 +2461,7 @@ impl<'a> Checker<'a> {
                         args,
                         seg.span,
                         call_id,
+                        receiver_mutable,
                     );
                 }
             }
@@ -2388,19 +2770,28 @@ impl<'a> Checker<'a> {
         args: &[Expr],
         span: Span,
         call_id: Option<NodeId>,
+        receiver_mutable: Option<bool>,
     ) -> Type {
         if let Type::Generic(name) = base_ty {
             return self.check_generic_method_call(name, method, generic_args, args, span, call_id);
         }
         if let Type::Array(elem_ty) = base_ty {
-            if !generic_args.is_empty() {
-                self.err(method.span, "array methods are not generic");
+            if matches!(method.name.as_str(), "len" | "push" | "pop") {
+                if !generic_args.is_empty() {
+                    self.err(method.span, "array methods are not generic");
+                }
+                if matches!(method.name.as_str(), "push" | "pop")
+                    && receiver_mutable != Some(true)
+                {
+                    self.err(method.span, "cannot call a `mut self` method through an immutable receiver — declare it with `let mut`");
+                }
+                return self.check_array_method_call(elem_ty, method, args, span);
             }
-            return self.check_array_method_call(elem_ty, method, args, span);
         }
         let owner_id = match base_ty {
             Type::Struct(id, _) | Type::TupleStruct(id, _) => Some(*id),
             Type::Enum(id, _) => Some(*id),
+            Type::Array(_) => self.resolved.definitions.lookup(&Symbol::new("Array")),
             _ => None,
         };
         let Some(owner_id) = owner_id else {
@@ -2413,7 +2804,22 @@ impl<'a> Checker<'a> {
             }
             return Type::Error;
         };
-        let Some(sig) = self.sigs.method(owner_id, &method.name).cloned() else {
+        // Specialization-aware: an exact-match concrete override
+        // (`impl Option<i32> { ... }`) wins over the generic fallback —
+        // see `MethodSet::for_args`. `receiver_args` still containing an
+        // unsubstituted `Type::Generic` (this call site is itself inside
+        // another still-generic function) can never exactly match a
+        // specialization, so it naturally resolves to the generic sig
+        // here; `monomorphization` re-resolves the same way once the
+        // enclosing function is instantiated for a concrete type and picks
+        // up the override then (`docs/generics.md` § "Methods on generic
+        // types").
+        let receiver_args: &[Type] = match base_ty {
+            Type::Struct(_, args) | Type::TupleStruct(_, args) | Type::Enum(_, args) => args,
+            Type::Array(elem) => std::slice::from_ref(elem.as_ref()),
+            _ => &[],
+        };
+        let Some(method_set) = self.sigs.methods.get(&(owner_id, method.name.clone())) else {
             let desc = self.describe(base_ty);
             self.err(
                 method.span,
@@ -2421,7 +2827,42 @@ impl<'a> Checker<'a> {
             );
             return Type::Error;
         };
-        let owner_pattern = owner_as_type(owner_id, self.resolved, self.decls);
+        let is_specialized = method_set
+            .specializations
+            .iter()
+            .any(|(args, _)| args.as_slice() == receiver_args);
+        let Some(sig) = method_set.for_args(receiver_args).cloned() else {
+            let desc = self.describe(base_ty);
+            self.err(
+                method.span,
+                format!("`{desc}` has no method named `{}`", method.name),
+            );
+            return Type::Error;
+        };
+        if sig.self_param == Some(SelfParam::ByMutRef) && receiver_mutable != Some(true) {
+            self.err(method.span, "cannot call a `mut self` method through an immutable receiver — declare it with `let mut`");
+        }
+        // Build a placeholder `Owner<T, ...>` to structurally match against
+        // `base_ty`'s concrete arguments below, binding each owner
+        // parameter from the receiver. The names must be `sig`'s own — not
+        // re-read from a declaration — since a builtin owner such as
+        // `Option` has none; `sig.generics`' first `owner_arity` entries
+        // are exactly the owner's parameters, in the receiver's positional
+        // order, however this particular method's `impl` block happened to
+        // name them (`build_impl_methods` always splices them in first). A
+        // specialized `sig` has no owner placeholders at all — everything
+        // in it is already concrete — so there is nothing to bind.
+        let owner_arity = if is_specialized { 0 } else { receiver_args.len() };
+        let owner_names = sig.generics.iter().take(owner_arity).map(|(name, _)| Type::Generic(name.clone()));
+        let owner_pattern = match base_ty {
+            Type::Struct(id, _) => Type::Struct(*id, owner_names.collect()),
+            Type::TupleStruct(id, _) => Type::TupleStruct(*id, owner_names.collect()),
+            Type::Enum(id, _) => Type::Enum(*id, owner_names.collect()),
+            Type::Array(_) => {
+                Type::Array(Box::new(owner_names.into_iter().next().unwrap_or(Type::Error)))
+            }
+            _ => unreachable!("owner_id was only set for Struct/TupleStruct/Enum/Array above"),
+        };
         let mut owner_subst = HashMap::new();
         collect_generic_bindings(&owner_pattern, base_ty, &mut owner_subst);
         let subst = self.check_call_args(
@@ -3110,7 +3551,28 @@ impl<'a> Checker<'a> {
         explicit_generic_args: &[Type],
         call_id: Option<NodeId>,
     ) -> HashMap<Symbol, Type> {
-        if args.len() != sig.params.len() {
+        // A trailing variadic parameter (`args: ...String`) collects zero
+        // or more trailing call-site arguments — checked separately below
+        // against its *element* type, since `sig.params.len()` no longer
+        // says how many arguments the call needs.
+        let variadic = sig.params.last().is_some_and(|p| p.variadic);
+        let fixed_params = if variadic {
+            &sig.params[..sig.params.len() - 1]
+        } else {
+            sig.params.as_slice()
+        };
+        if variadic {
+            if args.len() < fixed_params.len() {
+                self.err(
+                    call_span,
+                    format!(
+                        "expected at least {} argument(s), found {}",
+                        fixed_params.len(),
+                        args.len()
+                    ),
+                );
+            }
+        } else if args.len() != sig.params.len() {
             self.err(
                 call_span,
                 format!(
@@ -3148,7 +3610,8 @@ impl<'a> Checker<'a> {
         if let Some(expected_return) = expected_return {
             collect_generic_bindings(&sig.ret, expected_return, &mut subst);
         }
-        for (param, arg) in sig.params.iter().zip(args.iter()) {
+        let fixed_arg_count = args.len().min(fixed_params.len());
+        for (param, arg) in fixed_params.iter().zip(&args[..fixed_arg_count]) {
             let (inner_expr, is_mut_arg) = match &arg.kind {
                 ExprKind::MutArg(inner) => (inner.as_ref(), true),
                 _ => (arg, false),
@@ -3179,6 +3642,36 @@ impl<'a> Checker<'a> {
                     inner_expr.span,
                     format!("expected `{expected_s}`, found `{found_s}`"),
                 );
+            }
+        }
+        if variadic {
+            let elem_ty = &sig.params[sig.params.len() - 1].ty;
+            for arg in &args[fixed_arg_count..] {
+                if matches!(arg.kind, ExprKind::MutArg(_)) {
+                    self.err(arg.span, "`mut` is not valid for a variadic argument");
+                    continue;
+                }
+                let expected = substitute_generic(elem_ty, &subst);
+                let actual = self.check_expr_with_expected(arg, Some(&expected));
+                if matches!(expected, Type::String) {
+                    // Mirrors template-string interpolation: any
+                    // `Into<String>` value is accepted here, not just a
+                    // literal `String` — `nether_hir::into_string_expr`
+                    // performs the matching conversion when lowering this
+                    // same call.
+                    self.require_into_string(&actual, arg.span);
+                } else {
+                    collect_generic_bindings(elem_ty, &actual, &mut subst);
+                    let expected = substitute_generic(elem_ty, &subst);
+                    if !actual.compatible(&expected) {
+                        let expected_s = self.describe(&expected);
+                        let found_s = self.describe(&actual);
+                        self.err(
+                            arg.span,
+                            format!("expected `{expected_s}`, found `{found_s}`"),
+                        );
+                    }
+                }
             }
         }
         for (name, bound) in &sig.generics {

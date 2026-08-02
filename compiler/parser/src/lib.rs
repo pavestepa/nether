@@ -75,6 +75,7 @@ pub fn parse_module_with_node_id_start(
             file,
             items,
             imports: std::collections::HashMap::new(),
+            variant_imports: std::collections::HashMap::new(),
         },
         parser.diagnostics,
         next,

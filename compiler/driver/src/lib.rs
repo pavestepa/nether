@@ -127,7 +127,7 @@ pub fn check(path: &Path) -> Result<CheckResult, std::io::Error> {
 /// `io::Result`.
 pub fn compile(path: &Path, options: &CompileOptions) -> Result<CheckResult, std::io::Error> {
     let mut source_map = SourceMap::new();
-    let (module, mut diagnostics) = load_module_graph(path, &mut source_map)?;
+    let (module, mut diagnostics, prelude_file) = load_module_graph(path, &mut source_map)?;
     let mut resolved = None;
     let mut hir = None;
     let mut mono = None;
@@ -136,7 +136,7 @@ pub fn compile(path: &Path, options: &CompileOptions) -> Result<CheckResult, std
     let mut executable_path = None;
 
     if !diagnostics.iter().any(Diagnostic::is_error) {
-        let (r, resolve_diagnostics) = nether_resolver::resolve(&module);
+        let (r, resolve_diagnostics) = nether_resolver::resolve_with_prelude(&module, prelude_file);
         diagnostics.extend(resolve_diagnostics);
         if !diagnostics.iter().any(Diagnostic::is_error) {
             let (tables, check_diagnostics) = nether_typecheck::check(&module, &r);
@@ -216,12 +216,32 @@ pub fn compile(path: &Path, options: &CompileOptions) -> Result<CheckResult, std
     })
 }
 
+/// The bundled standard library's directory — `stdlib/` at the workspace
+/// root, addressed both as `use stdlib.*`/`use std.*` (an external root,
+/// not a child any user crate must `mod`-declare) and, unconditionally,
+/// as the program-wide prelude loaded by [`load_module_graph`] below.
+fn bundled_stdlib_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stdlib")
+}
+
 /// Loads the entry file and its module graph. `mod user;` declares a
 /// child at `user.nt`/`user.nr` or `user/mod.nt`/`user/mod.nr`; `use`
 /// imports a declaration from a loaded relative module. `self`, `super`
 /// and `crate` may start a use path. Legacy direct `use user.User`
-/// loading remains accepted, and `stdlib.*` resolves from the workspace
-/// root.
+/// loading remains accepted, and `stdlib.*`/`std.*` resolve from the
+/// workspace root — `mod std;` is the same external root under an
+/// alternate name (`resolve_use_module`/`load_module_recursive`'s `mod`
+/// loop both special-case it).
+///
+/// `stdlib/mod.nt` (the bundled prelude) is additionally always loaded,
+/// independent of whether the entry module graph references it, so that
+/// hand-written `impl` blocks on builtin owners such as `Option`
+/// (`stdlib/option.nt`) always register regardless of whether any file
+/// `use`s them. Its own `FileId` is returned so `resolve_with_prelude`
+/// can re-export its top-level `use` names everywhere with no `use` of
+/// their own (`nether_resolver::Definitions::promote_to_prelude`).
+/// Absent — no bundled `stdlib/mod.nt` on disk — is not an error, just no
+/// prelude.
 ///
 /// Loaded module items share one code-generation unit, while resolver
 /// namespaces remain separated by `FileId`. NodeIds are unique across the
@@ -229,11 +249,16 @@ pub fn compile(path: &Path, options: &CompileOptions) -> Result<CheckResult, std
 fn load_module_graph(
     path: &Path,
     source_map: &mut SourceMap,
-) -> std::io::Result<(Module, Vec<Diagnostic>)> {
+) -> std::io::Result<(
+    Module,
+    Vec<Diagnostic>,
+    Option<nether_diagnostics::FileId>,
+)> {
     let mut visited = HashMap::new();
     let mut items = Vec::new();
     let mut diagnostics = Vec::new();
     let mut imports = HashMap::new();
+    let mut variant_imports = HashMap::new();
     let mut next_node_id = 0;
     let entry_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let entry_file = load_module_recursive(
@@ -243,17 +268,41 @@ fn load_module_graph(
         &mut items,
         &mut diagnostics,
         &mut imports,
+        &mut variant_imports,
         &mut next_node_id,
         None,
         None,
     )?;
+
+    let prelude_file = bundled_stdlib_root()
+        .join("mod.nt")
+        .canonicalize()
+        .ok()
+        .and_then(|prelude_path| {
+            load_module_recursive(
+                &prelude_path,
+                source_map,
+                &mut visited,
+                &mut items,
+                &mut diagnostics,
+                &mut imports,
+                &mut variant_imports,
+                &mut next_node_id,
+                None,
+                None,
+            )
+            .ok()
+        });
+
     Ok((
         Module {
             file: entry_file,
             items,
             imports,
+            variant_imports,
         },
         diagnostics,
+        prelude_file,
     ))
 }
 
@@ -264,6 +313,7 @@ fn load_module_recursive(
     all_items: &mut Vec<nether_ast::Item>,
     diagnostics: &mut Vec<Diagnostic>,
     imports: &mut HashMap<nether_ast::NodeId, nether_diagnostics::FileId>,
+    variant_imports: &mut HashMap<nether_ast::NodeId, nether_diagnostics::FileId>,
     next_node_id: &mut u32,
     parent: Option<(PathBuf, nether_diagnostics::FileId)>,
     crate_root: Option<(PathBuf, nether_diagnostics::FileId)>,
@@ -289,6 +339,29 @@ fn load_module_recursive(
         let nether_ast::Item::Mod(mod_decl) = item else {
             continue;
         };
+        // `mod std;` is an alias for the bundled `stdlib/` root rather
+        // than an ordinary sibling child — same external-root treatment
+        // as the `use stdlib.*`/`use std.*` fallback in
+        // `resolve_use_module` below, so it gets no `parent`/inherited
+        // `crate_root` of its declaring file.
+        if mod_decl.name.name.as_str() == "std" {
+            let candidate = bundled_stdlib_root().join("mod.nt");
+            if candidate.is_file() {
+                load_module_recursive(
+                    &candidate,
+                    source_map,
+                    visited,
+                    all_items,
+                    diagnostics,
+                    imports,
+                    variant_imports,
+                    next_node_id,
+                    None,
+                    None,
+                )?;
+                continue;
+            }
+        }
         match resolve_child_module_file(&normalized, &mod_decl.name) {
             Some(module_path) => {
                 load_module_recursive(
@@ -298,6 +371,7 @@ fn load_module_recursive(
                     all_items,
                     diagnostics,
                     imports,
+                    variant_imports,
                     next_node_id,
                     Some((normalized.clone(), file)),
                     Some(crate_root.clone()),
@@ -328,16 +402,48 @@ fn load_module_recursive(
             );
             continue;
         }
-        let module_segments = &use_decl.path.segments[..use_decl.path.segments.len() - 1];
-        match resolve_use_module(
+        let total = use_decl.path.segments.len();
+        let module_segments = &use_decl.path.segments[..total - 1];
+        let first_attempt = resolve_use_module(
             &normalized,
             file,
             parent.as_ref(),
             &crate_root,
             module_segments,
-        ) {
+        );
+        // A `use module.Enum.Variant;` path (3+ segments) is ambiguous
+        // from segment count alone with a genuinely nested module import
+        // (`use a.b.C;`) — try the longer, ordinary interpretation
+        // (all-but-last segment as the module path) first, since that's
+        // strictly more common; only on failure, and only for 3+
+        // segments, retry with one fewer trailing segment kept in the
+        // module path, treating the trailing *two* segments as
+        // (EnumName, VariantName) instead of one plain name.
+        // `resolve_use_module` is a pure path-resolution function (no
+        // file loads, no diagnostics) — trying it twice can't double-load
+        // anything or leak a stray diagnostic from the failed attempt.
+        let variant_form = total >= 3 && first_attempt.is_err();
+        let (result, module_segments) = if variant_form {
+            (
+                resolve_use_module(
+                    &normalized,
+                    file,
+                    parent.as_ref(),
+                    &crate_root,
+                    &use_decl.path.segments[..total - 2],
+                ),
+                &use_decl.path.segments[..total - 2],
+            )
+        } else {
+            (first_attempt, module_segments)
+        };
+        match result {
             Ok(ModuleTarget::Loaded(target_file)) => {
-                imports.insert(use_decl.id, target_file);
+                if variant_form {
+                    variant_imports.insert(use_decl.id, target_file);
+                } else {
+                    imports.insert(use_decl.id, target_file);
+                }
             }
             Ok(ModuleTarget::File {
                 path: module_path,
@@ -350,11 +456,16 @@ fn load_module_recursive(
                     all_items,
                     diagnostics,
                     imports,
+                    variant_imports,
                     next_node_id,
                     target_parent,
                     Some(crate_root.clone()),
                 )?;
-                imports.insert(use_decl.id, target_file);
+                if variant_form {
+                    variant_imports.insert(use_decl.id, target_file);
+                } else {
+                    imports.insert(use_decl.id, target_file);
+                }
             }
             Err(message) => diagnostics.push(
                 Diagnostic::error(format!(
@@ -440,6 +551,15 @@ fn resolve_use_module(
     if first == "stdlib" {
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         if let Some(path) = resolve_module_file_from_root(&workspace, segments) {
+            return Ok(ModuleTarget::File { path, parent: None });
+        }
+    }
+    // `std` is an alias for the same bundled root under the name a
+    // `mod std;` declaration mounts it as (`std.option.Option` reaches
+    // the same file as `stdlib.option.Option`) — dropping the leading
+    // `std` segment itself before resolving under `stdlib/`.
+    if first == "std" {
+        if let Some(path) = resolve_module_file_from_root(&bundled_stdlib_root(), &segments[1..]) {
             return Ok(ModuleTarget::File { path, parent: None });
         }
     }

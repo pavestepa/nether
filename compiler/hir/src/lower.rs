@@ -11,7 +11,7 @@ use nether_typecheck::{
 
 use crate::node::{
     HirCapture, HirExpr, HirExprKind, HirFnId, HirFunction, HirLocalId, HirMatchArm, HirModule,
-    HirParam, HirPattern, HirStmt, HirStmtKind,
+    HirParam, HirPattern, HirStmt, HirStmtKind, MethodFnSet,
 };
 
 /// Lowers a fully resolved, fully type-checked [`Module`] into a
@@ -43,12 +43,20 @@ pub fn lower(module: &Module, resolved: &ResolvedNames, tables: TypedTables) -> 
         })
         .collect();
 
+    // `None` for a module compiled without the bundled prelude (e.g. an
+    // isolated codegen/HIR test fixture) — such a module can still use
+    // array *literals* (`Type::Array` is produced directly by literal
+    // syntax, independent of any declaration), it just can't declare or
+    // call a non-builtin `impl<T> Array<T>` method, which is the only
+    // thing that ever actually dereferences this.
+    let array_owner = resolved.definitions.lookup(&Symbol::new("Array"));
+
     let interface_decls = index_interfaces(module, resolved);
     let pending = collect_pending_fns(module, resolved, &signatures, &interface_decls);
 
     let mut fn_by_name = HashMap::new();
     let mut fn_by_def = HashMap::new();
-    let mut methods = HashMap::new();
+    let mut methods: HashMap<(DefId, Symbol), MethodFnSet> = HashMap::new();
     for (i, p) in pending.iter().enumerate() {
         let id = HirFnId(i as u32);
         match p.owner {
@@ -59,7 +67,11 @@ pub fn lower(module: &Module, resolved: &ResolvedNames, tables: TypedTables) -> 
                 }
             }
             Some(owner) => {
-                methods.insert((owner, p.name.clone()), id);
+                let set = methods.entry((owner, p.name.clone())).or_default();
+                match &p.specialization {
+                    None => set.generic = Some(id),
+                    Some(args) => set.specializations.push((args.clone(), id)),
+                }
             }
         }
     }
@@ -80,6 +92,7 @@ pub fn lower(module: &Module, resolved: &ResolvedNames, tables: TypedTables) -> 
             generics: p.sig.generics.iter().cloned().collect(),
             type_subst: p.type_subst.clone(),
             self_override: None,
+            array_owner,
         };
         fns.push(lowerer.lower_fn(p, id));
     }
@@ -90,6 +103,7 @@ pub fn lower(module: &Module, resolved: &ResolvedNames, tables: TypedTables) -> 
         fn_by_name,
         fn_by_def,
         methods,
+        array_owner,
     }
 }
 
@@ -108,7 +122,19 @@ fn index_interfaces<'a>(
     map
 }
 
-fn owner_type(owner: DefId, sigs: &Signatures) -> Type {
+fn owner_type(owner: DefId, sigs: &Signatures, array_owner: Option<DefId>) -> Type {
+    // `Array<T>` keeps its own distinct `Type` variant (codegen/ARC layout
+    // depend on it) even though it's an ordinary declared generic type now
+    // — mirrors `nether_typecheck::check::owner_as_type`'s same special case.
+    if array_owner == Some(owner) {
+        let elem_name = sigs
+            .type_generics
+            .get(&owner)
+            .and_then(|generics| generics.first())
+            .cloned()
+            .unwrap_or_else(|| Symbol::new("T"));
+        return Type::Array(Box::new(Type::Generic(elem_name)));
+    }
     if let Some(sig) = sigs.enum_sigs.get(&owner) {
         Type::Enum(
             owner,
@@ -139,6 +165,25 @@ fn owner_type(owner: DefId, sigs: &Signatures) -> Type {
                 .map(Type::Generic)
                 .collect(),
         )
+    }
+}
+
+/// Like [`owner_type`], but for a concrete specialization
+/// (`impl Option<i32> { ... }`) — `args` (already-resolved concrete
+/// types, from `Signatures::impl_specializations`) replace the ordinary
+/// generic-placeholder arguments `owner_type` would otherwise build.
+fn concrete_owner_type(
+    owner: DefId,
+    sigs: &Signatures,
+    array_owner: Option<DefId>,
+    args: &[Type],
+) -> Type {
+    match owner_type(owner, sigs, array_owner) {
+        Type::Enum(id, _) => Type::Enum(id, args.to_vec()),
+        Type::TupleStruct(id, _) => Type::TupleStruct(id, args.to_vec()),
+        Type::Struct(id, _) => Type::Struct(id, args.to_vec()),
+        Type::Array(inner) => Type::Array(Box::new(args.first().cloned().unwrap_or(*inner))),
+        other => other,
     }
 }
 
@@ -181,6 +226,14 @@ struct PendingFn<'a> {
     decl: &'a FnDecl,
     sig: FnSig,
     type_subst: HashMap<Symbol, Type>,
+    /// `Some(args)` when this body came from a concrete specialization
+    /// (`impl Option<i32> { ... }`) — mirrors
+    /// `Signatures::impl_specializations`, read once per `impl` block
+    /// rather than re-derived, so this crate never re-lowers a
+    /// `TypeExpr` itself. Always `None` for a standalone `fn` or an
+    /// inherited interface default (specialization is scoped to plain
+    /// instance methods — see `nether_typecheck::sig::MethodSet`).
+    specialization: Option<Vec<Type>>,
 }
 
 fn collect_pending_fns<'a>(
@@ -202,6 +255,7 @@ fn collect_pending_fns<'a>(
                             decl: f,
                             sig,
                             type_subst: HashMap::new(),
+                            specialization: None,
                         });
                     }
                 }
@@ -211,17 +265,29 @@ fn collect_pending_fns<'a>(
                 else {
                     continue;
                 };
+                let specialization = sigs.impl_specializations.get(&b.id);
                 for m in &b.methods {
-                    if let Some(sig) = sigs.method(owner, &m.name.name).cloned() {
-                        pending.push(PendingFn {
-                            name: m.name.name.clone(),
-                            def_id: None,
-                            owner: Some(owner),
-                            decl: m,
-                            sig,
-                            type_subst: HashMap::new(),
-                        });
-                    }
+                    let Some(set) = sigs.methods.get(&(owner, m.name.name.clone())) else {
+                        continue;
+                    };
+                    let sig = match specialization {
+                        None => set.generic.clone(),
+                        Some(args) => set
+                            .specializations
+                            .iter()
+                            .find(|(existing, _)| existing == args)
+                            .map(|(_, sig)| sig.clone()),
+                    };
+                    let Some(sig) = sig else { continue };
+                    pending.push(PendingFn {
+                        name: m.name.name.clone(),
+                        def_id: None,
+                        owner: Some(owner),
+                        decl: m,
+                        sig,
+                        type_subst: HashMap::new(),
+                        specialization: specialization.cloned(),
+                    });
                 }
             }
             _ => {}
@@ -253,6 +319,7 @@ fn collect_pending_fns<'a>(
                 .get(&(*owner, name.clone()))
                 .cloned()
                 .unwrap_or_default(),
+            specialization: None,
         });
     }
     pending
@@ -272,12 +339,13 @@ struct Lowerer<'a> {
     call_generic_args: &'a HashMap<NodeId, Vec<Type>>,
     sigs: &'a Signatures,
     fn_by_def: &'a HashMap<DefId, HirFnId>,
-    methods: &'a HashMap<(DefId, Symbol), HirFnId>,
+    methods: &'a HashMap<(DefId, Symbol), MethodFnSet>,
     locals_map: HashMap<ResolverLocalId, HirLocalId>,
     next_local: u32,
     generics: HashMap<Symbol, Option<GenericBound>>,
     type_subst: HashMap<Symbol, Type>,
     self_override: Option<(ResolverLocalId, Type)>,
+    array_owner: Option<DefId>,
 }
 
 impl Lowerer<'_> {
@@ -337,7 +405,7 @@ impl Lowerer<'_> {
             .locals
             .get(&p.decl.id)
             .copied()
-            .zip(p.owner.map(|owner| owner_type(owner, self.sigs)));
+            .zip(p.owner.map(|owner| owner_type(owner, self.sigs, self.array_owner)));
 
         let mut params = Vec::new();
         for (param_ast, param_sig) in p.decl.params.iter().zip(&p.sig.params) {
@@ -345,11 +413,20 @@ impl Lowerer<'_> {
                 Some(orig) => self.local_for(*orig),
                 None => self.fresh_local(),
             };
+            // `param_sig.ty` is the *element* type for a variadic
+            // parameter — the callee's own body (and its actual runtime
+            // ABI) sees an ordinary `Array<element>` value, matching what
+            // `lower_variadic_aware_args` collects at each call site.
+            let ty = if param_sig.variadic {
+                Type::Array(Box::new(param_sig.ty.clone()))
+            } else {
+                param_sig.ty.clone()
+            };
             params.push(HirParam {
                 local,
                 name: param_sig.name.clone(),
                 mutable: param_sig.mutable,
-                ty: param_sig.ty.clone(),
+                ty,
             });
         }
         // `self` isn't in `params` (matching FnSig's own self/params
@@ -371,7 +448,18 @@ impl Lowerer<'_> {
             name: p.name.clone(),
             owner: p.owner,
             self_param: p.decl.self_param,
-            self_ty: p.owner.map(|owner| owner_type(owner, self.sigs)),
+            // A concrete specialization's `self` is already fully
+            // concrete (`Option<i32>`, not a generic placeholder) — its
+            // own `sig.generics` has no owner parameters to substitute
+            // one in from (`owner_generics_for_impl`'s Case C), so
+            // `owner_type`'s ordinary generic-placeholder shape would
+            // otherwise leak an unsubstituted `Type::Generic` straight
+            // through `monomorphization` (nothing in `finish_instantiation`'s
+            // empty subst map would ever replace it) into codegen's ICE.
+            self_ty: p.owner.map(|owner| match &p.specialization {
+                Some(args) => concrete_owner_type(owner, self.sigs, self.array_owner, args),
+                None => owner_type(owner, self.sigs, self.array_owner),
+            }),
             self_local,
             generics: p.sig.generics.clone(),
             params,
@@ -381,12 +469,23 @@ impl Lowerer<'_> {
     }
 
     fn lower_block_as_expr(&mut self, block: &Block) -> HirExpr {
-        let ty = block
-            .tail
-            .as_ref()
-            .map(|t| self.ty_of(t.id))
-            .unwrap_or_else(Type::unit);
         let (stmts, tail) = self.lower_block(block);
+        // Mirrors `nether_typecheck::check::check_block_with_expected`: a
+        // block with no explicit tail is ordinarily `()`, but if a
+        // statement unconditionally diverges (`return`/`break`/
+        // `continue`, `Type::Never`), the block's own type must be
+        // `Never` too — there's no dead-code diagnostic in this language,
+        // so a diverging statement isn't necessarily the last one.
+        let ty = match &tail {
+            Some(t) => t.ty.clone(),
+            None => {
+                let diverges = stmts.iter().any(|s| match &s.kind {
+                    HirStmtKind::Expr(e) => matches!(e.ty, Type::Never),
+                    HirStmtKind::Let { value, .. } => matches!(value.ty, Type::Never),
+                });
+                if diverges { Type::Never } else { Type::unit() }
+            }
+        };
         HirExpr {
             kind: HirExprKind::Block(stmts, tail),
             ty,
@@ -535,6 +634,41 @@ impl Lowerer<'_> {
             .collect()
     }
 
+    /// Like [`Self::lower_args`], but aware of `sig`'s trailing variadic
+    /// parameter (`args: ...String`) if it has one: the fixed prefix
+    /// lowers as usual, and every trailing argument (zero or more, each
+    /// converted through [`Self::into_string_expr`] first when the
+    /// element type is `String` — the same conversion template-string
+    /// interpolation already applies) is collected into one
+    /// [`HirExprKind::Array`], appended as the call's final actual
+    /// argument. The callee itself only ever sees an ordinary
+    /// `Array`-typed parameter — no new calling convention.
+    fn lower_variadic_aware_args(&mut self, sig: &FnSig, args: &[Expr]) -> Vec<HirExpr> {
+        let Some(last) = sig.params.last().filter(|p| p.variadic) else {
+            return self.lower_args(args);
+        };
+        let fixed_count = sig.params.len() - 1;
+        let split = fixed_count.min(args.len());
+        let mut lowered = self.lower_args(&args[..split]);
+        let elem_ty = last.ty.clone();
+        let variadic_items: Vec<HirExpr> = self
+            .lower_args(&args[split..])
+            .into_iter()
+            .map(|arg| {
+                if matches!(elem_ty, Type::String) {
+                    self.into_string_expr(arg)
+                } else {
+                    arg
+                }
+            })
+            .collect();
+        lowered.push(HirExpr {
+            kind: HirExprKind::Array(variadic_items),
+            ty: Type::Array(Box::new(elem_ty)),
+        });
+        lowered
+    }
+
     /// Mirrors `nether_typecheck`'s `check_value_path`: walks
     /// `resolver`'s [`Resolution`] for the path's base, then any leftover
     /// segments as a field/method-call chain (language-spec §10), except
@@ -645,7 +779,11 @@ impl Lowerer<'_> {
                 let fn_id = self.fn_by_def.get(&id).copied();
                 match (fn_id, call_args) {
                     (Some(fid), Some(args)) => {
-                        let args = self.lower_args(args);
+                        let sig = self.sigs.fns.get(&id).cloned();
+                        let args = match &sig {
+                            Some(sig) => self.lower_variadic_aware_args(sig, args),
+                            None => self.lower_args(args),
+                        };
                         let expr = HirExpr {
                             kind: HirExprKind::CallStatic {
                                 fn_id: fid,
@@ -747,7 +885,10 @@ impl Lowerer<'_> {
                 Type::Error,
             );
         };
-        let Some(fn_id) = self.methods.get(&(owner_id, name)).copied() else {
+        // Static-member calls are always non-specialized — specialization
+        // is scoped to instance methods, `nether_typecheck` rejects a
+        // static method inside a concrete-specialization `impl` block.
+        let Some(fn_id) = self.methods.get(&(owner_id, name)).and_then(|set| set.generic) else {
             return (
                 HirExpr {
                     kind: HirExprKind::Unit,
@@ -789,15 +930,17 @@ impl Lowerer<'_> {
         result_ty: &Type,
     ) -> HirExpr {
         if let Type::Array(_) = receiver_ty {
-            let lowered = self.lower_args(args);
-            return HirExpr {
-                kind: HirExprKind::CallArrayMethod {
-                    receiver: Box::new(receiver),
-                    method: method.name.clone(),
-                    args: lowered,
-                },
-                ty: result_ty.clone(),
-            };
+            if matches!(method.name.as_str(), "len" | "push" | "pop") {
+                let lowered = self.lower_args(args);
+                return HirExpr {
+                    kind: HirExprKind::CallArrayMethod {
+                        receiver: Box::new(receiver),
+                        method: method.name.clone(),
+                        args: lowered,
+                    },
+                    ty: result_ty.clone(),
+                };
+            }
         }
         if let Type::Generic(name) = receiver_ty {
             let bound = self.generics.get(name).cloned().flatten();
@@ -831,31 +974,35 @@ impl Lowerer<'_> {
         let owner_id = match receiver_ty {
             Type::Struct(id, _) | Type::TupleStruct(id, _) => Some(*id),
             Type::Enum(id, _) => Some(*id),
+            Type::Array(_) => self.array_owner,
             _ => None,
         };
-        let fn_id = owner_id.and_then(|id| self.methods.get(&(id, method.name.clone())).copied());
-        let mut lowered = self.lower_args(args);
-        match fn_id {
-            Some(fid) => {
+        let method_set = owner_id.and_then(|id| self.methods.get(&(id, method.name.clone())));
+        let lowered = self.lower_args(args);
+        match method_set {
+            Some(set) => {
                 let is_static = owner_id
                     .and_then(|id| self.sigs.method(id, &method.name))
                     .is_some_and(|sig| sig.self_param.is_none());
-                let call = HirExpr {
-                    kind: HirExprKind::CallStatic {
-                        fn_id: fid,
-                        generic_args: generic_args.to_vec(),
-                        args: if is_static {
-                            lowered
-                        } else {
-                            let mut call_args = Vec::with_capacity(lowered.len() + 1);
-                            call_args.push(receiver.clone());
-                            call_args.append(&mut lowered);
-                            call_args
-                        },
-                    },
-                    ty: result_ty.clone(),
-                };
                 if is_static {
+                    // Static methods are never specialized (rejected at
+                    // `nether_typecheck::check::build_impl_methods`), so
+                    // `set.generic` alone is authoritative — the same
+                    // fixed-`fn_id` shape as an ordinary free-function call.
+                    let Some(fid) = set.generic else {
+                        return HirExpr {
+                            kind: HirExprKind::Unit,
+                            ty: Type::Error,
+                        };
+                    };
+                    let call = HirExpr {
+                        kind: HirExprKind::CallStatic {
+                            fn_id: fid,
+                            generic_args: generic_args.to_vec(),
+                            args: lowered,
+                        },
+                        ty: result_ty.clone(),
+                    };
                     HirExpr {
                         kind: HirExprKind::Block(
                             vec![HirStmt {
@@ -866,7 +1013,20 @@ impl Lowerer<'_> {
                         ty: result_ty.clone(),
                     }
                 } else {
-                    call
+                    // Deferred to `monomorphization`: which body runs can
+                    // depend on the receiver's *substituted* argument
+                    // types (a concrete specialization), not knowable
+                    // until the enclosing function itself is instantiated
+                    // — see `HirExprKind::CallMethod`'s own docs.
+                    HirExpr {
+                        kind: HirExprKind::CallMethod {
+                            receiver: Box::new(receiver),
+                            method_name: method.name.clone(),
+                            generic_args: generic_args.to_vec(),
+                            args: lowered,
+                        },
+                        ty: result_ty.clone(),
+                    }
                 }
             }
             None => HirExpr {
@@ -1226,10 +1386,14 @@ impl Lowerer<'_> {
                 kind: HirExprKind::ToString(Box::new(expr)),
             },
             Type::Struct(owner, _) | Type::TupleStruct(owner, _) | Type::Enum(owner, _) => {
+                // `into_string` is always `Into<String>`'s interface
+                // method — never specialized (interfaces are rejected on
+                // a concrete-specialization `impl` block), so `.generic`
+                // alone is authoritative.
                 match self
                     .methods
                     .get(&(*owner, Symbol::new("into_string")))
-                    .copied()
+                    .and_then(|set| set.generic)
                 {
                     Some(fn_id) => HirExpr {
                         ty: Type::String,
@@ -1508,7 +1672,8 @@ fn collect_closure_locals(
             }
         }
         HirExprKind::CallGenericMethod { receiver, args, .. }
-        | HirExprKind::CallArrayMethod { receiver, args, .. } => {
+        | HirExprKind::CallArrayMethod { receiver, args, .. }
+        | HirExprKind::CallMethod { receiver, args, .. } => {
             collect_closure_locals(receiver, used, bound);
             for arg in args {
                 collect_closure_locals(arg, used, bound);

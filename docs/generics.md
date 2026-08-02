@@ -22,10 +22,12 @@ limitations.
 | Expected-return-type inference | Supported |
 | Monomorphization | Supported |
 | Explicit call arguments such as `f<i32>()` | Supported |
+| Explicit `impl<T> Boxed<T> { ... }` (positional renaming only) | Supported |
+| Concrete specialization (`impl Boxed<i32> { ... }`), instance methods only | Supported |
 | `where` clauses | Not supported |
 | Multiple inline bounds such as `T: A + B` | Not supported |
 | Associated types | Not supported |
-| Specialization and overlapping implementations | Not supported |
+| Specialization of static methods or interface conformance | Not supported |
 | Blanket implementations | Not supported |
 | Const generics | Not supported |
 | Higher-kinded types | Not supported |
@@ -208,11 +210,86 @@ fn main() {
 }
 ```
 
-This Rust-like form is not Nether syntax:
+An explicit Rust-like form is also accepted, `impl<T> Boxed<T> { ... }`.
+It behaves identically to the implicit form above — `target_args` (the
+`<T>` after `Boxed`) must be exactly a permutation of the impl's own
+`<...>` names, in the owner's positional order. It is pure renaming, not
+specialization: writing `impl<T> Boxed<T>` alongside `impl<T, U> Boxed<T>`
+(an unused impl parameter) is rejected, since both still write `<...>`
+after `impl`. A concrete argument list with no `<...>` after `impl` at
+all — `impl Boxed<i32> { ... }` — is a different, valid form; see
+"Concrete specialization" below.
 
 ```nether
-// Not supported:
-// impl<T> Boxed<T> { ... }
+impl<T> Boxed<T> {
+    get(self): T {
+        self.value
+    }
+}
+```
+
+`Option`/`Result` themselves are ordinary generic `enum`s declared this
+way — `stdlib/option.nt`/`stdlib/result.nt` — reachable everywhere with no
+`use` as part of the bundled prelude (see "Modules and standard library"
+in the [README](../README.md)), not compiler builtins:
+
+```nether
+// stdlib/option.nt
+enum Option<T> {
+    Some(T),
+    None,
+}
+
+impl<T> Option<T> {
+    unwrap_or(self, fallback: T): T {
+        match self {
+            Some(item) => item,
+            None => fallback,
+        }
+    }
+}
+```
+
+`Array<T>` joins the same pattern — `stdlib/array.nt` declares a bare
+`type Array<T>;` (no fields; its storage is still runtime-managed) and adds
+methods the same way:
+
+```nether
+// stdlib/array.nt
+type Array<T>;
+
+impl<T> Array<T> {
+    map(mut self, iter: (T) => ()) {
+        let mut i: usize = 0;
+        while i < self.len() {
+            iter(self[i]);
+            i = i + 1;
+        }
+    }
+}
+```
+
+`len`/`push`/`pop` and indexing (`self[i]`) stay runtime-backed for
+performance rather than going through this `impl` block, but they're usable
+from inside one exactly as shown — `self` types as an ordinary `Array<T>`.
+
+The explicit form remains the only way to write methods for a target with
+*no* declaration reachable at all from the writing site (there is no such
+case left in the bundled standard library itself after the above, but a
+project embedding Nether's compiler as a library could still seed a
+builtin type this way).
+
+Each impl-level parameter may still carry its own bound, in addition to
+whatever the target's own declaration already requires — methods in that
+one block need the bound, other `impl` blocks for the same type are
+unaffected:
+
+```nether
+impl<T: Sound> Boxed<T> {
+    announce(self): String {
+        self.value.sound()
+    }
+}
 ```
 
 Methods may introduce additional generic parameters:
@@ -558,6 +635,31 @@ fn main() {
 Non-generic named functions and closures remain valid first-class values.
 Closures cannot declare their own `<T>` parameter list.
 
+A generic function or method currently cannot be called from inside
+*another* still-generic function when the callee's parameter would need
+to bind to the caller's own still-abstract type parameter — inference
+only binds a generic name to an already-concrete type, never to another
+generic placeholder:
+
+```nether
+fn identity<T>(value: T): T {
+    value
+}
+
+fn wrap<U>(value: U): U {
+    // Error: cannot infer generic parameter `T` — `value`'s type is
+    // itself the still-abstract `U`, not a concrete type yet.
+    identity(value)
+}
+```
+
+This is independent of [concrete specialization](#concrete-specialization):
+specialization resolution itself already accounts for a call site like
+this one being monomorphized later (`monomorphization` re-resolves after
+substitution, not once at HIR-lowering time), but the call cannot be
+*written* at all yet, generic-only or specialized, until this inference
+gap is closed.
+
 ## Monomorphization and allocation
 
 Generic code is compiled by monomorphization. Each reachable concrete
@@ -616,17 +718,60 @@ Define a child interface inheriting all required parents instead.
 
 Use a generic interface such as `Iterator<T>`.
 
-### Specialization, blanket impls, and conditional impls
+### Concrete specialization
+
+A third `impl` form — no `<...>` after `impl` itself, but a fully
+concrete argument list after the target — overrides a generic impl's
+method for exactly one instantiation:
 
 ```nether
-// Not supported:
-// impl<T: Sound> Boxed<T>: Into<String> { ... }
-// impl<T> T: SomeInterface { ... }
+impl<T> Boxed<T> {
+    describe(self): String {
+        "generic"
+    }
+}
+
+impl Boxed<i32> {
+    describe(self): String {
+        "an int"
+    }
+}
+
+fn main() {
+    println(Boxed { value: 1 }.describe());       // "an int"
+    println(Boxed { value: "x" }.describe());      // "generic"
+}
 ```
 
-An `impl` targets one declared nominal type or enum. The target's own
-generic parameters are in scope, but implementations cannot introduce a
-new conditional or blanket parameter list.
+The concrete impl's method may instead have no generic counterpart at
+all — a method that only exists for that one instantiation:
+
+```nether
+impl Boxed<i32> {
+    doubled(self): i32 {
+        self.value * 2
+    }
+}
+```
+
+Resolution always prefers an exact match on the owner's concrete
+arguments over the generic fallback, and — since Nether monomorphizes
+everything — this applies uniformly whether the call site already has a
+concrete receiver or is itself still inside another generic function
+that later gets monomorphized for a matching concrete type.
+
+A specialization's method must have the same signature as the generic
+version when both exist (only the body may differ) — specialization
+overrides behavior, not the type a caller sees, since a still-generic
+caller can only ever check against the one generic signature. Static
+methods and interface conformance cannot yet be specialized — a
+concrete impl block may only contain `self`/`mut self` methods and may
+not itself carry a `: SomeInterface` list.
+
+A blanket `impl` — one whose target is itself a generic parameter
+(`impl<T> T: SomeInterface { ... }`) rather than a declared type/enum —
+remains unsupported; `impl`'s target must always name one specific
+`type`/`enum`.
 
 ### Const generics
 

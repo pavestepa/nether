@@ -91,7 +91,7 @@ fn canonical_spec_example_lowers_without_a_forin_node_ever_existing() {
 use lang.Lang;
 
 fn main() {
-    let a = Lang.new("Bobby");
+    let mut a = Lang.new("Bobby");
     a.set_name("Husky");
     println(a.into_string());
 }
@@ -183,7 +183,12 @@ fn main() {
 "#,
     );
     let dog_id = hir.signatures.type_shapes.keys().next().copied().unwrap();
-    let new_id = *hir.methods.get(&(dog_id, Symbol::new("new"))).unwrap();
+    let new_id = hir
+        .methods
+        .get(&(dog_id, Symbol::new("new")))
+        .unwrap()
+        .generic
+        .unwrap();
     let main_body = fn_body(&hir, "main");
     let found = find_expr(
         main_body,
@@ -196,7 +201,11 @@ fn main() {
 }
 
 #[test]
-fn instance_method_call_prepends_receiver_as_first_argument() {
+fn instance_method_call_becomes_call_method_with_receiver_kept_separate() {
+    // Instance method calls are resolved lazily by `monomorphization`
+    // (`HirExprKind::CallMethod`), not baked to a fixed `HirFnId` here —
+    // see that node's own docs for why (concrete specialization). The
+    // receiver stays its own field rather than being prepended to `args`.
     let hir = lower_source(
         r#"
 type Dog { name: String }
@@ -210,16 +219,58 @@ fn main() {
 "#,
     );
     let dog_id = hir.signatures.type_shapes.keys().next().copied().unwrap();
-    let greet_id = *hir.methods.get(&(dog_id, Symbol::new("greet"))).unwrap();
+    assert!(hir.methods.contains_key(&(dog_id, Symbol::new("greet"))));
     let main_body = fn_body(&hir, "main");
-    // 2 args: the receiver `d` plus the explicit `"hi"` string argument.
     let found = find_expr(
         main_body,
-        &|k| matches!(k, HirExprKind::CallStatic { fn_id, args, .. } if *fn_id == greet_id && args.len() == 2),
+        &|k| matches!(k, HirExprKind::CallMethod { method_name, args, .. } if method_name.as_str() == "greet" && args.len() == 1),
     );
     assert!(
         found.is_some(),
-        "expected CallStatic with receiver prepended to args"
+        "expected a CallMethod for `d.greet(\"hi\")` with the receiver kept out of `args`"
+    );
+}
+
+#[test]
+fn user_defined_array_method_becomes_call_method_but_builtins_stay_call_array_method() {
+    // `Array<T>` is an ordinary generic owner now (`array_owner`, threaded
+    // from `hir::lower` through to `monomorphization`) — a non-builtin
+    // method name on an `Array` receiver goes through the same
+    // `CallMethod` path any other type's instance method does, while
+    // `len`/`push`/`pop` keep the dedicated `CallArrayMethod` fast path.
+    let hir = lower_source(
+        r#"
+type Array<T>;
+impl<T> Array<T> {
+    first(self): T { self[0] }
+}
+fn main() {
+    let a = [1, 2, 3];
+    let f = a.first();
+    let n = a.len();
+}
+"#,
+    );
+    let array_id = hir
+        .array_owner
+        .expect("Array is declared in this test's own source");
+    assert!(hir.methods.contains_key(&(array_id, Symbol::new("first"))));
+    let main_body = fn_body(&hir, "main");
+    let found_call_method = find_expr(
+        main_body,
+        &|k| matches!(k, HirExprKind::CallMethod { method_name, args, .. } if method_name.as_str() == "first" && args.is_empty()),
+    );
+    assert!(
+        found_call_method.is_some(),
+        "expected a CallMethod for `a.first()`"
+    );
+    let found_call_array_method = find_expr(
+        main_body,
+        &|k| matches!(k, HirExprKind::CallArrayMethod { method, args, .. } if method.as_str() == "len" && args.is_empty()),
+    );
+    assert!(
+        found_call_array_method.is_some(),
+        "expected `a.len()` to keep lowering to the builtin CallArrayMethod"
     );
 }
 
@@ -291,8 +342,18 @@ fn main() {
 
 #[test]
 fn reading_a_weak_field_desugars_to_a_weak_upgrade_builtin_call() {
+    // `Option` is an ordinary prelude `enum` now (`stdlib/option.nt`), not
+    // a compiler builtin — `lower_source` resolves a bare parsed `Module`
+    // directly, no driver, no prelude loading, so this declares its own
+    // stand-in with the same shape (`nether_hir` only ever sees a
+    // resolved `DefId`, so this exercises the same desugaring as the real
+    // bundled `Option`).
     let hir = lower_source(
         r#"
+enum Option<T> {
+    Some(T),
+    None,
+}
 type Child { name: String }
 type Parent { kid: weak Child }
 fn describe(p: Parent): String {
@@ -329,7 +390,7 @@ fn assigning_into_a_weak_field_does_not_desugar_the_target() {
         r#"
 type Child { name: String }
 type Parent { kid: weak Child }
-fn set_kid(p: Parent, c: Child) {
+fn set_kid(mut p: Parent, c: Child) {
     p.kid = c;
 }
 fn main() {}
@@ -416,7 +477,7 @@ type Cat: Sound { name: String }
         .methods
         .iter()
         .filter(|((_, name), _)| name.as_str() == "sound")
-        .map(|(_, id)| *id)
+        .map(|(_, set)| set.generic.unwrap())
         .collect();
     assert_eq!(
         sound_ids.len(),
@@ -470,7 +531,7 @@ fn main() {
         .methods
         .iter()
         .find(|((_, name), _)| name.as_str() == "static_method")
-        .map(|(_, id)| *id)
+        .and_then(|(_, set)| set.generic)
         .unwrap();
     let call = find_expr(
         fn_body(&hir, "main"),

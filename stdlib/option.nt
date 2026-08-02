@@ -1,23 +1,30 @@
-/// Returns true when `value` contains a payload.
-fn option_is_some<T>(value: Option<T>): bool {
-    match value {
-        Some(_) => true,
-        None => false,
-    }
+enum Option<T> {
+    Some(T),
+    None,
 }
 
-/// Extracts an Option payload or returns the provided fallback.
-fn option_unwrap_or<T>(value: Option<T>, fallback: T): T {
-    match value {
-        Some(item) => item,
-        None => fallback,
+impl<T> Option<T> {
+    /// Returns true when `value` contains a payload.
+    is_some(self): bool {
+        match self {
+            Some(_) => true,
+            None => false,
+        }
     }
-}
 
-/// Applies `mapper` to an Option payload.
-fn option_map<T, U>(value: Option<T>, mapper: (T) => U): Option<U> {
-    match value {
-        Some(item) => Option.Some(mapper(item)),
-        None => Option.None,
+    /// Extracts an Option payload or returns the provided fallback.
+    unwrap_or(self, fallback: T): T {
+        match self {
+            Some(item) => item,
+            None => fallback,
+        }
+    }
+
+    /// Applies `mapper` to an Option payload.
+    map<U>(self, mapper: (T) => U): Option<U> {
+        match self {
+            Some(item) => Option.Some(mapper(item)),
+            None => Option.None,
+        }
     }
 }

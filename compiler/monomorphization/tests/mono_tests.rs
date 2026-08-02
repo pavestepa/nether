@@ -139,7 +139,7 @@ fn canonical_spec_example_monomorphizes_from_main() {
 use lang.Lang;
 
 fn main() {
-    let a = Lang.new("Bobby");
+    let mut a = Lang.new("Bobby");
     a.set_name("Husky");
     println(a.into_string());
 }

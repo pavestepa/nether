@@ -218,6 +218,7 @@ fn punct_str(p: Punct) -> &'static str {
         Punct::Semi => ";",
         Punct::Colon => ":",
         Punct::Dot => ".",
+        Punct::DotDotDot => "...",
         Punct::Plus => "+",
         Punct::Minus => "-",
         Punct::Star => "*",

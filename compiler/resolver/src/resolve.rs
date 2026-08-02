@@ -71,7 +71,21 @@ pub struct ResolvedNames {
 /// in per-file namespaces. Field-existence checks remain deliberately
 /// deferred to `typecheck`, the first stage with enough type information.
 pub fn resolve(module: &Module) -> (ResolvedNames, Vec<Diagnostic>) {
-    let (defs, mut diags) = def::collect(module);
+    resolve_with_prelude(module, None)
+}
+
+/// Like [`resolve`], but additionally re-exports every top-level `use` in
+/// `prelude_file` (the driver's `stdlib/mod.nt`, when it loaded one) to
+/// every other file with no `use` of their own — see
+/// [`def::Definitions::promote_to_prelude`]. `resolve` itself is `None`'s
+/// case, kept as the ordinary entry point for every caller that isn't the
+/// driver (this crate's own tests, `typecheck`/`hir`/`monomorphization`'s
+/// tests) since they construct a bare `Module` with no bundled prelude.
+pub fn resolve_with_prelude(
+    module: &Module,
+    prelude_file: Option<nether_diagnostics::FileId>,
+) -> (ResolvedNames, Vec<Diagnostic>) {
+    let (defs, mut diags) = def::collect(module, prelude_file);
     let type_generics = module
         .items
         .iter()
@@ -237,6 +251,31 @@ impl Resolver<'_> {
     }
 
     fn resolve_impl_block(&mut self, b: &ImplBlock) {
+        // `impl<T> Option<T> { ... }` — the explicit Rust-like form. Unlike
+        // the implicit form below, the impl block's own `<T>` supplies the
+        // generic environment (and `target_args` is resolved within it),
+        // which is the only way to name a type parameter for a builtin
+        // owner such as `Option`/`Result` that has no local declaration to
+        // read parameters from.
+        if !b.generics.is_empty() || !b.target_args.is_empty() {
+            self.push_generics(&b.generics);
+            for g in &b.generics {
+                if let Some(bound) = &g.bound {
+                    self.resolve_type_expr(bound);
+                }
+            }
+            for arg in &b.target_args {
+                self.resolve_type_expr(arg);
+            }
+            for interface in &b.interfaces {
+                self.resolve_type_expr(interface);
+            }
+            for method in &b.methods {
+                self.resolve_fn_decl(method);
+            }
+            self.pop_generics();
+            return;
+        }
         let owner_generics = self
             .type_generics
             .get(&(b.span.file, b.target.name.clone()))
@@ -693,6 +732,26 @@ impl Resolver<'_> {
         }
 
         let Some(id) = self.defs.lookup_in(path.span.file, &first.name) else {
+            // A bare variant name (`Some`, `None`, ...) promoted into
+            // scope by `use module.Enum.Variant;` (`stdlib/mod.nt`'s own
+            // `use option.Option.Some;`, for instance) — a variant has no
+            // `DefId` of its own, so it can't be found via `lookup_in`
+            // above; resolves directly to the same `Resolution::EnumVariant`
+            // kind the qualified `Option.Some` form already produces.
+            if path.segments.len() == 1 {
+                if let Some((enum_id, idx)) =
+                    self.defs.lookup_variant_in(path.span.file, &first.name)
+                {
+                    self.path_res.insert(
+                        path.id,
+                        PathResolution {
+                            base: Resolution::EnumVariant(enum_id, idx),
+                            consumed: 1,
+                        },
+                    );
+                    return;
+                }
+            }
             self.unresolved_value(first);
             self.path_res.insert(
                 path.id,
@@ -873,7 +932,7 @@ fn edit_distance(left: &str, right: &str) -> usize {
     previous[right.len()]
 }
 
-fn variant_index(def: &def::Def, name: &Symbol) -> Option<u32> {
+pub(crate) fn variant_index(def: &def::Def, name: &Symbol) -> Option<u32> {
     def.variants
         .iter()
         .position(|v| v == name)

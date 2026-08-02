@@ -2,6 +2,7 @@ use nether_ast::{
     EnumDecl, EnumVariant, Field, FnDecl, GenericParam, ImplBlock, InterfaceDecl, Item, ModDecl,
     Param, SelfParam, TypeDecl, TypeDeclKind, UseDecl,
 };
+use nether_diagnostics::Span;
 use nether_lexer::{Keyword, Punct, Token};
 
 use crate::parser::Parser;
@@ -20,6 +21,17 @@ impl Parser {
 
     fn parse_item(&mut self) -> Option<Item> {
         let doc = self.take_doc_comments();
+        // `private` currently only prefixes `mod` at the top level (`type`
+        // and `fn` privacy is the underscore-name convention instead, and
+        // `impl`/`interface` bodies have their own `private` handling in
+        // `parse_method_decl`).
+        if matches!(self.peek(), Token::Keyword(Keyword::Private))
+            && matches!(self.peek_at(1), Token::Keyword(Keyword::Mod))
+        {
+            let start = self.peek_span();
+            self.bump();
+            return self.parse_mod_decl(true, start).map(Item::Mod);
+        }
         match self.peek() {
             Token::Keyword(Keyword::Type) => self.parse_type_decl(doc).map(Item::Type),
             Token::Keyword(Keyword::Impl) => self.parse_impl_block().map(Item::Impl),
@@ -29,7 +41,10 @@ impl Parser {
             }
             Token::Keyword(Keyword::Fn) => self.parse_fn_decl(doc).map(Item::Fn),
             Token::Keyword(Keyword::Use) => self.parse_use_decl().map(Item::Use),
-            Token::Keyword(Keyword::Mod) => self.parse_mod_decl().map(Item::Mod),
+            Token::Keyword(Keyword::Mod) => {
+                let start = self.peek_span();
+                self.parse_mod_decl(false, start).map(Item::Mod)
+            }
             other => {
                 let span = self.peek_span();
                 self.error(
@@ -147,7 +162,9 @@ impl Parser {
     fn parse_impl_block(&mut self) -> Option<ImplBlock> {
         let start = self.expect_keyword(Keyword::Impl);
         let id = self.next_id();
+        let generics = self.parse_optional_generic_params();
         let target = self.expect_ident();
+        let target_args = self.parse_optional_generic_args();
         let interfaces = self.parse_interface_list();
         self.expect_punct(Punct::LBrace, "to start an impl body");
         let mut methods = Vec::new();
@@ -163,7 +180,9 @@ impl Parser {
         let end = self.expect_punct(Punct::RBrace, "to close an impl body");
         Some(ImplBlock {
             id,
+            generics,
             target,
+            target_args,
             interfaces,
             methods,
             span: start.to(end),
@@ -275,14 +294,15 @@ impl Parser {
         })
     }
 
-    fn parse_mod_decl(&mut self) -> Option<ModDecl> {
-        let start = self.expect_keyword(Keyword::Mod);
+    fn parse_mod_decl(&mut self, private: bool, start: Span) -> Option<ModDecl> {
+        self.expect_keyword(Keyword::Mod);
         let id = self.next_id();
         let name = self.expect_ident();
         let end = self.expect_punct(Punct::Semi, "after a module declaration");
         Some(ModDecl {
             id,
             name,
+            private,
             span: start.to(end),
         })
     }
@@ -401,7 +421,14 @@ impl Parser {
     fn parse_params_list(&mut self) -> Vec<Param> {
         let mut params = Vec::new();
         while !matches!(self.peek(), Token::Punct(Punct::RParen)) && !self.is_eof() {
-            params.push(self.parse_param());
+            let param = self.parse_param();
+            if param.variadic && !matches!(self.peek(), Token::Punct(Punct::RParen)) {
+                self.error(
+                    param.span,
+                    "a variadic parameter (`...Type`) must be the last parameter",
+                );
+            }
+            params.push(param);
             if !self.eat_punct(Punct::Comma) {
                 break;
             }
@@ -415,12 +442,14 @@ impl Parser {
         let mutable = self.eat_keyword(Keyword::Mut);
         let name = self.expect_ident();
         self.expect_punct(Punct::Colon, "after a parameter name");
+        let variadic = self.eat_punct(Punct::DotDotDot);
         let ty = self.parse_type_expr();
         let span = start.to(ty.span());
         Param {
             id,
             name,
             mutable,
+            variadic,
             ty,
             span,
         }

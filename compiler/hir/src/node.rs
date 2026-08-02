@@ -35,8 +35,45 @@ pub struct HirModule {
     pub fn_by_def: HashMap<DefId, HirFnId>,
     /// `impl`/`interface` methods (including inherited interface
     /// defaults), by `(owner type/enum DefId, method name)` — mirrors
-    /// `Signatures::methods`' key shape.
-    pub methods: HashMap<(DefId, Symbol), HirFnId>,
+    /// `Signatures::methods`' key shape and, like it, one owner/name pair
+    /// can hold both a generic body and concrete-specialization overrides
+    /// (see [`MethodFnSet`]).
+    pub methods: HashMap<(DefId, Symbol), MethodFnSet>,
+    /// `Array`'s own `DefId`, if this module was compiled with the bundled
+    /// prelude (`None` for a prelude-less test fixture, which can still
+    /// use array *literals* — those need no declaration at all). Unlike
+    /// `Struct`/`TupleStruct`/`Enum`, a `Type::Array(_)` value carries no
+    /// `DefId` of its own, so any stage that needs to resolve a method
+    /// call on an `Array` receiver back to an owner
+    /// (`monomorphization::owner_def_id`) needs this looked up once and
+    /// threaded through rather than re-derived from the `Type`.
+    pub array_owner: Option<DefId>,
+}
+
+/// Mirrors `nether_typecheck::sig::MethodSet`, one level down: a
+/// [`HirFnId`] (a lowered function body) in place of each `FnSig`.
+/// `monomorphization` picks between `generic` and an exact-match
+/// `specializations` entry using the receiver's own *substituted*
+/// argument types — see that crate's handling of
+/// [`HirExprKind::CallMethod`].
+#[derive(Debug, Clone, Default)]
+pub struct MethodFnSet {
+    pub generic: Option<HirFnId>,
+    pub specializations: Vec<(Vec<Type>, HirFnId)>,
+}
+
+impl MethodFnSet {
+    /// The body to run for a receiver whose (already fully substituted,
+    /// concrete — `monomorphization` only ever calls this post-substitution)
+    /// owner carries `args` — mirrors
+    /// `nether_typecheck::sig::MethodSet::for_args`.
+    pub fn for_args(&self, args: &[Type]) -> Option<HirFnId> {
+        self.specializations
+            .iter()
+            .find(|(specialized_args, _)| specialized_args.as_slice() == args)
+            .map(|(_, id)| *id)
+            .or(self.generic)
+    }
 }
 
 impl HirModule {
@@ -190,6 +227,23 @@ pub enum HirExprKind {
     CallArrayMethod {
         receiver: Box<HirExpr>,
         method: Symbol,
+        args: Vec<HirExpr>,
+    },
+    /// An instance method call (`self`/`mut self`) whose receiver's owner
+    /// is already a concrete `Struct`/`TupleStruct`/`Enum` `DefId` at
+    /// lowering time — always resolved lazily by `monomorphization`
+    /// (never a fixed [`HirFnId`] here, unlike [`HirExprKind::CallStatic`])
+    /// because which body runs can depend on the receiver's *substituted*
+    /// argument types, not just its owner: a concrete specialization
+    /// (`impl Option<i32> { ... }`) only becomes knowable once a still-generic
+    /// enclosing function is itself instantiated (`docs/generics.md` §
+    /// "Methods on generic types"). Static methods keep using
+    /// `CallStatic` with a fixed `fn_id` — specialization is scoped to
+    /// instance methods only, so a static method's target never varies.
+    CallMethod {
+        receiver: Box<HirExpr>,
+        method_name: Symbol,
+        generic_args: Vec<Type>,
         args: Vec<HirExpr>,
     },
     If {

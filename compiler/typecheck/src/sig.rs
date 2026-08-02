@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use nether_ast::{SelfParam, Symbol};
+use nether_ast::{NodeId, SelfParam, Symbol};
 use nether_resolver::{DefId, Definitions};
 
 use crate::alloc::{alloc_kind, AllocKind};
@@ -34,7 +34,49 @@ pub struct FnSig {
 pub struct ParamSig {
     pub name: Symbol,
     pub mutable: bool,
+    /// `true` only when this is the last entry in `FnSig::params` — a
+    /// trailing variadic parameter (`args: ...String`). `ty` is then the
+    /// *element* type; a call site's trailing arguments (zero or more)
+    /// are collected into an `Array<ty>` automatically
+    /// (`nether_hir::lower::lower_call`'s variadic handling), so callers
+    /// still see one ordinary `Array`-typed value at runtime.
+    pub variadic: bool,
     pub ty: Type,
+}
+
+/// Every signature declared for one `(owner, method name)` pair — plain
+/// generic passthrough (`impl<T> Option<T> { ... }`, or a non-generic
+/// owner's ordinary methods) plus any concrete overrides
+/// (`impl Option<i32> { ... }`, language-spec-equivalent to Rust
+/// specialization but positional-renaming/concrete-only, never partial —
+/// see `docs/generics.md` § "Methods on generic types"). At most one
+/// entry may exist per distinct concrete argument list; `generic` is the
+/// fallback used whenever no `specializations` entry's arguments exactly
+/// match the receiver's own. A concrete entry's signature must match
+/// `generic`'s (after substituting the concrete arguments) when both
+/// exist — enforced when this is built, not here.
+#[derive(Debug, Clone, Default)]
+pub struct MethodSet {
+    pub generic: Option<FnSig>,
+    pub specializations: Vec<(Vec<Type>, FnSig)>,
+}
+
+impl MethodSet {
+    /// The signature to use for a receiver whose owner carries `args` —
+    /// an exact-match concrete override if one exists, else the generic
+    /// fallback. `args` still containing an unsubstituted `Type::Generic`
+    /// (a call site inside another still-generic function) can never
+    /// exactly match a `specializations` entry (those are always fully
+    /// concrete), so it naturally falls through to `generic` — the same
+    /// call, once monomorphized for a concrete instantiation, is
+    /// re-resolved through this same method and picks up the override.
+    pub fn for_args(&self, args: &[Type]) -> Option<&FnSig> {
+        self.specializations
+            .iter()
+            .find(|(specialized_args, _)| specialized_args.as_slice() == args)
+            .map(|(_, sig)| sig)
+            .or(self.generic.as_ref())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -77,8 +119,18 @@ pub struct Signatures {
     /// DefId, method name)` — not by `nether_resolver`'s per-method index,
     /// so this table doesn't need to replicate that index's construction
     /// order; a call site recovers the name from
-    /// `Definitions::get(owner).methods[idx]` and looks it up here.
-    pub methods: HashMap<(DefId, Symbol), FnSig>,
+    /// `Definitions::get(owner).methods[idx]` and looks it up here. See
+    /// [`MethodSet`] for why one owner/name pair can hold more than one
+    /// signature.
+    pub methods: HashMap<(DefId, Symbol), MethodSet>,
+    /// Which `impl` blocks are a concrete specialization
+    /// (`impl Option<i32> { ... }`, keyed by the block's own
+    /// [`NodeId`]) and, if so, their fully-resolved concrete owner
+    /// arguments — the same key `hir` re-derives each block's signatures
+    /// and specialization bucket from, without re-lowering `TypeExpr`s
+    /// itself. Absent for every other `impl` block (the implicit form, or
+    /// the explicit `impl<T> Owner<T> { ... }` generic-passthrough form).
+    pub impl_specializations: HashMap<NodeId, Vec<Type>>,
     /// Fully inherited interface method signatures.
     pub interface_methods: HashMap<(DefId, Symbol), FnSig>,
     /// Generic parameter names and direct parent templates for interfaces.
@@ -97,8 +149,20 @@ pub struct Signatures {
 }
 
 impl Signatures {
+    /// The generic/non-specialized signature for `(owner, name)` — every
+    /// caller that isn't resolving an actual instance-method call site
+    /// (static-member calls, interface-conformance checks, `Into<String>`
+    /// lookups) uses this; specialization is deliberately scoped to
+    /// instance methods only (`docs/generics.md`), so a static method
+    /// always has exactly this one signature.
     pub fn method(&self, owner: DefId, name: &Symbol) -> Option<&FnSig> {
-        self.methods.get(&(owner, name.clone()))
+        self.methods.get(&(owner, name.clone()))?.generic.as_ref()
+    }
+
+    /// The signature to use for an instance-method call whose receiver's
+    /// owner carries `args` — see [`MethodSet::for_args`].
+    pub fn method_for(&self, owner: DefId, name: &Symbol, args: &[Type]) -> Option<&FnSig> {
+        self.methods.get(&(owner, name.clone()))?.for_args(args)
     }
 
     pub fn satisfies(&self, ty: &Type, bound: &GenericBound) -> bool {

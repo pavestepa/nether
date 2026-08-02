@@ -10,13 +10,13 @@ use self.world.quest_text;
 use self.world.events.Event;
 
 fn main() {
-    let hero = Hero.new("Arin", 20);
+    let mut hero = Hero.new("Arin", 20);
     println(announce(hero));
     println(quest_text(QuestState.Active("Ancient Gate")));
 
     let events = encounter(hero);
     for event in events {
-        println(apply_event(hero, event));
+        println(apply_event(mut hero, event));
     }
 
     let bonus = 5;
@@ -27,5 +27,5 @@ fn main() {
 
     println(hero);
     println(quest_text(QuestState.Completed(125)));
-    println(apply_event(hero, Event.Message("The road continues")));
+    println(apply_event(mut hero, Event.Message("The road continues")));
 }

@@ -75,6 +75,8 @@ pub enum Punct {
     Semi,
     Colon,
     Dot,
+    /// `...` — a variadic parameter's element type (`args: ...String`).
+    DotDotDot,
     Plus,
     Minus,
     Star,

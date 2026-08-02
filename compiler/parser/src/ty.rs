@@ -74,7 +74,10 @@ impl Parser {
         }
     }
 
-    fn parse_optional_generic_args(&mut self) -> Vec<TypeExpr> {
+    /// Parses `<A, B>` as written after a type name or an `impl` target
+    /// (e.g. `Boxed<T>`, `impl<T> Option<T>`) — an empty `Vec` when there is
+    /// no `<`.
+    pub(crate) fn parse_optional_generic_args(&mut self) -> Vec<TypeExpr> {
         if !self.eat_punct(Punct::Lt) {
             return Vec::new();
         }

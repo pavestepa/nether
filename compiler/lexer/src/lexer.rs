@@ -350,6 +350,11 @@ impl Lexer<'_> {
             ',' => Some(Punct::Comma),
             ';' => Some(Punct::Semi),
             ':' => Some(Punct::Colon),
+            '.' if self.peek() == Some('.') && self.peek_at(1) == Some('.') => {
+                self.bump();
+                self.bump();
+                Some(Punct::DotDotDot)
+            }
             '.' => Some(Punct::Dot),
             '+' => Some(Punct::Plus),
             '-' => Some(Punct::Minus),

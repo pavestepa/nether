@@ -34,7 +34,7 @@ impl EmptyType {
 }
 
 fn main() {
-    let lang = Lang.new("Nether");
+    let mut lang = Lang.new("Nether");
     lang.set_name("Nether 0.1");
     println(lang.name);
     let wrapped = SomeType.new("tuple struct");

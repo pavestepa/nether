@@ -160,11 +160,20 @@ explicitly, exactly as in Swift.
 
 ### 3.5 Built-in heap types
 
-`String` (UTF-8) and `Array` (contiguous, growable — `push`, `pop`, `len`)
-are heap-allocated, ARC-managed, and implemented in the runtime (§9), not in
-Nether source. The compiler knows only their semantic shape (a `String` is a
-UTF-8 byte sequence, an `Array<T>` is a sequence of `T`); the actual storage
-layout is a runtime concern.
+`String` (UTF-8) and `Array` (contiguous, growable) are heap-allocated,
+ARC-managed types. The compiler knows only their semantic shape (a `String`
+is a UTF-8 byte sequence, an `Array<T>` is a sequence of `T`); the actual
+storage layout is a runtime concern.
+
+`Array<T>`'s core operations — `push`, `pop`, `len`, and indexing (`a[i]`) —
+are implemented in the runtime (§9), not in Nether source, for performance.
+Beyond that core, `Array<T>` is an ordinary generic type declared in the
+bundled prelude (`stdlib/array.nt`): user code can add further methods with
+`impl<T> Array<T> { ... }` the same way it extends `Option<T>`/`Result<T, E>`
+(§8), and those methods see an ordinary `self: Array<T>` receiver — indexing
+and the runtime methods above are all usable from inside them. `String`
+stays fully closed — it has no generic parameter and does not support user
+`impl` blocks.
 
 ### 3.6 Tuples
 
@@ -208,36 +217,123 @@ let mut a = 4;     // mutable binding
 - Assigning a stack/value type clones it.
 - Assigning a heap/ARC type shares the same object (retain).
 
-### 5.1 Explicit mutable-reference parameters
+### 5.1 Mutation requires `mut`
 
-Ordinary function/method parameters are pass-by-value for stack types
-(the callee gets a clone) and pass-by-shared-reference for heap types (ARC
-retain/release around the call, per §8). To let a callee mutate a **stack
-type** in the caller's own storage, the parameter is declared `mut`:
+A binding must be declared `mut` to mutate through it — directly
+(`x = ...`), through a field at any depth (`x.a.b = ...`), or by calling a
+`mut self` method anywhere along that chain — for **both stack and heap
+types**, with no exemption for either:
+
+```
+type Dog { name: String }
+
+impl Dog {
+    set_name(mut self, new_name: String) {
+        self.name = new_name;
+    }
+}
+
+fn main() {
+    let dog = Dog { name: "Rex" };
+    dog.name = "Buddy";      // error: `dog` is not `mut`
+    dog.set_name("Buddy");   // error: `set_name` needs a `mut self` receiver
+}
+```
+
+```
+type Dog { name: String }
+
+impl Dog {
+    set_name(mut self, new_name: String) {
+        self.name = new_name;
+    }
+}
+
+fn main() {
+    let mut dog = Dog { name: "Rex" };
+    dog.name = "Buddy";      // ok
+    dog.set_name("Buddy");   // ok
+}
+```
+
+Ordinary function/method parameters are pass-by-value for stack types (the
+callee gets a clone) and pass-by-shared-reference for heap types (ARC
+retain/release around the call, per §8). To let a callee mutate through a
+parameter in the caller's own storage — a stack type's own value, or a
+field/`mut self` method reached through a heap type's shared reference —
+the parameter is declared `mut`, mirroring `mut self`:
 
 ```
 fn increment(mut n: i32) {
     n = n + 1;   // mutates the caller's variable, not a clone
 }
 
+fn rename(mut d: Dog, new_name: String) {
+    d.set_name(new_name);   // mutates the caller's shared Dog, not a copy
+}
+
 fn main() {
     let mut x = 4;
     increment(mut x);   // caller must also mark the argument `mut`
     println(x);         // prints 5
+
+    let mut dog = Dog { name: "Rex" };
+    rename(mut dog, "Buddy");
+    println(dog.name);  // prints "Buddy"
 }
 ```
 
-This mirrors `mut self` (§7.3): the parameter is a genuine mutable alias to
-the caller's storage, not a copy. Unlike Rust's `&mut`, there is **no
-borrow-checker enforcement** — no exclusivity/aliasing rules are checked;
-this is a bare capability to mutate through an alias, consistent with
-Nether having no borrow checker at all. The caller must write `mut` at the
-call site as well as the callee declaring `mut` on the parameter, so that
-mutation is visible at both ends without requiring alias analysis to prove
-it. Heap/ARC types do not use this form — mutating a heap object's fields
-through a shared reference is already possible via its own `mut self`
-methods, since ARC sharing already gives every holder the same underlying
-object.
+The parameter is a genuine mutable alias to the caller's storage, not a
+copy. Unlike Rust's `&mut`, there is **no borrow-checker enforcement** — no
+exclusivity/aliasing rules are checked, so multiple `mut` aliases to the
+same heap object can coexist and each mutate through it; this is a bare
+capability to mutate through an alias, consistent with Nether having no
+borrow checker at all. The caller must write `mut` at the call site as well
+as the callee declaring `mut` on the parameter, so that mutation is visible
+at both ends without requiring alias analysis to prove it.
+
+### 5.2 Variadic parameters
+
+A function or method's **last** parameter may be declared variadic —
+`...ElementType` instead of a plain type — to accept zero or more
+trailing arguments:
+
+```
+fn sum(items: ...i32): i32 {
+    let mut total = 0;
+    for item in items {
+        total = total + item;
+    }
+    total
+}
+
+fn main() {
+    println(`${sum()}`);         // 0
+    println(`${sum(1)}`);        // 1
+    println(`${sum(1, 2, 3)}`);  // 6
+}
+```
+
+This is sugar over `Array<ElementType>`, not a distinct calling
+convention: the callee's own body sees an ordinary `Array<ElementType>`
+value (`items.len()`, `for item in items`, ... all work exactly as they
+would on any other array), and a call site's trailing arguments —
+whatever is left over after the fixed parameters — are collected into an
+`Array<ElementType>` literal automatically. Only one variadic parameter is
+allowed, and it must be the last one declared.
+
+A variadic parameter whose element type is `String` additionally accepts
+any `Into<String>` value at each trailing position, not just literal
+`String`s — the same conversion string-template interpolation (§2.3) and
+`println`/`print` (§12) already apply:
+
+```
+fn show(args: ...String) {}
+
+fn main() {
+    show(1, true, "text");   // each argument converted through Into<String>
+}
+```
 
 ---
 
@@ -677,7 +773,7 @@ mod lang;
 use self.lang.Lang;
 
 fn main() {
-    let a = Lang.new("Bobby");
+    let mut a = Lang.new("Bobby");
     a.set_name("Husky");
     println(a.into_string());
 }

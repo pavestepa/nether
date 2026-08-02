@@ -54,7 +54,7 @@ fn canonical_spec_example_compiles_to_a_verified_module() {
 use lang.Lang;
 
 fn main() {
-    let a = Lang.new("Bobby");
+    let mut a = Lang.new("Bobby");
     a.set_name("Husky");
     println(a.into_string());
 }
@@ -317,13 +317,13 @@ fn assigning_into_a_weak_field_calls_weak_release_and_weak_retain() {
         r#"
 type Child { name: String }
 type Parent { kid: weak Child }
-fn set_kid(p: Parent, c: Child) {
+fn set_kid(mut p: Parent, c: Child) {
     p.kid = c;
 }
 fn main() {
-    let p = Parent { kid: Child { name: "Rex" } };
+    let mut p = Parent { kid: Child { name: "Rex" } };
     let c = Child { name: "Buddy" };
-    set_kid(p, c);
+    set_kid(mut p, c);
 }
 "#,
     );
@@ -339,8 +339,18 @@ fn main() {
 
 #[test]
 fn reading_a_weak_field_calls_weak_upgrade_and_builds_an_option() {
+    // `Option` is an ordinary prelude `enum` now (`stdlib/option.nt`), not
+    // a compiler builtin — this crate's `compile` helper resolves a bare
+    // parsed `Module` directly (`nether_resolver::resolve`, no driver, no
+    // prelude loading), so the test declares its own stand-in with the
+    // same shape. Codegen only ever sees a resolved `DefId`, so this
+    // exercises the exact same lowering as the real bundled `Option`.
     let (_cg, ir) = compile(
         r#"
+enum Option<T> {
+    Some(T),
+    None,
+}
 type Child { name: String }
 type Parent { kid: weak Child }
 fn describe(p: Parent): String {
@@ -424,8 +434,13 @@ fn emits_a_valid_object_file() {
 
 #[test]
 fn option_of_heap_type_compiles_and_matches_its_payload() {
+    // Same stand-in as above — see that test's comment.
     let (_cg, ir) = compile(
         r#"
+enum Option<T> {
+    Some(T),
+    None,
+}
 type Child { name: String }
 fn describe(x: Option<Child>): String {
     match x {

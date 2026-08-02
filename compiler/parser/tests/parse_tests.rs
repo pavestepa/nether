@@ -118,6 +118,40 @@ use crate.Root;
 }
 
 #[test]
+fn use_enum_variant_path_parses_with_three_segments() {
+    // `use module.Enum.Variant;` — the parser places no cap on segment
+    // count; disambiguating a genuinely nested module path from an
+    // enum-variant reach-through is the driver's job, not the parser's.
+    let module = parse_ok("use option.Option.Some;\n");
+    let Item::Use(use_decl) = &module.items[0] else {
+        panic!("expected UseDecl")
+    };
+    let names: Vec<&str> = use_decl
+        .path
+        .segments
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect();
+    assert_eq!(names, ["option", "Option", "Some"]);
+}
+
+#[test]
+fn private_mod_declaration_parses() {
+    // `stdlib/mod.nt` writes its children this way — `private` recorded on
+    // `ModDecl` but (like `Field`/`FnDecl` privacy) not yet enforced.
+    let module = parse_ok("private mod option;\nmod result;\n");
+    let Item::Mod(option) = &module.items[0] else {
+        panic!("expected ModDecl")
+    };
+    assert_eq!(option.name.name.as_str(), "option");
+    assert!(option.private);
+    let Item::Mod(result) = &module.items[1] else {
+        panic!("expected ModDecl")
+    };
+    assert!(!result.private);
+}
+
+#[test]
 fn tuple_struct_and_unit_type() {
     let module = parse_ok("type Point(i32, i32);\ntype EmptyType;\n");
     assert_eq!(module.items.len(), 2);
@@ -183,6 +217,47 @@ enum Result<T, E> {
 }
 
 #[test]
+fn variadic_parameter_parses_as_element_type_with_flag_set() {
+    let module = parse_ok("fn println(args: ...String) {\n}\n");
+    let Item::Fn(f) = &module.items[0] else {
+        panic!("expected FnDecl")
+    };
+    assert_eq!(f.params.len(), 1);
+    assert!(f.params[0].variadic);
+    let nether_ast::TypeExpr::Named { path, .. } = &f.params[0].ty else {
+        panic!("expected a Named element type")
+    };
+    assert_eq!(path.segments[0].name.as_str(), "String");
+}
+
+#[test]
+fn variadic_parameter_must_be_last() {
+    let (_, diags) = parse_with_diagnostics("fn f(args: ...String, x: i32) {}\n");
+    assert!(diags.iter().any(|d| d.message.contains("must be the last")));
+}
+
+#[test]
+fn private_before_a_non_mod_item_reports_a_diagnostic_and_terminates() {
+    // Regression: `private` followed by anything but `mod` used to hang
+    // the parser forever. `parse_item`'s dedicated `private mod` lookahead
+    // consumes `private` only when `mod` follows; every other case falls
+    // through to the ordinary "expected an item" diagnostic — but
+    // `synchronize_item`'s recovery loop used to list bare `Private` as a
+    // safe restart point, so it broke immediately without ever consuming
+    // the token, and the outer parse loop re-entered `parse_item` at the
+    // same position forever. This test itself hanging (rather than
+    // failing) would be exactly that regression.
+    let (module, diags) =
+        parse_with_diagnostics("private type printsys: PrintF;\nfn after(): i32 { 1 }\n");
+    assert!(diags.iter().any(|d| d.message.contains("Private")));
+    // Recovery must still make it to the next real item.
+    assert!(module.items.iter().any(|item| matches!(
+        item,
+        Item::Fn(f) if f.name.name.as_str() == "after"
+    )));
+}
+
+#[test]
 fn generic_bound_on_fn() {
     let module = parse_ok("fn f<T: Sound>(x: T) {\n    println(x);\n}\n");
     let Item::Fn(f) = &module.items[0] else {
@@ -209,6 +284,52 @@ fn generic_bound_can_itself_be_generic() {
     };
     assert_eq!(path.segments[0].name.as_str(), "Into");
     assert_eq!(generics.len(), 1);
+}
+
+#[test]
+fn explicit_generic_impl_block_parses_generics_and_target_args() {
+    // `impl<T> Option<T> { ... }` — the Rust-like explicit form, needed to
+    // bind a type parameter for a builtin owner (`Option`) with no local
+    // declaration. The implicit `impl Boxed { ... }` form still parses
+    // with both new fields empty.
+    let module = parse_ok(
+        r#"
+impl<T> Option<T> {
+    is_some(self): bool {
+        true
+    }
+}
+
+type Boxed<T> {
+    value: T
+}
+
+impl Boxed {
+    get(self): T {
+        self.value
+    }
+}
+"#,
+    );
+    let Item::Impl(explicit) = &module.items[0] else {
+        panic!("expected ImplBlock")
+    };
+    assert_eq!(explicit.target.name.as_str(), "Option");
+    assert_eq!(explicit.generics.len(), 1);
+    assert_eq!(explicit.generics[0].name.name.as_str(), "T");
+    assert_eq!(explicit.target_args.len(), 1);
+    let nether_ast::TypeExpr::Named { path, generics, .. } = &explicit.target_args[0] else {
+        panic!("expected a Named target arg")
+    };
+    assert_eq!(path.segments[0].name.as_str(), "T");
+    assert!(generics.is_empty());
+
+    let Item::Impl(implicit) = &module.items[2] else {
+        panic!("expected ImplBlock")
+    };
+    assert_eq!(implicit.target.name.as_str(), "Boxed");
+    assert!(implicit.generics.is_empty());
+    assert!(implicit.target_args.is_empty());
 }
 
 #[test]

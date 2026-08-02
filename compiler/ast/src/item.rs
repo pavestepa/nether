@@ -18,6 +18,14 @@ pub struct Module {
     /// maps to the file/module that path loaded. A parser operating on one
     /// standalone source leaves this empty.
     pub imports: HashMap<NodeId, FileId>,
+    /// Like `imports`, but for a `use module.Enum.Variant;` path (3+
+    /// segments) where the trailing *two* segments name an enum and one
+    /// of its variants within the target file, rather than the trailing
+    /// *one* segment `imports` maps to a top-level name. Lets
+    /// `resolver::collect` promote a bare `Variant` name (e.g. `Some`) as
+    /// an expression-position value, mirroring how `imports`/`prelude`
+    /// promote an ordinary top-level name.
+    pub variant_imports: HashMap<NodeId, FileId>,
 }
 
 #[derive(Debug, Clone)]
@@ -69,10 +77,22 @@ pub struct Field {
 }
 
 /// `impl Dog { ... }` or `impl Dog: Sound { ... }` (language-spec §6-7).
+///
+/// A target's own generic parameters are normally implicit — declared once
+/// on the `type`/`enum` and automatically in scope in every `impl` block
+/// (no `<T>` repeated after `impl`). `generics`/`target_args` instead hold
+/// the Rust-like explicit form, `impl<T> Boxed<T> { ... }`, which is the
+/// only way to bind a type parameter for an owner with no local
+/// declaration to point at (the compiler-builtin `Option`/`Result`). Both
+/// are empty for the implicit form. When present, `target_args` must be
+/// exactly a permutation of `generics`' names — positional renaming only,
+/// not specialization (`impl Option<i32>` stays unsupported).
 #[derive(Debug, Clone)]
 pub struct ImplBlock {
     pub id: NodeId,
+    pub generics: Vec<GenericParam>,
     pub target: Ident,
+    pub target_args: Vec<TypeExpr>,
     /// The interfaces in `impl Dog: Sound, Clone` — full type expressions
     /// (not bare
     /// [`Path`]) because an interface name may itself be generic
@@ -182,6 +202,12 @@ pub struct Param {
     pub id: NodeId,
     pub name: Ident,
     pub mutable: bool,
+    /// `true` for `name: ...Type` — a trailing variadic parameter that
+    /// collects every remaining call-site argument. `ty` is then the
+    /// *element* type (`Type`, not `Array<Type>`); a call site collects
+    /// its trailing arguments into an `Array<Type>` automatically. Parser
+    /// rejects this anywhere but the last parameter.
+    pub variadic: bool,
     pub ty: TypeExpr,
     pub span: Span,
 }
@@ -196,10 +222,14 @@ pub struct UseDecl {
 
 /// `mod child;` declares and loads a child file module. The driver maps
 /// it to `child.nt`/`child.nr` or `child/mod.nt`/`child/mod.nr` relative
-/// to the declaring module.
+/// to the declaring module. `private mod child;` records the same
+/// declaration with `private == true`; like [`Field::private`] and
+/// [`FnDecl::private`] elsewhere, this is recorded but not yet enforced by
+/// `resolver`/`typecheck`.
 #[derive(Debug, Clone)]
 pub struct ModDecl {
     pub id: NodeId,
     pub name: Ident,
+    pub private: bool,
     pub span: Span,
 }

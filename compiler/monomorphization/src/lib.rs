@@ -313,6 +313,27 @@ impl<'a> Mono<'a> {
                     ty.clone(),
                 )
             }
+            HirExprKind::CallMethod {
+                receiver,
+                method_name,
+                generic_args,
+                args,
+            } => {
+                let receiver = self.subst_expr(receiver, subst);
+                let args = self.subst_exprs(args, subst);
+                let generic_args: Vec<Type> = generic_args
+                    .iter()
+                    .map(|ty| subst_type(ty, subst))
+                    .collect();
+                self.resolve_generic_method_call(
+                    receiver,
+                    method_name,
+                    false,
+                    args,
+                    &generic_args,
+                    ty.clone(),
+                )
+            }
             HirExprKind::CallArrayMethod {
                 receiver,
                 method,
@@ -506,20 +527,32 @@ impl<'a> Mono<'a> {
                 _ => {}
             }
         }
-        let owner = owner_def_id(&receiver.ty).unwrap_or_else(|| {
+        let owner = owner_def_id(&receiver.ty, self.hir.array_owner).unwrap_or_else(|| {
             panic!("monomorphization: generic method call's receiver substituted to non-nominal type {:?} (see this crate's module docs)", receiver.ty)
         });
-        let target_hir_id = *self
+        // `receiver.ty` is already fully substituted here (the caller
+        // always passes an already-`subst_expr`'d receiver) — its owner
+        // arguments are the exact-match key an `impl Owner<ConcreteArgs>`
+        // specialization was registered under, so this is the one place
+        // that override actually takes effect, including for a call site
+        // written inside another still-generic function: *that* function
+        // only reaches here once monomorphized for one concrete
+        // instantiation, at which point `receiver.ty` is concrete too
+        // (`nether_hir::MethodFnSet::for_args`; mirrors `nether_typecheck`
+        // picking the same override at typecheck time whenever the
+        // receiver was already concrete there too).
+        let receiver_owner_args: &[Type] = match &receiver.ty {
+            Type::Struct(_, args) | Type::TupleStruct(_, args) | Type::Enum(_, args) => args,
+            Type::Array(elem) => std::slice::from_ref(elem.as_ref()),
+            _ => &[],
+        };
+        let target_hir_id = self
             .hir
             .methods
             .get(&(owner, method_name.clone()))
+            .and_then(|set| set.for_args(receiver_owner_args))
             .unwrap_or_else(|| panic!("monomorphization: no impl of method `{method_name}` found for the substituted receiver type (typecheck should have rejected this earlier)"));
-        let mut target_generic_args = match &receiver.ty {
-            Type::Struct(_, args) | Type::TupleStruct(_, args) | Type::Enum(_, args) => {
-                args.clone()
-            }
-            _ => Vec::new(),
-        };
+        let mut target_generic_args = receiver_owner_args.to_vec();
         target_generic_args.extend_from_slice(generic_args);
         let mut full_args = Vec::with_capacity(args.len() + usize::from(!is_static));
         if !is_static {
@@ -566,16 +599,19 @@ fn placeholder_for(hir_fn: &HirFunction) -> MonoFunction {
     }
 }
 
-/// `Struct`/`TupleStruct`/`Enum` are the only `Type` variants that can own
-/// an `impl` block (language-spec §7/§8) — everything else (primitives,
-/// tuples, arrays, strings, functions, interfaces-as-bounds) never reaches
-/// here for a well-typed program, since `typecheck` only ever produces a
-/// `CallGenericMethod` when the bound bound-check succeeded against a
-/// declared `impl`.
-fn owner_def_id(ty: &Type) -> Option<DefId> {
+/// `Struct`/`TupleStruct`/`Enum`/`Array` are the only `Type` variants that
+/// can own an `impl` block (language-spec §7/§8) — everything else
+/// (primitives, tuples, strings, functions, interfaces-as-bounds) never
+/// reaches here for a well-typed program, since `typecheck` only ever
+/// produces a `CallGenericMethod`/`CallMethod` when the bound check
+/// succeeded against a declared `impl`. Unlike the other three, a
+/// `Type::Array(_)` carries no `DefId` of its own — `array_owner` (looked
+/// up once in `hir::lower` and threaded through `HirModule`) supplies it.
+fn owner_def_id(ty: &Type, array_owner: Option<DefId>) -> Option<DefId> {
     match ty {
         Type::Struct(id, _) | Type::TupleStruct(id, _) => Some(*id),
         Type::Enum(id, _) => Some(*id),
+        Type::Array(_) => array_owner,
         _ => None,
     }
 }

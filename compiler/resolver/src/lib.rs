@@ -7,9 +7,12 @@
 //!
 //! Responsibilities:
 //! - Build the top-level namespace ([`def::Definitions`]): every
-//!   primitive, built-in (`String`, `Array`, `Option`, `Result`,
-//!   `println`, `print`), and user-declared `type`/`enum`/`interface`/`fn`,
-//!   with `impl` block method names merged into their target's entry.
+//!   primitive, built-in (`String`, `Array`, `println`, `print`), the
+//!   bundled prelude (`Option`/`Result` included — ordinary `enum`
+//!   declarations in `stdlib/`, not builtins; see
+//!   [`def::Definitions::promote_to_prelude`]), and user-declared
+//!   `type`/`enum`/`interface`/`fn`, with `impl` block method names
+//!   merged into their target's entry.
 //! - Build nested local scopes for function/method/closure bodies —
 //!   `self`, parameters, `let` bindings, and pattern bindings (match arms,
 //!   `for`) — with inner bindings shadowing outer ones of the same name.
@@ -49,5 +52,5 @@ mod resolve;
 mod scope;
 
 pub use def::{Def, DefId, DefKind, Definitions};
-pub use resolve::{resolve, PathResolution, Resolution, ResolvedNames};
+pub use resolve::{resolve, resolve_with_prelude, PathResolution, Resolution, ResolvedNames};
 pub use scope::LocalId;

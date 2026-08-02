@@ -133,9 +133,25 @@ impl<'a> FnBuilder<'a> {
         // (including any parameter-retain, via `lower_escaping_value`) —
         // this step only needs to release the parameter scope
         // (`lower_block` already popped and released its own).
+        let body_diverges = matches!(f.body.ty, Type::Never);
         let result = self.lower_expr(&f.body);
         self.release_scopes(0, escaping_local(&result));
-        self.terminate_current(Terminator::Return(result));
+        if body_diverges {
+            // The body's own control flow already reached a `return`/
+            // `break`/`continue` on every path (`Type::Never`, mirrors
+            // `nether_typecheck::check::check_block_with_expected`) — the
+            // block `self.current` now points at is unreachable dead
+            // code, reached only via `terminate_current`'s "fresh block
+            // after a terminator" bookkeeping. `lower_block`'s own
+            // `Operand::Unit` placeholder for "no tail" would otherwise
+            // get used as this function's `Terminator::Return` operand
+            // here, which fails LLVM verification whenever `f.ret` isn't
+            // itself `()` — LLVM requires every terminator to be
+            // well-typed for its function even in an unreachable block.
+            self.terminate_current(Terminator::Unreachable);
+        } else {
+            self.terminate_current(Terminator::Return(result));
+        }
 
         let blocks = self
             .blocks

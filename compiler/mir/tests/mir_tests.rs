@@ -84,6 +84,41 @@ fn main() {
 }
 
 #[test]
+fn explicit_early_return_with_no_tail_expression_terminates_correctly() {
+    // A fn body consisting only of `return a;` (no trailing tail
+    // expression) used to lower its dead fallthrough block's terminator
+    // as `Terminator::Return(Operand::Unit)` regardless of the function's
+    // real return type, which LLVM's verifier rejects whenever `ret` is
+    // not itself `()`. The real `return a;` should produce exactly one
+    // `Terminator::Return` operand typed for `i32`, and any leftover
+    // unreachable block must be `Terminator::Unreachable`, never another
+    // `Return`.
+    let functions = build(
+        r#"
+fn foo(a: i32): i32 {
+    return a;
+}
+fn main() {
+    println(`${foo(2)}`);
+}
+"#,
+    );
+    let foo = find_fn(&functions, "foo");
+    let returns: Vec<&Terminator> = foo
+        .blocks
+        .iter()
+        .map(|b| &b.terminator)
+        .filter(|t| matches!(t, Terminator::Return(_)))
+        .collect();
+    assert_eq!(
+        returns.len(),
+        1,
+        "expected exactly one Return terminator, found {returns:?}"
+    );
+    assert!(matches!(returns[0], Terminator::Return(Operand::Local(_))));
+}
+
+#[test]
 fn struct_field_read_binds_a_new_local_with_a_retain_and_the_parameter_is_released_at_scope_exit() {
     // Mirrors arc-model.md's worked `describe` example exactly: a field
     // read binds a new local (retained once, §3.1); returning that local
@@ -294,7 +329,7 @@ impl Dog {
     }
 }
 fn main() {
-    let d = Dog { name: "Rex" };
+    let mut d = Dog { name: "Rex" };
     d.set_name("Buddy");
 }
 "#,
@@ -387,13 +422,13 @@ fn assigning_into_a_weak_field_uses_weak_release_and_weak_retain() {
         r#"
 type Child { name: String }
 type Parent { kid: weak Child }
-fn set_kid(p: Parent, c: Child) {
+fn set_kid(mut p: Parent, c: Child) {
     p.kid = c;
 }
 fn main() {
-    let p = Parent { kid: Child { name: "Rex" } };
+    let mut p = Parent { kid: Child { name: "Rex" } };
     let c = Child { name: "Buddy" };
-    set_kid(p, c);
+    set_kid(mut p, c);
 }
 "#,
     );
@@ -403,7 +438,12 @@ fn main() {
     // therefore emitted as weak-retain by codegen. It owns the projected
     // snapshot while the store occurs; two WeakReleases then cancel that
     // incidental snapshot credit and the field's original weak credit.
-    // The explicit WeakRetain owns the replacement field value.
+    // The explicit WeakRetain owns the replacement field value. `p` is
+    // now a `mut` (borrowed) parameter — mutating a heap-typed field
+    // through it requires `mut` under the language's Rust-like mutation
+    // rules — so, like `mut self` elsewhere in this file, the caller
+    // retains ownership and the callee neither retains nor releases it;
+    // only `c` (an ordinary owned heap param) gets the trailing release.
     assert_eq!(
         shape,
         vec![
@@ -411,7 +451,6 @@ fn main() {
             "weak_retain",
             "weak_release",
             "weak_release",
-            "release",
             "release",
         ],
     );
