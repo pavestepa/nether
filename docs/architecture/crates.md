@@ -18,6 +18,29 @@ cli/
 examples/
 ```
 
+## Internal source layout
+
+Large passes are split by responsibility while keeping their public crate
+API unchanged:
+
+- parser expressions are separated into postfix/core, atoms, control flow,
+  and precedence helpers;
+- resolver separates declaration collection, expression traversal, path
+  resolution, and diagnostic helpers;
+- typecheck separates declaration signatures, interface assembly, layout
+  validation, expression/control/call checking, and generic inference;
+- HIR, monomorphization, and MIR separate core context from expression,
+  call, pattern, closure, and control-flow lowering;
+- LLVM and codegen separate memory access, arithmetic, runtime calls,
+  aggregate construction, terminators, and object emission;
+- driver module-graph loading owns its traversal state in a dedicated
+  loader instead of passing a wide mutable argument list recursively.
+
+Compiler and test Rust files are kept below 500 lines. Integration suites
+use small child modules while sharing setup helpers from their root test
+crate. These are compile-time module boundaries only and add no runtime
+dispatch.
+
 ## `compiler/ast`
 
 Defines immutable source-shaped nodes for items, expressions, statements,
@@ -221,11 +244,10 @@ Implements the `print` and `println` built-ins for Nether `String` values.
 
 ## `stdlib`
 
-`Option` and `Result` are compiler-known generic enums, but their reusable
-operations are ordinary Nether code in `stdlib/option.nt` and
-`stdlib/result.nt`. The current modules provide predicates, `map` and
-`unwrap_or`-style functions. They compile through the same module graph as
-user code; there are no native `option` or `result` runtime crates.
+`Option`, `Result`, and `Array` are ordinary generic Nether declarations in
+`stdlib/option.nt`, `stdlib/result.nt`, and `stdlib/array.nt`. Their methods
+compile through the same module graph as user code; there are no native
+option/result runtime crates.
 
 ## `cli`
 

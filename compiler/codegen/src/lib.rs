@@ -56,6 +56,7 @@
 //! - An `enum`'s LLVM layout is a flat, non-overlapping struct (every
 //!   variant's fields coexist, unused ones simply wasted) rather than a
 //!   real overlapping tagged union — see `layout.rs`'s `EnumLayout` docs.
+//!
 //! Runtime calls target the implemented C ABI in `runtime/*`; dynamic
 //! closure calls use an explicit code-pointer/environment ABI.
 
@@ -98,18 +99,17 @@ pub fn generate<'ctx>(
         .collect();
     let mir_functions: HashMap<MonoFnId, &MirFunction> =
         functions.iter().map(|f| (f.id, f)).collect();
+    let function_env = function::FunctionEnv {
+        m: &m,
+        layout: &layout,
+        runtime: &runtime,
+        shims: &shims,
+        funcs: &funcs,
+        mir_functions: &mir_functions,
+    };
 
     for (f, &llvm_fn) in functions.iter().zip(&llvm_fns) {
-        function::build_function(
-            &m,
-            &layout,
-            &runtime,
-            &shims,
-            &funcs,
-            &mir_functions,
-            f,
-            llvm_fn,
-        );
+        function::build_function(&function_env, f, llvm_fn);
     }
 
     emit_entry_point(&m, functions, &funcs);

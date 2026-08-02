@@ -22,6 +22,13 @@ pub struct HirFnId(pub(crate) u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct HirLocalId(pub(crate) u32);
 
+impl HirLocalId {
+    /// Dense per-function index used by downstream lowering tables.
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
 /// Every function/method in the module, plus the structural type
 /// information (`nether_typecheck::Signatures`) needed to make sense of
 /// them — carried forward as-is rather than re-wrapped, since it's already

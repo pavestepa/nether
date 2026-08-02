@@ -33,6 +33,9 @@
 //! precedence table in `expr.rs` is the extension point for new operators.
 
 mod expr;
+mod expr_atom;
+mod expr_control;
+mod expr_helpers;
 mod item;
 mod parser;
 mod pattern;

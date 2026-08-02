@@ -30,6 +30,8 @@
 //! language-spec §14) would be a lexer-only addition.
 
 mod lexer;
+#[cfg(test)]
+mod lexer_tests;
 mod token;
 
 pub use lexer::tokenize;
