@@ -511,21 +511,133 @@ impl Checker<'_> {
                 let ExprKind::Path(path) = &callee.kind else {
                     return HashSet::new();
                 };
-                let Some(Resolution::Def(id)) = self
-                    .resolved
-                    .path_res
-                    .get(&path.id)
-                    .map(|resolution| resolution.base)
-                else {
+                let Some(resolution) = self.resolved.path_res.get(&path.id) else {
                     return HashSet::new();
                 };
-                let Some(sig) = self.sigs.fns.get(&id) else {
+                let origins = match resolution.base {
+                    Resolution::Def(id) => self
+                        .sigs
+                        .fns
+                        .get(&id)
+                        .map(|sig| sig.return_origins.as_slice()),
+                    Resolution::StaticMember(owner, index) => self
+                        .resolved
+                        .definitions
+                        .get(owner)
+                        .methods
+                        .get(index as usize)
+                        .and_then(|name| self.sigs.method(owner, name, ReceiverDomain::Static))
+                        .map(|sig| sig.return_origins.as_slice()),
+                    Resolution::Local(local) if path.segments.len() == resolution.consumed => {
+                        let Some(summary) = self.local_callable_origins.get(&local) else {
+                            return HashSet::new();
+                        };
+                        let mut found = HashSet::new();
+                        for origin in summary {
+                            match origin {
+                                ClosureOrigin::Parameter(index) => {
+                                    if let Some(argument) = args.get(*index) {
+                                        found.extend(self.reference_origins_of_argument(argument));
+                                    }
+                                }
+                                ClosureOrigin::Captured(origin) => {
+                                    found.insert(*origin);
+                                }
+                            }
+                        }
+                        return found;
+                    }
+                    Resolution::Local(local) if path.segments.len() == resolution.consumed + 1 => {
+                        let Some((receiver_ty, _)) = self.locals.get(&local) else {
+                            return HashSet::new();
+                        };
+                        let domain = ReceiverDomain::of_receiver_ty(receiver_ty);
+                        let stripped = receiver_ty.strip_indirection();
+                        let (owner, owner_args): (DefId, &[Type]) = match stripped {
+                            Type::Struct(id, args)
+                            | Type::TupleStruct(id, args)
+                            | Type::Enum(id, args) => (*id, args),
+                            _ => return HashSet::new(),
+                        };
+                        let method = &path.segments[resolution.consumed].name;
+                        let Some(sig) = self.sigs.method_for(owner, method, domain, owner_args)
+                        else {
+                            return HashSet::new();
+                        };
+                        let mut found = HashSet::new();
+                        for origin in &sig.return_origins {
+                            match origin {
+                                ReturnOrigin::SelfValue => {
+                                    if let Some(origin) =
+                                        self.reference_origins.get(&local).copied()
+                                    {
+                                        found.insert(origin);
+                                    } else if matches!(receiver_ty, Type::Unique(_)) {
+                                        found.insert(BorrowOrigin::Local(local));
+                                    }
+                                }
+                                ReturnOrigin::Parameter(index) => {
+                                    if let Some(argument) = args.get(*index) {
+                                        found.extend(self.reference_origins_of_argument(argument));
+                                    }
+                                }
+                            }
+                        }
+                        return found;
+                    }
+                    _ => None,
+                };
+                let Some(origins) = origins else {
+                    return HashSet::new();
+                };
+                origins
+                    .iter()
+                    .filter_map(|origin| match origin {
+                        ReturnOrigin::Parameter(index) => args.get(*index),
+                        ReturnOrigin::SelfValue => None,
+                    })
+                    .flat_map(|argument| self.reference_origins_of_argument(argument))
+                    .collect()
+            }
+            ExprKind::MethodCall {
+                receiver,
+                method,
+                args,
+                ..
+            } => {
+                let Some(receiver_ty) = self.expr_types.get(&receiver.id) else {
+                    return HashSet::new();
+                };
+                let domain = ReceiverDomain::of_receiver_ty(receiver_ty);
+                let stripped = receiver_ty.strip_indirection();
+                let (owner, owner_args): (DefId, &[Type]) = match stripped {
+                    Type::Struct(id, args) | Type::TupleStruct(id, args) | Type::Enum(id, args) => {
+                        (*id, args)
+                    }
+                    Type::Array(element) => {
+                        let Some(id) = self.resolved.definitions.lookup(&Symbol::new("Array"))
+                        else {
+                            return HashSet::new();
+                        };
+                        (id, std::slice::from_ref(element.as_ref()))
+                    }
+                    _ => return HashSet::new(),
+                };
+                let Some(sig) = self
+                    .sigs
+                    .method_for(owner, &method.name, domain, owner_args)
+                else {
                     return HashSet::new();
                 };
                 sig.return_origins
                     .iter()
-                    .filter_map(|index| args.get(*index))
-                    .flat_map(|argument| self.reference_origins_of_argument(argument))
+                    .flat_map(|origin| match origin {
+                        ReturnOrigin::SelfValue => self.reference_origins_of_argument(receiver),
+                        ReturnOrigin::Parameter(index) => args
+                            .get(*index)
+                            .map(|argument| self.reference_origins_of_argument(argument))
+                            .unwrap_or_default(),
+                    })
                     .collect()
             }
             ExprKind::If {
@@ -573,16 +685,24 @@ impl Checker<'_> {
 
     pub(super) fn check_closure(
         &mut self,
+        closure_id: NodeId,
         params: &[nether_ast::Param],
         body: &Expr,
         expected: Option<&Type>,
     ) -> Type {
+        self.push_local_scope();
         let param_tys: Vec<Type> = params
             .iter()
             .map(|p| lower_type_expr(&p.ty, self.resolved, self.decls, self.diagnostics))
             .collect();
         for (p, t) in params.iter().zip(param_tys.iter()) {
             self.bind_local(p.id, t.clone(), p.mutable);
+            if matches!(t, Type::Ref(_) | Type::MutRef(_)) {
+                if let Some(local) = self.resolved.locals.get(&p.id).copied() {
+                    self.reference_origins
+                        .insert(local, BorrowOrigin::Parameter(local));
+                }
+            }
         }
         let expected_ret = match expected {
             Some(Type::Function(expected_params, expected_ret))
@@ -599,6 +719,33 @@ impl Checker<'_> {
         let outer_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
         let ret_ty = self.check_expr_with_expected(body, expected_ret);
         self.loop_depth = outer_loop_depth;
+        if matches!(ret_ty, Type::Ref(_) | Type::MutRef(_)) {
+            let param_indices = params
+                .iter()
+                .enumerate()
+                .filter_map(|(index, param)| {
+                    self.resolved
+                        .locals
+                        .get(&param.id)
+                        .copied()
+                        .map(|local| (local, index))
+                })
+                .collect::<HashMap<_, _>>();
+            let mut origins = self
+                .reference_origins_of_expr(body)
+                .into_iter()
+                .map(|origin| match origin {
+                    BorrowOrigin::Parameter(local) if param_indices.contains_key(&local) => {
+                        ClosureOrigin::Parameter(param_indices[&local])
+                    }
+                    origin => ClosureOrigin::Captured(origin),
+                })
+                .collect::<Vec<_>>();
+            let mut seen = HashSet::new();
+            origins.retain(|origin| seen.insert(*origin));
+            self.closure_origins.insert(closure_id, origins);
+        }
+        self.pop_local_scope();
         Type::Function(param_tys, Box::new(ret_ty))
     }
 }

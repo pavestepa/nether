@@ -45,7 +45,8 @@ ownership-domain conversions. Returned-reference origins are checked and
 propagated through named-function call chains, including storage in `let`;
 default-private visibility with explicit `pub` is implemented for declarations,
 imports/re-exports, fields, and methods;
-NLL-style last-use inference and method/closure origin summaries remain open.
+Method/closure origin summaries and last-use shortening are implemented;
+loop-carried and closure-captured borrows conservatively retain lexical scope.
 Stages 3–6 have not
 started as staged projects, although the pre-existing compiler already has
 the baseline trait system and limited concrete instance-method
@@ -142,9 +143,10 @@ typechecker mirrors resolver block scopes, records each reference local's
 origin, prevents moves/direct mutation/conflicting call or stored borrows
 while it is live, and releases exclusivity when the reference leaves its
 lexical block. Heap representation is verified end-to-end through
-HIR/MIR/codegen. This is deliberately lexical, not NLL: last-use shortening
-inside a block remains part of the origin-inference remainder, and inline
-references still await addressable-local codegen.
+HIR/MIR/codegen. Last-use shortening releases ordinary stored borrows after
+their final use; loop-carried and closure-captured references stay pinned to
+the lexical scope because a single AST traversal cannot prove their final
+runtime iteration/use. Inline references still await addressable-local codegen.
 
 *Returned-reference origin inference and function summaries — done.* A `:&T`/`:&mut T`
 return expression is traced through bare reference locals and `if`/`match`/
@@ -157,7 +159,8 @@ origin summaries computed to a fixed point, so origin is preserved through
 declaration-order-independent call chains. A returned reference can be stored
 in `let`; its ultimate owned-local origin is then registered as a lexical
 borrow and prevents moves, mutation, and conflicting borrows until scope exit.
-Method and closure summaries remain follow-up work.
+Instance/static methods carry the same summaries, with `self` represented as a
+distinct origin, and closure summaries preserve parameter and captured origins.
 
 *`to(value)` domain conversion — 3 of 4 transitions done.* Checked each of
 the spec's four transitions (spec §9) against what's actually sound without
@@ -182,18 +185,18 @@ mishandled — deferred as a smaller follow-up (open question: can an
 ownership-qualified type appear in a `<...>` generic-argument list at
 all, given nothing else in the grammar has exercised that position).
 
-*Still open, this stage:* NLL-style last-use lifetime/origin inference (no
-surface syntax — Rust NLL/Polonius-inspired internally), method/closure origin
-summaries; `to<T>(value)`'s
+*Still open, this stage:* more precise loop/capture-sensitive regions beyond
+the current conservative pinning; `to<T>(value)`'s
 explicit form; `T -> :T` (needs `Clone`, Stage 3); reference-to-inline-
 value codegen; `move () => {}` closure captures (today's closures already
 move-check a captured `:T`/`:t` free variable at the closure literal's own
 position, since the move checker walks a closure's body as an ordinary
 part of the same AST traversal — but HIR's own capture-mode analysis,
 `compiler/hir/src/lower/captures.rs`, still has no by-value-vs-reference
-distinction). `:T` gains its real unrefcounted runtime representation once
-uniqueness is actually enforced by the remainder of this stage — until
-then, `:T` and `T` share ARC representation (spec §3.2).
+distinction). Ownership and borrow rules for `:T` are already enforced by the
+typechecker; switching its lowering to a real unrefcounted runtime
+representation remains open. Until then, `:T` and `T` share ARC
+representation (spec §3.2).
 
 *Sequencing note:* the still-open remainder is the dependency root for
 almost everything downstream that touches the unique-ownership domain

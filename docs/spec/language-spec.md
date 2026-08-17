@@ -35,12 +35,12 @@ system — not one or the other.
 
 | Concern | Nether |
 |---|---|
-| Memory management | **both** ARC (for `T`) and unique ownership + borrow checking (for `:T`) — the programmer chooses per type/binding, not the language globally. Move checking (use-after-move/double-move) is enforced as of Stage 2; the rest of borrow checking (`:&T`/`:&mut T` exclusivity, references escaping via return position) is not yet |
+| Memory management | **both** ARC (for `T`) and unique ownership + borrow checking (for `:T`) — the programmer chooses per type/binding, not the language globally. Stage 2 enforces moves, borrow exclusivity, returned-reference origins, callable summaries, and ordinary last-use shortening |
 | Polymorphism | traits, static dispatch by default; existential (`any Trait`) and opaque (`some Trait`) types for the rest |
 | Generics | monomorphized in release builds; witness-table/dictionary dispatch in development builds *(dev-mode witness tables: not yet implemented — Stage 3+; Stage 1 stays always-monomorphized)* |
 | Concurrency | async/await over a Tokio-backed runtime, plus raw OS threads *(not yet implemented — Stage 4)* |
 | Unsafe code | explicit `unsafe`, raw pointers, C ABI FFI *(not yet implemented — Stage 5)* |
-| Lifetimes | no explicit lifetime syntax; lexical origins and interprocedural function summaries power current borrow checking *(NLL last-use inference remains Stage 2 work — see §3)* |
+| Lifetimes | no explicit lifetime syntax; inferred origins, callable summaries, and last-use shortening power borrow checking *(loop/capture-sensitive regions remain conservative — see §3)* |
 
 Everything below assumes these are the only permanent design constraints:
 no explicit lifetime syntax, no `dyn` keyword, no `::` path separator.
@@ -132,7 +132,7 @@ orthogonal:
 
 | | Ordinary | Uniquely owned |
 |---|---|---|
-| **Heap/reference category** (`T`, e.g. `User`) | `T` — atomic ARC reference. Assignment copies the reference (aliasing); mutation needs `mut` permission but not exclusivity. | `:T` — uniquely owned heap value. Move semantics; use-after-move is a compile error *(enforced — Stage 2's move checker)*. Rust-like borrowing (`:&T`, `:&mut T`) itself — exclusivity while a borrow is live, references escaping via return position — remains *(not yet implemented — Stage 2, remainder)*. |
+| **Heap/reference category** (`T`, e.g. `User`) | `T` — ARC reference. Assignment copies the reference (aliasing); mutation needs `mut` permission but not exclusivity. Atomic refcounts are deferred to Stage 6. | `:T` — uniquely owned heap value. Stage 2 enforces moves, live-borrow exclusivity, returned-reference origins, callable summaries, and ordinary last-use shortening. Loop/capture-sensitive regions remain conservative. |
 | **Inline/value category** (`t`, e.g. `i32`, `color`) | `t` — ordinary inline value. Implicitly copyable, normal value semantics. | `:t` — uniquely owned inline value. Same machine representation as `t`; move-only *semantically* — use-after-move is a compile error *(enforced — Stage 2's move checker, as above)*. |
 
 The representation category comes from **how the type is defined**:
@@ -162,7 +162,7 @@ println(d);   // ok
 println(c);   // compile error as of Stage 2 — "use of a value after it was moved"
 ```
 
-### 3.1 Reference chains **[parameters: Stage 2; deeper chains/return position/inline types: partial or not yet — see below]**
+### 3.1 Reference chains **[heap references and returned origins: Stage 2; deeper chains/inline references: partial — see below]**
 
 References only exist inside the unique/owned domain — there is no bare
 `&T` without a leading `:`. `:&T` (shared borrow) and `:&mut T` (exclusive
@@ -181,9 +181,8 @@ uses (§8.1 — no extra caller-side marker, unlike `mut`). Only a bare local
 qualifies (there's no other way to name a place to borrow); `:&mut T`
 additionally requires the binding be `mut`. Within one call's argument
 list, the same local can't be borrowed `:&mut` twice, or `:&` and `:&mut`
-together — call-scoped exclusivity, enforced without any lifetime/region
-machinery, since nothing yet lets a `:&T`/`:&mut T` value outlive the one
-call expression that produced it.
+together. The same origin machinery also tracks references that outlive a
+call because they are returned or stored in a local, as described below.
 
 Reference codegen is for **heap-category types only** (`:&String`,
 `:&User`) — a reference to a heap type reuses the same pointer
@@ -206,12 +205,12 @@ unsound. `: &mut self` additionally requires the receiver be exclusive
 (`:&mut T`, or a `mut`-bound owned local), the same mutability check a
 `mut self` ARC method already used.
 
-**Stored heap borrows are implemented with lexical lifetimes:**
+**Stored heap borrows use last-use shortening:**
 `let view: &User = owned_user;` and `let view: &mut User = owned_user;`
 record the owned local as their origin, enforce shared/exclusive access, and
-release that restriction when `view`'s block ends. This is intentionally
-more conservative than NLL: the borrow is not yet shortened after its last
-use within the block. References to inline values remain unavailable.
+release that restriction after `view`'s last ordinary use. References used by
+a loop or captured by a closure conservatively remain borrowed until their
+block ends. References to inline values remain unavailable.
 
 **Returned references are origin-checked and propagated through function calls.** A
 return traced to exactly one incoming reference parameter is accepted;
@@ -220,18 +219,18 @@ an `if`/`match` result that may originate from multiple parameters. Named
 functions carry parameter-index origin summaries computed to a fixed point.
 Consequently, origin survives arbitrary named-function call chains and a
 returned reference may be stored in `let`; that binding keeps the ultimate
-owned source borrowed until its lexical scope ends. Method and closure
-summaries and NLL shortening remain Stage 2 work.
-NLL/Polonius-style last-use shortening is also still pending.
+owned source borrowed until the returned binding's last use. Instance/static
+methods carry summaries too (`self` is a distinct origin), while closure
+summaries preserve both parameter and captured origins. Loop-carried and
+captured borrows remain conservatively lexical.
 
-### 3.2 Runtime representation of `:T` in Stage 1
+### 3.2 Current runtime representation of `:T`
 
-`:T` (unique heap) uses **the exact same ARC-refcounted runtime
-representation as `T`** in Stage 1 — it is purely a compile-time-checked
-concept until Stage 2's real borrow checker can safely skip retain/release
-once uniqueness is actually enforced. `:t` (unique inline) needs no runtime
-change at all — it is the same machine representation as `t`, restricted
-only at the type-checker level.
+`:T` (unique heap) currently uses **the exact same ARC-refcounted runtime
+representation as `T`**. Stage 2 enforces uniqueness, moves, and borrows at
+compile time, but lowering has not yet switched `:T` to an unrefcounted
+representation. `:t` (unique inline) needs no runtime change — it has the
+same machine representation as `t`, restricted at the type-checker level.
 
 ---
 
@@ -404,10 +403,9 @@ a.name = "Bob";
 
 `mut` on an ARC binding means "this binding may mutate," not "this binding
 is the only reference." This is intentionally different from `:&mut T`,
-where exclusivity *is* enforced — call-scoped, as of Stage 2's second
-slice (§3.1); the full lifetime-scoped version (exclusivity for a borrow
-that outlives one call) awaits the region/origin inference §3.1 still
-lists as not yet implemented.
+where Stage 2 enforces exclusivity for call arguments and stored/returned
+heap borrows. Ordinary local borrows end after their last use; loop-carried
+and closure-captured borrows conservatively remain live to lexical scope exit.
 
 ---
 
@@ -532,10 +530,10 @@ move vs. a read-through):
   called) — independent of whether the closure is ever invoked.
 
 Move diagnostics carry two labels: where the value was moved, and where it
-was used again. Borrow exclusivity now also blocks moves and direct mutation
-for lexically live stored borrows. Returned-reference origins propagate through
-named-function calls and ambiguous parameter origins are diagnosed; NLL
-shortening and method/closure summaries remain deferred to Stage 2's remainder.
+was used again. Borrow exclusivity blocks moves and direct mutation while a
+stored borrow is live. Returned-reference origins propagate through named
+functions, methods, and closures; ordinary borrows end after last use, while
+loop-carried/captured borrows remain conservatively lexical.
 
 ### 8.7 Variadic parameters **[Stage 1]**
 
@@ -750,8 +748,8 @@ Available without `use`: `println`, `print`, `Option`/`Some`/`None`,
 ## 21. Memory model summary
 
 - Ordinary heap assignment (`T`) retains; scope exit releases.
-- `:T` uses the same ARC representation as `T` in Stage 1 (§3.2) — purely
-  compile-time-checked until Stage 2.
+- `:T` currently uses the same ARC representation as `T` (§3.2); Stage 2
+  enforces its ownership rules, while unrefcounted lowering remains open.
 - `weak T` never affects its referent's retain count.
 - Atomic ARC (thread-safe refcounting) is specified for the full language
   but not yet implemented — the runtime remains single-threaded until
@@ -774,7 +772,8 @@ Full retain/release insertion rules live in
 | `to(value)` domain conversion, target-inferred form, 3 of 4 transitions (§9) | **Stage 2 — done** |
 | `to<T>(value)`'s explicit-target form; `T -> :T` (needs `Clone`, §10) | Stage 2/3 — remaining |
 | Lexically scoped stored heap borrows; interprocedural named-function origin summaries; safe storage of returned references; ambiguous-origin diagnostics | **Stage 2 — done** |
-| NLL last-use shortening, method/closure origin summaries, `move () => {}` closures, `:T`'s unrefcounted runtime representation | Stage 2 — remaining |
+| Method/closure origin summaries and ordinary last-use shortening | **Stage 2 — done** |
+| Loop/capture-sensitive region precision, `move () => {}` closures, `:T`'s unrefcounted runtime representation | Stage 2 — remaining |
 | Reference-to-inline-value codegen | Stage 2 — remaining |
 | Associated types, const generics, specialization, `any`/`some`, multi-bound generics, derivable traits, `#[allow_pascal_case]` | Stage 3 |
 | Development-mode witness-table generics dispatch | Stage 3 |

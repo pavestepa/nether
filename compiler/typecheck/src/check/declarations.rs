@@ -147,10 +147,10 @@ pub(super) fn infer_return_origin_summaries(
             if !matches!(sig.ret, Type::Ref(_) | Type::MutRef(_)) {
                 continue;
             }
-            let mut env = HashMap::<LocalId, HashSet<usize>>::new();
+            let mut env = HashMap::<LocalId, HashSet<ReturnOrigin>>::new();
             for (index, parameter) in function.params.iter().enumerate() {
                 if let Some(local) = resolved.locals.get(&parameter.id).copied() {
-                    env.insert(local, HashSet::from([index]));
+                    env.insert(local, HashSet::from([ReturnOrigin::Parameter(index)]));
                 }
             }
             let origins = function
@@ -175,12 +175,72 @@ pub(super) fn infer_return_origin_summaries(
     }
 }
 
+pub(super) fn infer_method_origin_summaries(
+    module: &Module,
+    resolved: &ResolvedNames,
+    sigs: &mut Signatures,
+) {
+    let function_summaries = sigs
+        .fns
+        .iter()
+        .map(|(id, sig)| (*id, sig.return_origins.clone()))
+        .collect::<HashMap<_, _>>();
+    for item in &module.items {
+        let Item::Impl(block) = item else { continue };
+        let Some(owner) = resolved
+            .definitions
+            .lookup_in(block.span.file, &block.target.name)
+        else {
+            continue;
+        };
+        for method in &block.methods {
+            let domain = ReceiverDomain::of_self_param(method.self_param.as_ref());
+            let key = (owner, method.name.name.clone(), domain);
+            let Some(set) = sigs.methods.get(&key) else {
+                continue;
+            };
+            let Some(sig) = set.generic.as_ref() else {
+                continue;
+            };
+            if !matches!(sig.ret, Type::Ref(_) | Type::MutRef(_)) {
+                continue;
+            }
+            let mut env = HashMap::<LocalId, HashSet<ReturnOrigin>>::new();
+            if method.self_param.is_some() {
+                if let Some(local) = resolved.locals.get(&method.id).copied() {
+                    env.insert(local, HashSet::from([ReturnOrigin::SelfValue]));
+                }
+            }
+            for (index, parameter) in method.params.iter().enumerate() {
+                if let Some(local) = resolved.locals.get(&parameter.id).copied() {
+                    env.insert(local, HashSet::from([ReturnOrigin::Parameter(index)]));
+                }
+            }
+            let origins = method
+                .body
+                .as_ref()
+                .map(|body| summary_block(body, resolved, &function_summaries, &mut env))
+                .unwrap_or_default();
+            let mut origins = origins.into_iter().collect::<Vec<_>>();
+            origins.sort_unstable();
+            if let Some(set) = sigs.methods.get_mut(&key) {
+                if let Some(sig) = set.generic.as_mut() {
+                    sig.return_origins = origins.clone();
+                }
+                for (_, sig) in &mut set.specializations {
+                    sig.return_origins = origins.clone();
+                }
+            }
+        }
+    }
+}
+
 fn summary_block(
     block: &Block,
     resolved: &ResolvedNames,
-    summaries: &HashMap<DefId, Vec<usize>>,
-    env: &mut HashMap<LocalId, HashSet<usize>>,
-) -> HashSet<usize> {
+    summaries: &HashMap<DefId, Vec<ReturnOrigin>>,
+    env: &mut HashMap<LocalId, HashSet<ReturnOrigin>>,
+) -> HashSet<ReturnOrigin> {
     let mut returned = HashSet::new();
     for statement in &block.stmts {
         match statement {
@@ -212,9 +272,9 @@ fn summary_block(
 fn summary_returns_in_expr(
     expr: &Expr,
     resolved: &ResolvedNames,
-    summaries: &HashMap<DefId, Vec<usize>>,
-    env: &HashMap<LocalId, HashSet<usize>>,
-) -> HashSet<usize> {
+    summaries: &HashMap<DefId, Vec<ReturnOrigin>>,
+    env: &HashMap<LocalId, HashSet<ReturnOrigin>>,
+) -> HashSet<ReturnOrigin> {
     match &expr.kind {
         ExprKind::Return(Some(value)) => summary_expr(value, resolved, summaries, env),
         ExprKind::If {
@@ -245,9 +305,9 @@ fn summary_returns_in_expr(
 fn summary_expr(
     expr: &Expr,
     resolved: &ResolvedNames,
-    summaries: &HashMap<DefId, Vec<usize>>,
-    env: &HashMap<LocalId, HashSet<usize>>,
-) -> HashSet<usize> {
+    summaries: &HashMap<DefId, Vec<ReturnOrigin>>,
+    env: &HashMap<LocalId, HashSet<ReturnOrigin>>,
+) -> HashSet<ReturnOrigin> {
     match &expr.kind {
         ExprKind::Path(path) => resolved
             .path_res
@@ -272,7 +332,10 @@ fn summary_expr(
                 .get(&id)
                 .into_iter()
                 .flatten()
-                .filter_map(|index| args.get(*index))
+                .filter_map(|origin| match origin {
+                    ReturnOrigin::Parameter(index) => args.get(*index),
+                    ReturnOrigin::SelfValue => None,
+                })
                 .flat_map(|arg| summary_expr(arg, resolved, summaries, env))
                 .collect()
         }

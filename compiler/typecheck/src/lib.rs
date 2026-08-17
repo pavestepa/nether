@@ -54,7 +54,9 @@ mod ty;
 
 pub use alloc::{alloc_kind, AllocKind};
 pub use check::{check, TypedTables};
-pub use sig::{EnumSig, FnSig, GenericBound, ParamSig, ReceiverDomain, Signatures, TypeShape};
+pub use sig::{
+    EnumSig, FnSig, GenericBound, ParamSig, ReceiverDomain, ReturnOrigin, Signatures, TypeShape,
+};
 pub use ty::{PrimitiveKind, Type};
 
 // Re-exported so `sig::Signatures`'s public methods can be used without

@@ -31,15 +31,14 @@ pub enum Type {
 `Unique`/`Ref`/`MutRef` (added in Stage 1, see `docs/spec/language-spec.md`
 §3) represent the unique-ownership domain (`:T`, `:&T`, `:&mut T`) —
 orthogonal to representation category (§3 below), not a replacement for
-it. They exist only so `typecheck` can enforce ownership-domain
-compatibility (no implicit `T`↔`:T` coercion); `HirLowerer::ty_of`/
-`local_ty`/`lower_fn`'s param and return handling strip `Unique` before
-any type reaches HIR/MIR/codegen, since `:T` shares `T`'s exact runtime
-representation in Stage 1 (§3.2) — those crates' own `Type` matches are
-unchanged from before this rewrite and have no `Unique` arm to maintain.
-`Ref`/`MutRef` are not stripped the same way (they're genuinely different
-representations, pointers) but Stage 1's codegen support for them is
-narrow — see the language spec.
+it. `typecheck` uses them for ownership-domain compatibility, move checking,
+borrow exclusivity, returned-reference origins, and last-use shortening.
+`HirLowerer::ty_of`/`local_ty`/`lower_fn`'s parameter and return handling
+still strip `Unique` before MIR/codegen because the current lowering gives
+`:T` the same runtime representation as `T` (§3.2); an unrefcounted `:T`
+representation remains Stage 2 work. `Ref`/`MutRef` are not stripped the
+same way (they are pointer representations), but codegen currently supports
+them only for heap-category referents — see the language spec.
 
 `Struct`/`TupleStruct`/`Enum` carry their concrete type arguments.
 `Option<T>` and `Result<T, E>` are represented exactly as `Enum` values;

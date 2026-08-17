@@ -28,9 +28,11 @@ Borrowing is enforced for call-scoped `:&T`/`:&mut T` parameters and
 receivers and for heap references stored in explicitly typed `let`
 bindings. Returned-reference origins are propagated through named-function
 call chains, so a safely returned reference can be stored in `let`; the
-resulting borrow remains live to the end of that lexical block. Local origins
-and multiple possible parameter origins are rejected. NLL-style last-use
-shortening remains Stage 2 work. See the roadmap for the exact boundary.
+resulting borrow is shortened after its last use. The same summaries cover
+instance/static methods (`self` included) and closures, including captured
+origins. Local origins and multiple possible parameter origins are rejected.
+Loop-carried and closure-captured references remain conservatively pinned to
+their lexical scope. See the roadmap for the exact boundary.
 
 ## Requirements
 
@@ -184,9 +186,10 @@ For working examples of generic functions, types, enums, methods,
 traits, bounds, inheritance and current limitations, see
 [`docs/generics.md`](docs/generics.md).
 
-Nether has no garbage collector, macros, or reflection, and — for now —
-no lifetime-aware borrow checking, async, threads, unsafe code, or dynamic
-trait dispatch; see
+Nether has no garbage collector, macros, or reflection. Its current borrow
+checker infers origins and shortens ordinary borrows after their last use,
+while loop-carried and closure-captured borrows remain conservatively lexical.
+Async, threads, unsafe code, and dynamic trait dispatch are not implemented; see
 [`docs/architecture/roadmap.md`](docs/architecture/roadmap.md) for which
 stage adds each of those.
 

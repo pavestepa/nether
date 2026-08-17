@@ -38,8 +38,13 @@ impl Checker<'_> {
                         ),
                     );
                 }
+                let mut borrowed = HashMap::new();
                 for (p, a) in params.iter().zip(args.iter()) {
-                    let actual = self.check_expr_with_expected(a, Some(p));
+                    let actual = if matches!(p, Type::Ref(_) | Type::MutRef(_)) {
+                        self.check_borrow_arg(a, p, &mut borrowed)
+                    } else {
+                        self.check_expr_with_expected(a, Some(p))
+                    };
                     if !actual.compatible(p) {
                         let expected = self.describe(p);
                         let found = self.describe(&actual);
@@ -93,6 +98,7 @@ impl Checker<'_> {
                 // verdict separately, below, once the chosen overload's
                 // `self_param` is known.
                 self.check_move(id, &ty, path.span, res.consumed == total);
+                self.note_local_use(id);
                 if res.consumed == total {
                     if let Some(args) = call_args {
                         if !generic_args.is_empty() {

@@ -221,3 +221,159 @@ fn forwarded(flag bool, left: &Dog, right: &Dog): &Dog {
         "ambiguous origins",
     );
 }
+
+#[test]
+fn method_return_summary_can_borrow_from_self_or_a_parameter() {
+    assert_ok(
+        r#"
+struct Dog { name String }
+impl Dog {
+    view(: &self): &Dog { return self; }
+    pick(d: &Dog): &Dog { return d; }
+}
+fn consume(d: Dog) {}
+fn main() {
+    let dog: Dog = :Dog { name = "Rex" };
+    if true {
+        let first = dog.view();
+        println(first.name);
+    }
+    if true {
+        let second = Dog.pick(dog);
+        println(second.name);
+    }
+    consume(dog);
+}
+"#,
+    );
+}
+
+#[test]
+fn stored_method_result_keeps_receiver_borrow_live() {
+    assert_err(
+        r#"
+struct Dog { name String }
+impl Dog { view(: &self): &Dog { return self; } }
+fn consume(d: Dog) {}
+fn main() {
+    let dog: Dog = :Dog { name = "Rex" };
+    let view = dog.view();
+    consume(dog);
+    println(view.name);
+}
+"#,
+        "while it is borrowed",
+    );
+}
+
+#[test]
+fn closure_return_summary_supports_parameters_and_captures() {
+    assert_ok(
+        r#"
+struct Dog { name String }
+fn consume(d: Dog) {}
+fn main() {
+    let dog: Dog = :Dog { name = "Rex" };
+    if true {
+        let identity = (d: &Dog) => d;
+        let view = identity(dog);
+        println(view.name);
+    }
+    if true {
+        let source: &Dog = dog;
+        let captured = () => source;
+        let view = captured();
+        println(view.name);
+    }
+    consume(dog);
+}
+"#,
+    );
+}
+
+#[test]
+fn stored_closure_result_keeps_argument_borrow_live() {
+    assert_err(
+        r#"
+struct Dog { name String }
+fn consume(d: Dog) {}
+fn main() {
+    let dog: Dog = :Dog { name = "Rex" };
+    let identity = (d: &Dog) => d;
+    let view = identity(dog);
+    consume(dog);
+    println(view.name);
+}
+"#,
+        "while it is borrowed",
+    );
+}
+
+#[test]
+fn nll_releases_a_stored_borrow_after_its_last_use() {
+    assert_ok(
+        r#"
+struct Dog { name String }
+fn consume(d: Dog) {}
+fn main() {
+    let mut dog: Dog = :Dog { name = "Rex" };
+    let view: &Dog = dog;
+    println(view.name);
+    dog.name = "Buddy";
+    consume(dog);
+}
+"#,
+    );
+}
+
+#[test]
+fn nll_does_not_release_before_a_later_use() {
+    assert_err(
+        r#"
+struct Dog { name String }
+fn consume(d: Dog) {}
+fn main() {
+    let dog: Dog = :Dog { name = "Rex" };
+    let view: &Dog = dog;
+    println(view.name);
+    consume(dog);
+    println(view.name);
+}
+"#,
+        "while it is borrowed",
+    );
+}
+
+#[test]
+fn nll_keeps_a_last_use_call_argument_live_for_the_whole_call() {
+    assert_err(
+        r#"
+struct Dog { name String }
+fn conflict(shared: &Dog, exclusive: &mut Dog) {}
+fn main() {
+    let mut dog: Dog = :Dog { name = "Rex" };
+    let view: &Dog = dog;
+    conflict(view, dog);
+}
+"#,
+        "call borrow conflicts",
+    );
+}
+
+#[test]
+fn loop_and_closure_uses_remain_lexically_pinned() {
+    assert_err(
+        r#"
+struct Dog { name String }
+fn consume(d: Dog) {}
+fn main() {
+    let dog: Dog = :Dog { name = "Rex" };
+    let view: &Dog = dog;
+    let read = () => view;
+    read();
+    consume(dog);
+}
+"#,
+        "while it is borrowed",
+    );
+}

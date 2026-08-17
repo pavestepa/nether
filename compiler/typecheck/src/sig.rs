@@ -84,7 +84,13 @@ pub struct FnSig {
     /// Reference-return origin summary: zero-based parameter indices the
     /// returned reference may originate from. Empty for non-reference
     /// returns or while no safe origin can be inferred.
-    pub return_origins: Vec<usize>,
+    pub return_origins: Vec<ReturnOrigin>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ReturnOrigin {
+    SelfValue,
+    Parameter(usize),
 }
 
 #[derive(Debug, Clone)]

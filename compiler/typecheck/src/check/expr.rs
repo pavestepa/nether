@@ -180,7 +180,9 @@ impl Checker<'_> {
                 Type::Never
             }
             ExprKind::Return(value) => self.check_return(value, expr.span),
-            ExprKind::Closure { params, body } => self.check_closure(params, body, expected),
+            ExprKind::Closure { params, body } => {
+                self.check_closure(expr.id, params, body, expected)
+            }
             ExprKind::StructLit {
                 path,
                 fields,

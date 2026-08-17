@@ -23,6 +23,7 @@ pub fn check(module: &Module, resolved: &ResolvedNames) -> (TypedTables, Vec<Dia
         &mut sigs,
         &mut diagnostics,
     );
+    infer_method_origin_summaries(module, resolved, &mut sigs);
     validate_finite_value_layouts(resolved, &decls, &sigs, &mut diagnostics);
     validate_alias_casing(module, resolved, &decls, &mut diagnostics);
 

@@ -8,7 +8,9 @@ use nether_ast::{
 use nether_diagnostics::{Diagnostic, Span};
 use nether_resolver::{DefId, DefKind, LocalId, Resolution, ResolvedNames};
 
-use crate::sig::{EnumSig, FnSig, GenericBound, MethodSet, ReceiverDomain, Signatures, TypeShape};
+use crate::sig::{
+    EnumSig, FnSig, GenericBound, MethodSet, ReceiverDomain, ReturnOrigin, Signatures, TypeShape,
+};
 use crate::ty::{PrimitiveKind, Type};
 use crate::{alloc_kind, AllocKind};
 
@@ -25,7 +27,7 @@ mod method;
 mod traits;
 
 use casing::validate_alias_casing;
-use checker::{BorrowOrigin, Checker};
+use checker::{BorrowOrigin, Checker, ClosureOrigin};
 use declarations::*;
 use entry::{
     collect_generic_bindings, contextualize_unknowns, describe_type, prefer_concrete_type,

@@ -487,7 +487,7 @@ impl Checker<'_> {
     /// Returns the argument's checked type for the caller's own
     /// `collect_generic_bindings` call, mirroring every other argument
     /// shape in `check_call_args`.
-    fn check_borrow_arg(
+    pub(super) fn check_borrow_arg(
         &mut self,
         arg: &Expr,
         param_ty: &Type,

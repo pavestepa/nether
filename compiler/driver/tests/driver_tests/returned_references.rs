@@ -1,6 +1,6 @@
 use super::*;
 
-fn run_returned_reference_program(test_name: &str, source: &str) {
+fn run_returned_reference_program(test_name: &str, source: &str, expected_stdout: &str) {
     ensure_runtime_built();
     let dir = std::env::temp_dir().join(format!("{test_name}_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -19,7 +19,7 @@ fn run_returned_reference_program(test_name: &str, source: &str) {
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "Rex\nRex\n");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), expected_stdout);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -36,6 +36,7 @@ fn main() {
     println(dog.name);
 }
 "#,
+        "Rex\nRex\n",
     );
 }
 
@@ -54,5 +55,29 @@ fn main() {
     println(dog.name);
 }
 "#,
+        "Rex\nRex\n",
+    );
+}
+
+#[test]
+fn method_and_closure_summaries_work_with_nll_end_to_end() {
+    run_returned_reference_program(
+        "nether_method_closure_nll_test",
+        r#"
+struct Dog { name String }
+impl Dog { view(: &self): &Dog { return self; } }
+fn main() {
+    let mut dog: Dog = :Dog { name = "Rex" };
+    let first = dog.view();
+    println(first.name);
+    dog.name = "Buddy";
+    let identity = (d: &Dog) => d;
+    let second = identity(dog);
+    println(second.name);
+    dog.name = "Max";
+    println(dog.name);
+}
+"#,
+        "Rex\nBuddy\nMax\n",
     );
 }
