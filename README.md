@@ -23,10 +23,11 @@ The compiler implements:
 - a small Nether-source Option/Result/Array standard library.
 
 Flow-sensitive move checking for uniquely owned locals is implemented.
-Borrowing is currently enforced at call scope (`:&T`/`:&mut T` parameters
-and receivers, including exclusivity within one argument list); stored and
-returned borrows still await Stage 2's lifetime/origin inference. See the
-roadmap for the exact boundary.
+Borrowing is enforced for call-scoped `:&T`/`:&mut T` parameters and
+receivers and for heap references stored in explicitly typed `let`
+bindings. Stored borrows currently live to the end of their lexical block;
+NLL-style last-use shortening and returned-reference origin inference remain
+Stage 2 work. See the roadmap for the exact boundary.
 
 ## Requirements
 

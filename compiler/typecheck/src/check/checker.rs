@@ -16,6 +16,14 @@ pub(super) struct Checker<'a> {
     /// non-unique locals are simply never inserted at all. `Some(span)` is
     /// where it was moved.
     pub(super) moved: HashMap<LocalId, Span>,
+    /// Lexical local scopes mirrored from the resolver. They let stored
+    /// borrows release their exclusivity exactly when the reference binding
+    /// leaves scope rather than conservatively lasting to the end of a fn.
+    pub(super) local_scopes: Vec<Vec<LocalId>>,
+    /// Reference local -> (borrowed owned local, is mutable borrow).
+    pub(super) borrow_origins: HashMap<LocalId, (LocalId, bool)>,
+    /// Owned local -> (number of live shared borrows, live mutable borrow).
+    pub(super) active_borrows: HashMap<LocalId, (usize, Option<Span>)>,
     /// Set only while re-walking a loop body's *first*, silent pass
     /// (`Checker::check_loop_body_with_fixpoint`) — every diagnostic-
     /// producing method (`Self::err`, `Self::check_move`) becomes a no-op
@@ -50,6 +58,9 @@ impl<'a> Checker<'a> {
             diagnostics,
             locals: HashMap::new(),
             moved: HashMap::new(),
+            local_scopes: Vec::new(),
+            borrow_origins: HashMap::new(),
+            active_borrows: HashMap::new(),
             suppress_diagnostics: false,
             generics: HashMap::new(),
             return_ty: Type::unit(),
@@ -63,6 +74,9 @@ impl<'a> Checker<'a> {
     pub(super) fn bind_local(&mut self, site: NodeId, ty: Type, mutable: bool) {
         if let Some(local_id) = self.resolved.locals.get(&site) {
             self.locals.insert(*local_id, (ty.clone(), mutable));
+            if let Some(scope) = self.local_scopes.last_mut() {
+                scope.push(*local_id);
+            }
             // A `let`/parameter binding always starts a fresh value —
             // clear any move-state a same-`LocalId` binding might have
             // picked up. Necessary (not just tidy) for a `let` declared
@@ -73,6 +87,51 @@ impl<'a> Checker<'a> {
             self.moved.remove(local_id);
         }
         self.local_types.insert(site, ty);
+    }
+
+    pub(super) fn push_local_scope(&mut self) {
+        self.local_scopes.push(Vec::new());
+    }
+
+    pub(super) fn pop_local_scope(&mut self) {
+        let Some(locals) = self.local_scopes.pop() else {
+            return;
+        };
+        for local in locals.into_iter().rev() {
+            if let Some((origin, mutable)) = self.borrow_origins.remove(&local) {
+                let mut remove_origin = false;
+                if let Some((shared, exclusive)) = self.active_borrows.get_mut(&origin) {
+                    if mutable {
+                        *exclusive = None;
+                    } else {
+                        *shared = shared.saturating_sub(1);
+                    }
+                    remove_origin = *shared == 0 && exclusive.is_none();
+                }
+                if remove_origin {
+                    self.active_borrows.remove(&origin);
+                }
+            }
+        }
+    }
+
+    pub(super) fn register_stored_borrow(
+        &mut self,
+        reference_site: NodeId,
+        origin: LocalId,
+        mutable: bool,
+        span: Span,
+    ) {
+        let Some(reference) = self.resolved.locals.get(&reference_site).copied() else {
+            return;
+        };
+        let state = self.active_borrows.entry(origin).or_insert((0, None));
+        if mutable {
+            state.1 = Some(span);
+        } else {
+            state.0 += 1;
+        }
+        self.borrow_origins.insert(reference, (origin, mutable));
     }
 
     pub(super) fn err(&mut self, span: Span, message: impl Into<String>) {
@@ -101,6 +160,18 @@ impl<'a> Checker<'a> {
     pub(super) fn check_move(&mut self, local_id: LocalId, ty: &Type, span: Span, consumes: bool) {
         if !matches!(ty, Type::Unique(_)) {
             return;
+        }
+        if let Some((shared, exclusive)) = self.active_borrows.get(&local_id).copied() {
+            if consumes || exclusive.is_some() {
+                let message = if consumes {
+                    "cannot move a value while it is borrowed"
+                } else {
+                    "cannot access a value directly while it is mutably borrowed"
+                };
+                self.err(span, message);
+                return;
+            }
+            debug_assert!(shared > 0);
         }
         if let Some(&prior) = self.moved.get(&local_id) {
             if !self.suppress_diagnostics {
@@ -194,6 +265,71 @@ impl<'a> Checker<'a> {
         describe_type(ty, self.resolved)
     }
 
+    /// Forms a reference for `let r: &T = owned;` / `let r: &mut T = owned;`.
+    /// The destination's declared type supplies the borrowing context;
+    /// Nether deliberately has no `&expr` operator.
+    pub(super) fn check_stored_borrow_initializer(
+        &mut self,
+        value: &Expr,
+        declared: &Type,
+    ) -> Option<(Type, Option<LocalId>, bool)> {
+        let (expected_inner, mutable) = match declared {
+            Type::Ref(inner) => (inner.as_ref(), false),
+            Type::MutRef(inner) => (inner.as_ref(), true),
+            _ => return None,
+        };
+        let Some(origin) = self.bare_local_of(value) else {
+            self.err(
+                value.span,
+                "a stored borrow must originate from a plain owned local",
+            );
+            self.expr_types.insert(value.id, Type::Error);
+            return Some((Type::Error, None, mutable));
+        };
+        let Some((origin_ty, origin_mutable)) = self.locals.get(&origin).cloned() else {
+            return Some((Type::Error, None, mutable));
+        };
+        let Type::Unique(actual_inner) = &origin_ty else {
+            self.err(
+                value.span,
+                "a stored borrow requires an owned (`:T`) source local",
+            );
+            self.expr_types.insert(value.id, Type::Error);
+            return Some((Type::Error, None, mutable));
+        };
+        if alloc_kind(actual_inner, &self.resolved.definitions) != AllocKind::Heap {
+            self.err(
+                value.span,
+                "stored references to inline values are not implemented yet",
+            );
+        }
+        if !actual_inner.compatible(expected_inner) {
+            let expected = self.describe(expected_inner);
+            let found = self.describe(actual_inner);
+            self.err(
+                value.span,
+                format!("expected `{expected}`, found `{found}`"),
+            );
+        }
+        if mutable && !origin_mutable {
+            self.err(value.span, "cannot mutably borrow an immutable binding");
+        }
+        let (shared, exclusive) = self
+            .active_borrows
+            .get(&origin)
+            .copied()
+            .unwrap_or((0, None));
+        if (mutable && (shared > 0 || exclusive.is_some())) || (!mutable && exclusive.is_some()) {
+            self.err(
+                value.span,
+                "borrow conflicts with an already-live stored borrow",
+            );
+        }
+        self.check_move(origin, &origin_ty, value.span, false);
+        self.expr_types.insert(value.id, declared.clone());
+        Some((declared.clone(), Some(origin), mutable))
+    }
+
     pub(super) fn lower_call_generic_args(&mut self, args: &[TypeExpr]) -> Vec<Type> {
         args.iter()
             .map(|arg| {
@@ -207,6 +343,10 @@ impl<'a> Checker<'a> {
     pub(super) fn check_fn_decl(&mut self, f: &FnDecl, sig: &FnSig, self_ty: Option<Type>) {
         self.generics = sig.generics.iter().cloned().collect();
         self.locals.clear();
+        self.local_scopes.clear();
+        self.borrow_origins.clear();
+        self.active_borrows.clear();
+        self.push_local_scope();
         if let Some(ty) = self_ty {
             // `ByMutRef` (`mut self`) and `OwnedMutRef` (`: &mut self`)
             // both grant mutation permission on `self` — the ARC and
@@ -250,6 +390,7 @@ impl<'a> Checker<'a> {
                 );
             }
         }
+        self.pop_local_scope();
     }
 
     /// Checks the outermost block of a function or method body.
@@ -295,17 +436,20 @@ impl<'a> Checker<'a> {
         // is no dead-code diagnostic in this language, so a diverging
         // statement isn't necessarily the *last* one — track any, not
         // just the final one.
+        self.push_local_scope();
         let mut diverges = false;
         for stmt in &block.stmts {
             if matches!(self.check_stmt(stmt), Type::Never) {
                 diverges = true;
             }
         }
-        match &block.tail {
+        let result = match &block.tail {
             Some(tail) => self.check_expr_with_expected(tail, expected),
             None if diverges => Type::Never,
             None => Type::unit(),
-        }
+        };
+        self.pop_local_scope();
+        result
     }
 
     pub(super) fn check_stmt(&mut self, stmt: &Stmt) -> Type {
@@ -316,7 +460,15 @@ impl<'a> Checker<'a> {
                     .as_ref()
                     .map(|t| lower_type_expr(t, self.resolved, self.decls, self.diagnostics));
                 let has_declared_type = declared_ty.is_some();
-                let value_ty = self.check_expr_with_expected(&let_stmt.value, declared_ty.as_ref());
+                let stored_borrow = declared_ty.as_ref().and_then(|declared| {
+                    self.check_stored_borrow_initializer(&let_stmt.value, declared)
+                });
+                let value_ty = stored_borrow
+                    .as_ref()
+                    .map(|(ty, _, _)| ty.clone())
+                    .unwrap_or_else(|| {
+                        self.check_expr_with_expected(&let_stmt.value, declared_ty.as_ref())
+                    });
                 let diverges = matches!(value_ty, Type::Never);
                 let final_ty = match declared_ty {
                     Some(declared) => {
@@ -338,7 +490,11 @@ impl<'a> Checker<'a> {
                         "cannot infer all generic type arguments from this initializer; add a type annotation",
                     );
                 }
-                self.bind_local(let_stmt.id, final_ty, let_stmt.mutable);
+                let binding_mutable = let_stmt.mutable || matches!(final_ty, Type::MutRef(_));
+                self.bind_local(let_stmt.id, final_ty, binding_mutable);
+                if let Some((_, Some(origin), mutable)) = stored_borrow {
+                    self.register_stored_borrow(let_stmt.id, origin, mutable, let_stmt.value.span);
+                }
                 if diverges {
                     Type::Never
                 } else {

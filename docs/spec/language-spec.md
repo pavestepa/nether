@@ -206,12 +206,17 @@ unsound. `: &mut self` additionally requires the receiver be exclusive
 (`:&mut T`, or a `mut`-bound owned local), the same mutability check a
 `mut self` ARC method already used.
 
-**Still not yet implemented:** borrows escaping via return position or
-being stored anywhere (needs real lifetime/origin inference —
-`fn get_name(user: &User): &String { ... }` still only type-checks
-structurally, not soundly), and the call-scoped exclusivity this stage
-enforces (§8.1) staying only call-scoped rather than lifetime-scoped until
-that same inference lands.
+**Stored heap borrows are implemented with lexical lifetimes:**
+`let view: &User = owned_user;` and `let view: &mut User = owned_user;`
+record the owned local as their origin, enforce shared/exclusive access, and
+release that restriction when `view`'s block ends. This is intentionally
+more conservative than NLL: the borrow is not yet shortened after its last
+use within the block. References to inline values remain unavailable.
+
+**Still not yet implemented:** borrows escaping via return position and
+ambiguous returned-reference diagnostics (`fn get_name(user: &User):
+&String { ... }` still only type-checks structurally, not soundly), plus
+NLL/Polonius-style last-use shortening.
 
 ### 3.2 Runtime representation of `:T` in Stage 1
 

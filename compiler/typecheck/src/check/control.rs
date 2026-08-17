@@ -119,7 +119,10 @@ impl Checker<'_> {
                 let (else_ty, else_moved) =
                     self.moved_snapshot(|this| this.check_expr_with_expected(e, else_expected));
                 let else_diverges = matches!(else_ty, Type::Never);
-                self.merge_branches(vec![(then_diverges, then_moved), (else_diverges, else_moved)]);
+                self.merge_branches(vec![
+                    (then_diverges, then_moved),
+                    (else_diverges, else_moved),
+                ]);
                 if !then_ty.compatible(&else_ty) {
                     let then_s = self.describe(&then_ty);
                     let else_s = self.describe(&else_ty);
@@ -167,7 +170,12 @@ impl Checker<'_> {
         let mut arm_moves = Vec::with_capacity(arms.len());
         for arm in arms {
             let (body_ty, moved) = self.moved_snapshot(|this| {
-                this.check_pattern(&arm.pattern, &scrutinee_ty, &mut covered, &mut has_catch_all);
+                this.check_pattern(
+                    &arm.pattern,
+                    &scrutinee_ty,
+                    &mut covered,
+                    &mut has_catch_all,
+                );
                 let arm_expected = expected.or(result_ty.as_ref());
                 this.check_expr_with_expected(&arm.body, arm_expected)
             });

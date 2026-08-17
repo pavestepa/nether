@@ -235,8 +235,10 @@ fn borrowing_method_call_through_a_mut_ref_param_runs_end_to_end() {
     // called through a `:&mut T` parameter — not just a field write —
     // actually mutates the caller's own value.
     ensure_runtime_built();
-    let dir =
-        std::env::temp_dir().join(format!("nether_ref_method_call_test_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "nether_ref_method_call_test_{}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&dir).unwrap();
     let entry = dir.join("main.nr");
     std::fs::write(
@@ -285,7 +287,8 @@ fn to_conversion_runs_end_to_end() {
     // check that a `:T -> T` and a `t -> :t` conversion both actually
     // compile, link and run correctly, not just type-check.
     ensure_runtime_built();
-    let dir = std::env::temp_dir().join(format!("nether_to_conversion_test_{}", std::process::id()));
+    let dir =
+        std::env::temp_dir().join(format!("nether_to_conversion_test_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let entry = dir.join("main.nr");
     std::fs::write(
@@ -302,6 +305,7 @@ fn main() {
     println(`${n}`);
     println(`${owned_n}`);
 }
+
 "#,
     )
     .unwrap();
@@ -319,5 +323,45 @@ fn main() {
         .unwrap();
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), "Rex\n42\n42\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn stored_heap_borrows_run_end_to_end() {
+    ensure_runtime_built();
+    let dir =
+        std::env::temp_dir().join(format!("nether_stored_borrow_test_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.nr");
+    std::fs::write(
+        &entry,
+        r#"
+struct Dog { name String }
+fn main() {
+    let mut dog: Dog = :Dog { name = "Rex" };
+    if true {
+        let view: &mut Dog = dog;
+        view.name = "Buddy";
+        println(view.name);
+    }
+    println(dog.name);
+}
+"#,
+    )
+    .unwrap();
+    let result = nether_driver::check(&entry).unwrap();
+    assert!(
+        !result
+            .diagnostics
+            .iter()
+            .any(nether_diagnostics::Diagnostic::is_error),
+        "unexpected diagnostics: {:?}",
+        result.diagnostics
+    );
+    let output = Command::new(result.executable_path.unwrap())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "Buddy\nBuddy\n");
     let _ = std::fs::remove_dir_all(&dir);
 }

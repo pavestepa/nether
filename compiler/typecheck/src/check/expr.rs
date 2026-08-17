@@ -44,13 +44,17 @@ impl Checker<'_> {
                 _ => Type::Primitive(PrimitiveKind::F64),
             },
             ExprKind::Literal(Literal::Bool(_)) => match expected {
-                Some(Type::Unique(inner)) if matches!(inner.as_ref(), Type::Primitive(PrimitiveKind::Bool)) => {
+                Some(Type::Unique(inner))
+                    if matches!(inner.as_ref(), Type::Primitive(PrimitiveKind::Bool)) =>
+                {
                     Type::Unique(inner.clone())
                 }
                 _ => Type::Primitive(PrimitiveKind::Bool),
             },
             ExprKind::Literal(Literal::Char(_)) => match expected {
-                Some(Type::Unique(inner)) if matches!(inner.as_ref(), Type::Primitive(PrimitiveKind::Char)) => {
+                Some(Type::Unique(inner))
+                    if matches!(inner.as_ref(), Type::Primitive(PrimitiveKind::Char)) =>
+                {
                     Type::Unique(inner.clone())
                 }
                 _ => Type::Primitive(PrimitiveKind::Char),
@@ -452,7 +456,26 @@ impl Checker<'_> {
         }
     }
 
+    pub(super) fn place_root_local(&self, expr: &Expr) -> Option<LocalId> {
+        match &expr.kind {
+            ExprKind::Path(path) => match self.resolved.path_res.get(&path.id)?.base {
+                Resolution::Local(id) => Some(id),
+                _ => None,
+            },
+            ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => {
+                self.place_root_local(base)
+            }
+            _ => None,
+        }
+    }
+
     pub(super) fn check_assign_target_mutable(&mut self, target: &Expr) {
+        if self
+            .place_root_local(target)
+            .is_some_and(|id| self.active_borrows.contains_key(&id))
+        {
+            self.err(target.span, "cannot mutate a value while it is borrowed");
+        }
         if let Some(false) = self.place_root_mutable(target) {
             self.err(
                 target.span,

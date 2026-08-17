@@ -526,6 +526,16 @@ impl Checker<'_> {
                 "cannot borrow an immutable binding as `:&mut` — declare it with `let mut`",
             );
         }
+        let (live_shared, live_mutable) =
+            self.active_borrows.get(&id).copied().unwrap_or((0, None));
+        if (is_mut && (live_shared > 0 || live_mutable.is_some()))
+            || (!is_mut && live_mutable.is_some())
+        {
+            self.err(
+                arg.span,
+                "call borrow conflicts with an already-live stored borrow",
+            );
+        }
         let prev = borrowed.get(&id).copied();
         if let Some(prev_mut) = prev {
             if prev_mut || is_mut {

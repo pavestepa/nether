@@ -11,6 +11,8 @@ mod expressions;
 mod generics;
 #[path = "check_tests/moves.rs"]
 mod moves;
+#[path = "check_tests/origins.rs"]
+mod origins;
 #[path = "check_tests/self_overloads.rs"]
 mod self_overloads;
 #[path = "check_tests/to_conversion.rs"]

@@ -188,10 +188,7 @@ impl Checker<'_> {
                 Type::Error
             }
             DefKind::Trait => {
-                self.err(
-                    span,
-                    format!("`{name}` is a trait and has no value form"),
-                );
+                self.err(span, format!("`{name}` is a trait and has no value form"));
                 Type::Error
             }
             DefKind::Imported => Type::Error,

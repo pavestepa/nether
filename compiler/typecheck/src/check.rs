@@ -1,15 +1,16 @@
 use std::collections::{HashMap, HashSet};
 
 use nether_ast::{
-    BinaryOp, Block, EnumDecl, Expr, ExprKind, FnDecl, Ident, ImplBlock, TraitDecl, Item,
-    Literal, Module, NodeId, Path, Pattern, SelfParam, Stmt, Symbol, TemplatePart, StructDecl,
-    StructDeclKind, TypeAliasDecl, TypeExpr, UnaryOp,
+    BinaryOp, Block, EnumDecl, Expr, ExprKind, FnDecl, Ident, ImplBlock, Item, Literal, Module,
+    NodeId, Path, Pattern, SelfParam, Stmt, StructDecl, StructDeclKind, Symbol, TemplatePart,
+    TraitDecl, TypeAliasDecl, TypeExpr, UnaryOp,
 };
 use nether_diagnostics::{Diagnostic, Span};
 use nether_resolver::{DefId, DefKind, LocalId, Resolution, ResolvedNames};
 
 use crate::sig::{EnumSig, FnSig, GenericBound, MethodSet, ReceiverDomain, Signatures, TypeShape};
 use crate::ty::{PrimitiveKind, Type};
+use crate::{alloc_kind, AllocKind};
 
 mod call;
 mod casing;
@@ -19,9 +20,9 @@ mod control;
 mod declarations;
 mod entry;
 mod expr;
-mod traits;
 mod layout;
 mod method;
+mod traits;
 
 use casing::validate_alias_casing;
 use checker::Checker;
@@ -30,8 +31,8 @@ use entry::{
     collect_generic_bindings, contextualize_unknowns, describe_type, prefer_concrete_type,
     substitute_generic,
 };
-use traits::*;
 use layout::*;
+use traits::*;
 
 pub use entry::check;
 

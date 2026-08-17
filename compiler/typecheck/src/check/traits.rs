@@ -234,10 +234,12 @@ pub(super) fn build_impl_methods(
                         .get(&(entry.owner, entry.name.clone(), ReceiverDomain::Static))
                         .is_some_and(|s| s.generic.is_some());
                 let instance_conflict = domain == ReceiverDomain::Static
-                    && [ReceiverDomain::Arc, ReceiverDomain::Owned].into_iter().any(|other| {
-                        sets.get(&(entry.owner, entry.name.clone(), other))
-                            .is_some_and(|s| s.generic.is_some())
-                    });
+                    && [ReceiverDomain::Arc, ReceiverDomain::Owned]
+                        .into_iter()
+                        .any(|other| {
+                            sets.get(&(entry.owner, entry.name.clone(), other))
+                                .is_some_and(|s| s.generic.is_some())
+                        });
                 let set = sets.entry(key).or_default();
                 if set.generic.is_some() || static_conflict || instance_conflict {
                     diags.push(

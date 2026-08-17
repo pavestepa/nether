@@ -13,8 +13,7 @@ pub fn check(module: &Module, resolved: &ResolvedNames) -> (TypedTables, Vec<Dia
     build_type_shapes(&decls, resolved, &mut sigs, &mut diagnostics);
     build_enum_sigs(module, resolved, &decls, &mut sigs, &mut diagnostics);
     build_fn_sigs(module, resolved, &decls, &mut sigs, &mut diagnostics);
-    let trait_methods =
-        build_trait_method_table(&decls, resolved, &mut sigs, &mut diagnostics);
+    let trait_methods = build_trait_method_table(&decls, resolved, &mut sigs, &mut diagnostics);
     build_impl_methods(
         module,
         resolved,
@@ -118,8 +117,7 @@ pub fn check(module: &Module, resolved: &ResolvedNames) -> (TypedTables, Vec<Dia
                     }
                 }
             }
-            Item::Struct(_) | Item::Enum(_) | Item::Use(_) | Item::Mod(_) | Item::TypeAlias(_) => {
-            }
+            Item::Struct(_) | Item::Enum(_) | Item::Use(_) | Item::Mod(_) | Item::TypeAlias(_) => {}
         }
     }
 

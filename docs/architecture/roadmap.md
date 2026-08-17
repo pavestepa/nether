@@ -39,9 +39,10 @@ rebuilding.
 ## 2. Stage sequence
 
 **Implementation snapshot (2026-08-17).** Stage 1 is complete. Stage 2 has
-flow-sensitive move checking, call-scoped reference parameters and receiver
-calls, plus three sound `to(value)` ownership-domain conversions. Its
-lifetime/origin-sensitive remainder is still open. Stages 3–6 have not
+flow-sensitive move checking, reference parameters and receiver calls,
+lexically scoped stored heap borrows, plus three sound `to(value)`
+ownership-domain conversions. NLL-style last-use inference and returned
+reference origins remain open. Stages 3–6 have not
 started as staged projects, although the pre-existing compiler already has
 the baseline trait system and limited concrete instance-method
 specialization described elsewhere in the docs.
@@ -130,6 +131,17 @@ reason slice 2 had to fix `check_fn_decl`'s mutability flag: the existing
 already made correct for both an owned `mut` binding and a `:&mut T`
 parameter.
 
+*Stored heap borrows with lexical origins — done.* An explicitly typed
+`let view: &T = owned;` or `let view: &mut T = owned;` now forms a stored
+borrow from a bare `:T` local without adding an `&expr` operator. The
+typechecker mirrors resolver block scopes, records each reference local's
+origin, prevents moves/direct mutation/conflicting call or stored borrows
+while it is live, and releases exclusivity when the reference leaves its
+lexical block. Heap representation is verified end-to-end through
+HIR/MIR/codegen. This is deliberately lexical, not NLL: last-use shortening
+inside a block remains part of the origin-inference remainder, and inline
+references still await addressable-local codegen.
+
 *`to(value)` domain conversion — 3 of 4 transitions done.* Checked each of
 the spec's four transitions (spec §9) against what's actually sound without
 `Clone` (`Copy`/`Clone` don't exist yet — spec §10, Stage 3): `:T -> T`,
@@ -153,10 +165,9 @@ mishandled — deferred as a smaller follow-up (open question: can an
 ownership-qualified type appear in a `<...>` generic-argument list at
 all, given nothing else in the grammar has exercised that position).
 
-*Still open, this stage:* internal lifetime/origin inference (no surface
-syntax — Rust NLL/Polonius-inspired internally) and the borrow-exclusivity
-it would let extend past one call (a borrow stored in a `let`, or
-returned); ambiguous-returned-reference diagnostics; `to<T>(value)`'s
+*Still open, this stage:* NLL-style last-use lifetime/origin inference (no
+surface syntax — Rust NLL/Polonius-inspired internally), returned borrows
+and ambiguous-returned-reference diagnostics; `to<T>(value)`'s
 explicit form; `T -> :T` (needs `Clone`, Stage 3); reference-to-inline-
 value codegen; `move () => {}` closure captures (today's closures already
 move-check a captured `:T`/`:t` free variable at the closure literal's own
