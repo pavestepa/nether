@@ -25,7 +25,7 @@ mod method;
 mod traits;
 
 use casing::validate_alias_casing;
-use checker::Checker;
+use checker::{BorrowOrigin, Checker};
 use declarations::*;
 use entry::{
     collect_generic_bindings, contextualize_unknowns, describe_type, prefer_concrete_type,

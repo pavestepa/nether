@@ -7,6 +7,8 @@ use nether_driver::CompileOptions;
 mod diagnostics_and_examples;
 #[path = "driver_tests/features.rs"]
 mod features;
+#[path = "driver_tests/returned_references.rs"]
+mod returned_references;
 #[path = "driver_tests/stdlib_and_specialization.rs"]
 mod stdlib_and_specialization;
 

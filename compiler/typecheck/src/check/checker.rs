@@ -1,5 +1,15 @@
 use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) enum BorrowOrigin {
+    /// A reference supplied by the caller. Returning it is sound because
+    /// the referent necessarily outlives this invocation.
+    Parameter(LocalId),
+    /// A borrow formed from an owned local in this function. It must never
+    /// escape through the return position.
+    Local(LocalId),
+}
+
 pub(super) struct Checker<'a> {
     pub(super) resolved: &'a ResolvedNames,
     pub(super) sigs: &'a Signatures,
@@ -22,6 +32,10 @@ pub(super) struct Checker<'a> {
     pub(super) local_scopes: Vec<Vec<LocalId>>,
     /// Reference local -> (borrowed owned local, is mutable borrow).
     pub(super) borrow_origins: HashMap<LocalId, (LocalId, bool)>,
+    /// Ultimate semantic origin for every reference-valued local. Unlike
+    /// `borrow_origins`, this also covers incoming reference parameters and
+    /// is consumed by returned-reference inference.
+    pub(super) reference_origins: HashMap<LocalId, BorrowOrigin>,
     /// Owned local -> (number of live shared borrows, live mutable borrow).
     pub(super) active_borrows: HashMap<LocalId, (usize, Option<Span>)>,
     /// Set only while re-walking a loop body's *first*, silent pass
@@ -60,6 +74,7 @@ impl<'a> Checker<'a> {
             moved: HashMap::new(),
             local_scopes: Vec::new(),
             borrow_origins: HashMap::new(),
+            reference_origins: HashMap::new(),
             active_borrows: HashMap::new(),
             suppress_diagnostics: false,
             generics: HashMap::new(),
@@ -98,6 +113,7 @@ impl<'a> Checker<'a> {
             return;
         };
         for local in locals.into_iter().rev() {
+            self.reference_origins.remove(&local);
             if let Some((origin, mutable)) = self.borrow_origins.remove(&local) {
                 let mut remove_origin = false;
                 if let Some((shared, exclusive)) = self.active_borrows.get_mut(&origin) {
@@ -132,6 +148,8 @@ impl<'a> Checker<'a> {
             state.0 += 1;
         }
         self.borrow_origins.insert(reference, (origin, mutable));
+        self.reference_origins
+            .insert(reference, BorrowOrigin::Local(origin));
     }
 
     pub(super) fn err(&mut self, span: Span, message: impl Into<String>) {
@@ -345,6 +363,7 @@ impl<'a> Checker<'a> {
         self.locals.clear();
         self.local_scopes.clear();
         self.borrow_origins.clear();
+        self.reference_origins.clear();
         self.active_borrows.clear();
         self.push_local_scope();
         if let Some(ty) = self_ty {
@@ -374,6 +393,12 @@ impl<'a> Checker<'a> {
             // param counts as mutable here regardless of that marker.
             let mutable = param_ast.mutable || matches!(param_sig.ty, Type::MutRef(_));
             self.bind_local(param_ast.id, local_ty, mutable);
+            if matches!(param_sig.ty, Type::Ref(_) | Type::MutRef(_)) {
+                if let Some(local) = self.resolved.locals.get(&param_ast.id).copied() {
+                    self.reference_origins
+                        .insert(local, BorrowOrigin::Parameter(local));
+                }
+            }
         }
         self.return_ty = sig.ret.clone();
         if let Some(ret) = &f.ret {

@@ -1,11 +1,11 @@
-private mod option;
-private mod result;
-private mod array;
+mod option;
+mod result;
+mod array;
 
-use option.Option;
-use option.Option.Some;
-use option.Option.None;
-use result.Result;
-use result.Result.Ok;
-use result.Result.Error;
-use array.Array;
+pub use option.Option;
+pub use option.Option.Some;
+pub use option.Option.None;
+pub use result.Result;
+pub use result.Result.Ok;
+pub use result.Result.Error;
+pub use array.Array;

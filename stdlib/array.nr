@@ -1,4 +1,4 @@
-struct Array<T>;
+pub struct Array<T>;
 
 impl<T> Array<T> {
     map(mut self, iter (T) => ()) {

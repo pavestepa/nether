@@ -119,3 +119,49 @@ fn main() {
 "#,
     );
 }
+
+#[test]
+fn returned_reference_infers_one_parameter_origin() {
+    assert_ok(
+        r#"
+struct Dog { name String }
+fn identity(d: &Dog): &Dog { return d; }
+fn choose(flag bool, d: &Dog): &Dog {
+    return if flag { d } else { d };
+}
+fn main() {
+    let dog: Dog = :Dog { name = "Rex" };
+    println(identity(dog).name);
+    println(choose(true, dog).name);
+}
+"#,
+    );
+}
+
+#[test]
+fn returning_local_borrow_is_rejected() {
+    assert_err(
+        r#"
+struct Dog { name String }
+fn invalid(): &Dog {
+    let dog: Dog = :Dog { name = "Rex" };
+    let view: &Dog = dog;
+    return view;
+}
+"#,
+        "borrowed from a local owned value",
+    );
+}
+
+#[test]
+fn returned_reference_with_multiple_parameter_origins_is_ambiguous() {
+    assert_err(
+        r#"
+struct Dog { name String }
+fn choose(flag bool, left: &Dog, right: &Dog): &Dog {
+    return if flag { left } else { right };
+}
+"#,
+        "ambiguous origins",
+    );
+}

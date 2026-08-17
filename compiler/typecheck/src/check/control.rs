@@ -453,8 +453,75 @@ impl Checker<'_> {
                 span,
                 format!("expected return type `{expected_s}`, found `{found_s}`"),
             );
+        } else if matches!(expected_ret, Type::Ref(_) | Type::MutRef(_)) {
+            self.check_returned_reference_origin(value.as_deref(), span);
         }
         Type::Never
+    }
+
+    fn check_returned_reference_origin(&mut self, value: Option<&Expr>, span: Span) {
+        let Some(value) = value else {
+            return;
+        };
+        let origins = self.reference_origins_of_expr(value);
+        if origins.is_empty() {
+            self.err(
+                span,
+                "cannot infer the origin of this returned reference; return a reference parameter directly",
+            );
+            return;
+        }
+        if origins
+            .iter()
+            .any(|origin| matches!(origin, BorrowOrigin::Local(_)))
+        {
+            self.err(
+                span,
+                "cannot return a reference borrowed from a local owned value",
+            );
+            return;
+        }
+        if origins.len() > 1 {
+            self.err(
+                span,
+                "returned reference has ambiguous origins from multiple parameters",
+            );
+        }
+    }
+
+    fn reference_origins_of_expr(&self, expr: &Expr) -> HashSet<BorrowOrigin> {
+        match &expr.kind {
+            ExprKind::Path(_) => self
+                .bare_local_of(expr)
+                .and_then(|local| self.reference_origins.get(&local).copied())
+                .into_iter()
+                .collect(),
+            ExprKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                let mut origins = self.reference_origins_of_block_tail(then_branch);
+                if let Some(else_branch) = else_branch {
+                    origins.extend(self.reference_origins_of_expr(else_branch));
+                }
+                origins
+            }
+            ExprKind::Match { arms, .. } => arms
+                .iter()
+                .flat_map(|arm| self.reference_origins_of_expr(&arm.body))
+                .collect(),
+            ExprKind::Block(block) => self.reference_origins_of_block_tail(block),
+            _ => HashSet::new(),
+        }
+    }
+
+    fn reference_origins_of_block_tail(&self, block: &Block) -> HashSet<BorrowOrigin> {
+        block
+            .tail
+            .as_deref()
+            .map(|tail| self.reference_origins_of_expr(tail))
+            .unwrap_or_default()
     }
 
     pub(super) fn check_closure(

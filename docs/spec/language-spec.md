@@ -213,10 +213,13 @@ release that restriction when `view`'s block ends. This is intentionally
 more conservative than NLL: the borrow is not yet shortened after its last
 use within the block. References to inline values remain unavailable.
 
-**Still not yet implemented:** borrows escaping via return position and
-ambiguous returned-reference diagnostics (`fn get_name(user: &User):
-&String { ... }` still only type-checks structurally, not soundly), plus
-NLL/Polonius-style last-use shortening.
+**Returned references are origin-checked for direct parameter flows.** A
+return traced to exactly one incoming reference parameter is accepted;
+returning a reference borrowed from a local owned value is rejected, as is
+an `if`/`match` result that may originate from multiple parameters. Origin
+summaries are not yet propagated through calls, so a returned reference may
+be consumed immediately but cannot yet be stored/reborrowed at the caller.
+NLL/Polonius-style last-use shortening is also still pending.
 
 ### 3.2 Runtime representation of `:T` in Stage 1
 
@@ -516,11 +519,11 @@ move vs. a read-through):
   (captured at creation, regardless of whether/when the closure is later
   called) — independent of whether the closure is ever invoked.
 
-Diagnostics carry two labels: where the value was moved, and where it was
-used again. Not yet implemented: borrow-exclusivity for `:&T`/`:&mut T`
-(a live borrow blocking a move of its referent), region/origin inference,
-and the resulting ambiguous-returned-reference diagnostics — all deferred
-to Stage 2's remainder (see the roadmap).
+Move diagnostics carry two labels: where the value was moved, and where it
+was used again. Borrow exclusivity now also blocks moves and direct mutation
+for lexically live stored borrows. Direct returned-reference origins are
+checked and ambiguous parameter origins are diagnosed; NLL shortening and
+interprocedural origin summaries remain deferred to Stage 2's remainder.
 
 ### 8.7 Variadic parameters **[Stage 1]**
 
@@ -758,7 +761,8 @@ Full retain/release insertion rules live in
 | Calling a *method* (not just field access) through a `:&T`/`:&mut T` receiver (§3.1) | **Stage 2 — done** |
 | `to(value)` domain conversion, target-inferred form, 3 of 4 transitions (§9) | **Stage 2 — done** |
 | `to<T>(value)`'s explicit-target form; `T -> :T` (needs `Clone`, §10) | Stage 2/3 — remaining |
-| Region/origin inference, borrows escaping via return position/storage, ambiguous-returned-reference diagnostics, `move () => {}` closures, `:T`'s unrefcounted runtime representation | Stage 2 — remaining |
+| Lexically scoped stored heap borrows; direct single-parameter returned-reference origins and ambiguous-origin diagnostics | **Stage 2 — done** |
+| NLL last-use shortening, interprocedural origin summaries, `move () => {}` closures, `:T`'s unrefcounted runtime representation | Stage 2 — remaining |
 | Reference-to-inline-value codegen | Stage 2 — remaining |
 | Associated types, const generics, specialization, `any`/`some`, multi-bound generics, derivable traits, `#[allow_pascal_case]` | Stage 3 |
 | Development-mode witness-table generics dispatch | Stage 3 |
