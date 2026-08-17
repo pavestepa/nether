@@ -172,6 +172,10 @@ impl Checker<'_> {
         let Some(sig) = self.sigs.method_any_domain(owner_id, &name).cloned() else {
             return Type::Error;
         };
+        if sig.file != span.file && !sig.visibility.is_public() {
+            self.err(span, format!("method `{name}` is private"));
+            return Type::Error;
+        }
         if sig.self_param.is_some() {
             self.err(
                 span,
@@ -295,6 +299,10 @@ impl Checker<'_> {
             );
             return Type::Error;
         };
+        if sig.file != method.span.file && !sig.visibility.is_public() {
+            self.err(method.span, format!("method `{}` is private", method.name));
+            return Type::Error;
+        }
         // `ByMutRef` (`mut self`) and `OwnedMutRef` (`: &mut self`) both
         // need an exclusive/mutable receiver — `receiver_mutable` already
         // answers this correctly for both a `let mut`-bound owned local

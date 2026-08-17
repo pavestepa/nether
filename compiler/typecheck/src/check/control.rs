@@ -43,9 +43,20 @@ impl Checker<'_> {
         // reachable through a `:&T`/`:&mut T` parameter the same way it
         // already is through `T`/`:T` (Stage 2, slice 2).
         let base_ty = base_ty.strip_indirection();
-        if let Type::Struct(_, _) = base_ty {
+        if let Type::Struct(owner_id, _) = base_ty {
             if let Some(fields) = self.sigs.named_type_fields(base_ty) {
                 if let Some((_, ty)) = fields.into_iter().find(|(n, _)| n == &ident.name) {
+                    let owner = self.resolved.definitions.get(*owner_id);
+                    let crosses_module = owner.file.is_some_and(|file| file != ident.span.file);
+                    let is_public = self
+                        .sigs
+                        .field_visibility
+                        .get(&(*owner_id, ident.name.clone()))
+                        .is_some_and(|visibility| visibility.is_public());
+                    if crosses_module && !is_public {
+                        self.err(ident.span, format!("field `{}` is private", ident.name));
+                        return Type::Error;
+                    }
                     return ty.clone();
                 }
             }

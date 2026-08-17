@@ -53,12 +53,12 @@ impl<T> MyOption<T> {
 fn parse_prelude_fixture(consumer_source: &str) -> (Module, nether_diagnostics::FileId) {
     let mut map = SourceMap::new();
 
-    let real_source = "fn helper(): i32 { 1 }\n";
+    let real_source = "pub fn helper(): i32 { 1 }\n";
     let real_file = map.add_file("real.nr", real_source);
     let (real_module, real_diags) = nether_parser::parse_module(real_source, real_file);
     assert!(real_diags.is_empty(), "{real_diags:?}");
 
-    let prelude_source = "use real.helper;\n";
+    let prelude_source = "pub use real.helper;\n";
     let prelude_file = map.add_file("prelude.nr", prelude_source);
     let (prelude_module, prelude_diags) = nether_parser::parse_module(prelude_source, prelude_file);
     assert!(prelude_diags.is_empty(), "{prelude_diags:?}");
@@ -119,12 +119,12 @@ fn prelude_names_are_invisible_without_an_explicit_prelude_file() {
 fn parse_variant_prelude_fixture(consumer_source: &str) -> (Module, nether_diagnostics::FileId) {
     let mut map = SourceMap::new();
 
-    let enums_source = "enum Color { Red, Green }\n";
+    let enums_source = "pub enum Color { Red, Green }\n";
     let enums_file = map.add_file("enums.nr", enums_source);
     let (enums_module, enums_diags) = nether_parser::parse_module(enums_source, enums_file);
     assert!(enums_diags.is_empty(), "{enums_diags:?}");
 
-    let prelude_source = "use enums.Color.Red;\n";
+    let prelude_source = "pub use enums.Color.Red;\n";
     let prelude_file = map.add_file("prelude.nr", prelude_source);
     let (prelude_module, prelude_diags) = nether_parser::parse_module(prelude_source, prelude_file);
     assert!(prelude_diags.is_empty(), "{prelude_diags:?}");

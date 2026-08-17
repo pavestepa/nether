@@ -40,6 +40,21 @@ pub enum Item {
     Mod(ModDecl),
 }
 
+/// Declaration visibility. Nether is default-private: crossing a module
+/// boundary is permitted only for declarations explicitly marked `pub`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Visibility {
+    #[default]
+    Private,
+    Public,
+}
+
+impl Visibility {
+    pub fn is_public(self) -> bool {
+        matches!(self, Self::Public)
+    }
+}
+
 /// `struct Dog { name String }` / `struct Point(i32, i32);` /
 /// `struct Unit;` (language-spec §4.2). Always a heap/reference-category
 /// type — `struct` is reserved exclusively for this, distinct from the
@@ -50,6 +65,7 @@ pub enum Item {
 pub struct StructDecl {
     pub id: NodeId,
     pub name: Ident,
+    pub visibility: Visibility,
     /// `Box<T>` — language-spec §13 lists "generic types" as supported;
     /// empty for a non-generic declaration.
     pub generics: Vec<GenericParam>,
@@ -84,6 +100,7 @@ pub enum StructDeclKind {
 pub struct TypeAliasDecl {
     pub id: NodeId,
     pub name: Ident,
+    pub visibility: Visibility,
     pub ty: TypeExpr,
     pub doc: Option<String>,
     pub span: Span,
@@ -93,9 +110,7 @@ pub struct TypeAliasDecl {
 pub struct Field {
     pub name: Ident,
     pub ty: TypeExpr,
-    /// True if written with a leading `_` or the `private` keyword
-    /// (language-spec §4 — the two spellings are equivalent).
-    pub private: bool,
+    pub visibility: Visibility,
 }
 
 /// `impl Dog { ... }` or `impl Dog: Sound { ... }` (language-spec §6-7).
@@ -131,6 +146,7 @@ pub struct ImplBlock {
 pub struct EnumDecl {
     pub id: NodeId,
     pub name: Ident,
+    pub visibility: Visibility,
     pub generics: Vec<GenericParam>,
     /// Traits opted into on the declaration (`enum State: Display`).
     pub traits: Vec<TypeExpr>,
@@ -169,6 +185,7 @@ pub struct EnumVariant {
 pub struct TraitDecl {
     pub id: NodeId,
     pub name: Ident,
+    pub visibility: Visibility,
     /// language-spec §8 lists "generic traits" as supported; empty for
     /// a non-generic declaration.
     pub generics: Vec<GenericParam>,
@@ -190,6 +207,7 @@ pub struct TraitDecl {
 pub struct FnDecl {
     pub id: NodeId,
     pub name: Ident,
+    pub visibility: Visibility,
     pub generics: Vec<GenericParam>,
     /// `None` for a static method / standalone function; `Some(_)` for an
     /// instance method (language-spec §6).
@@ -199,7 +217,6 @@ pub struct FnDecl {
     /// `None` only for a trait method with no default body
     /// (language-spec §7).
     pub body: Option<Block>,
-    pub private: bool,
     pub doc: Option<String>,
     pub span: Span,
 }
@@ -259,20 +276,17 @@ pub struct Param {
 #[derive(Debug, Clone)]
 pub struct UseDecl {
     pub id: NodeId,
+    pub visibility: Visibility,
     pub path: Path,
     pub span: Span,
 }
 
 /// `mod child;` declares and loads a child file module. The driver maps
 /// it to `child.nr` or `child/mod.nr` relative to the declaring module.
-/// `private mod child;` records the same
-/// declaration with `private == true`; like [`Field::private`] and
-/// [`FnDecl::private`] elsewhere, this is recorded but not yet enforced by
-/// `resolver`/`typecheck`.
 #[derive(Debug, Clone)]
 pub struct ModDecl {
     pub id: NodeId,
     pub name: Ident,
-    pub private: bool,
+    pub visibility: Visibility,
     pub span: Span,
 }

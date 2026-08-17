@@ -5,7 +5,7 @@ pub enum Option<T> {
 
 impl<T> Option<T> {
     /// Returns true when `value` contains a payload.
-    is_some(self) bool {
+    pub is_some(self) bool {
         return match self {
             Some(_) => true,
             None => false,
@@ -13,7 +13,7 @@ impl<T> Option<T> {
     }
 
     /// Extracts an Option payload or returns the provided fallback.
-    unwrap_or(self, fallback T) T {
+    pub unwrap_or(self, fallback T) T {
         return match self {
             Some(item) => item,
             None => fallback,
@@ -21,7 +21,7 @@ impl<T> Option<T> {
     }
 
     /// Applies `mapper` to an Option payload.
-    map<U>(self, mapper (T) => U) Option<U> {
+    pub map<U>(self, mapper (T) => U) Option<U> {
         return match self {
             Some(item) => Option.Some(mapper(item)),
             None => Option.None,

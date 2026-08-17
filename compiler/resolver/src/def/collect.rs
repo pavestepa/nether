@@ -59,23 +59,23 @@ pub fn collect(module: &Module, prelude_file: Option<FileId>) -> (Definitions, V
     for item in &module.items {
         match item {
             Item::Struct(t) => {
-                defs.insert_checked(&t.name, DefKind::Type, &mut diags);
+                defs.insert_checked(&t.name, DefKind::Type, t.visibility, &mut diags);
             }
             Item::TypeAlias(t) => {
-                defs.insert_checked(&t.name, DefKind::TypeAlias, &mut diags);
+                defs.insert_checked(&t.name, DefKind::TypeAlias, t.visibility, &mut diags);
             }
             Item::Enum(e) => {
-                let id = defs.insert_checked(&e.name, DefKind::Enum, &mut diags);
+                let id = defs.insert_checked(&e.name, DefKind::Enum, e.visibility, &mut diags);
                 let variants = e.variants.iter().map(|v| v.name.name.clone()).collect();
                 defs.defs[id.0 as usize].variants = variants;
             }
             Item::Trait(i) => {
-                let id = defs.insert_checked(&i.name, DefKind::Trait, &mut diags);
+                let id = defs.insert_checked(&i.name, DefKind::Trait, i.visibility, &mut diags);
                 defs.defs[id.0 as usize].methods =
                     i.methods.iter().map(|m| m.name.name.clone()).collect();
             }
             Item::Fn(f) => {
-                defs.insert_checked(&f.name, DefKind::Fn, &mut diags);
+                defs.insert_checked(&f.name, DefKind::Fn, f.visibility, &mut diags);
             }
             Item::Impl(_) | Item::Use(_) | Item::Mod(_) => {}
         }
@@ -154,9 +154,7 @@ pub fn collect(module: &Module, prelude_file: Option<FileId>) -> (Definitions, V
             let Some(trait_def) = trait_id(trait_ref, &defs) else {
                 continue;
             };
-            for name in
-                inherited_method_names(trait_def, &defs, &trait_parents, &mut Vec::new())
-            {
+            for name in inherited_method_names(trait_def, &defs, &trait_parents, &mut Vec::new()) {
                 if !names.contains(&name) {
                     names.push(name);
                 }
@@ -186,12 +184,25 @@ pub fn collect(module: &Module, prelude_file: Option<FileId>) -> (Definitions, V
             continue;
         };
         if let Some(target_file) = module.imports.get(&use_decl.id) {
-            match defs
-                .by_file_name
-                .get(&(*target_file, imported_name.name.clone()))
-                .copied()
-            {
-                Some(id) => defs.import(use_decl.span.file, imported_name.name.clone(), id),
+            match defs.exported_from(*target_file, &imported_name.name) {
+                Some(id) => defs.import(
+                    use_decl.span.file,
+                    imported_name.name.clone(),
+                    id,
+                    use_decl.visibility.is_public(),
+                ),
+                None if defs
+                    .by_file_name
+                    .contains_key(&(*target_file, imported_name.name.clone())) =>
+                {
+                    diags.push(
+                        Diagnostic::error(format!("`{}` is private", imported_name.name))
+                            .with_label(
+                                imported_name.span,
+                                "private declaration cannot be imported",
+                            ),
+                    )
+                }
                 None => diags.push(
                     Diagnostic::error(format!("module does not define `{}`", imported_name.name))
                         .with_label(imported_name.span, "not found in this module"),
@@ -222,7 +233,9 @@ pub fn collect(module: &Module, prelude_file: Option<FileId>) -> (Definitions, V
             .get(&(*target_file, enum_seg.name.clone()))
             .copied()
         {
-            Some(id) if defs.get(id).kind == DefKind::Enum => {
+            Some(id)
+                if defs.get(id).kind == DefKind::Enum && defs.get(id).visibility.is_public() =>
+            {
                 match variant_index(defs.get(id), &variant_seg.name) {
                     Some(idx) => {
                         defs.import_variant(use_decl.span.file, variant_seg.name.clone(), (id, idx))
@@ -236,6 +249,10 @@ pub fn collect(module: &Module, prelude_file: Option<FileId>) -> (Definitions, V
                     ),
                 }
             }
+            Some(id) if defs.get(id).kind == DefKind::Enum => diags.push(
+                Diagnostic::error(format!("enum `{}` is private", enum_seg.name))
+                    .with_label(enum_seg.span, "private enum cannot be imported"),
+            ),
             Some(_) => diags.push(
                 Diagnostic::error(format!("`{}` is not an enum", enum_seg.name))
                     .with_label(enum_seg.span, "expected an enum"),
@@ -253,7 +270,7 @@ pub fn collect(module: &Module, prelude_file: Option<FileId>) -> (Definitions, V
     if let Some(prelude_file) = prelude_file {
         for item in &module.items {
             let Item::Use(use_decl) = item else { continue };
-            if use_decl.span.file != prelude_file {
+            if use_decl.span.file != prelude_file || !use_decl.visibility.is_public() {
                 continue;
             }
             let Some(imported_name) = use_decl.path.segments.last() else {
@@ -266,6 +283,7 @@ pub fn collect(module: &Module, prelude_file: Option<FileId>) -> (Definitions, V
         for item in &module.items {
             let Item::Use(use_decl) = item else { continue };
             if use_decl.span.file != prelude_file
+                || !use_decl.visibility.is_public()
                 || !module.variant_imports.contains_key(&use_decl.id)
             {
                 continue;

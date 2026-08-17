@@ -1,6 +1,6 @@
 use nether_ast::{
-    EnumDecl, EnumVariant, Field, FnDecl, GenericParam, ImplBlock, TraitDecl, Item, ModDecl,
-    Param, SelfParam, StructDecl, StructDeclKind, TypeAliasDecl, UseDecl,
+    EnumDecl, EnumVariant, Field, FnDecl, GenericParam, ImplBlock, Item, ModDecl, Param, SelfParam,
+    StructDecl, StructDeclKind, TraitDecl, TypeAliasDecl, UseDecl, Visibility,
 };
 use nether_diagnostics::Span;
 use nether_lexer::{Keyword, Punct, Token};
@@ -21,31 +21,29 @@ impl Parser {
 
     fn parse_item(&mut self) -> Option<Item> {
         let doc = self.take_doc_comments();
-        // `private` currently only prefixes `mod` at the top level (`type`
-        // and `fn` privacy is the underscore-name convention instead, and
-        // `impl`/`trait` bodies have their own `private` handling in
-        // `parse_method_decl`).
-        if matches!(self.peek(), Token::Keyword(Keyword::Private))
-            && matches!(self.peek_at(1), Token::Keyword(Keyword::Mod))
-        {
-            let start = self.peek_span();
-            self.bump();
-            return self.parse_mod_decl(true, start).map(Item::Mod);
-        }
+        let start = self.peek_span();
+        let visibility = if self.eat_keyword(Keyword::Pub) {
+            Visibility::Public
+        } else {
+            Visibility::Private
+        };
         match self.peek() {
-            Token::Keyword(Keyword::Struct) => self.parse_struct_decl(doc).map(Item::Struct),
-            Token::Keyword(Keyword::Type) => self.parse_type_alias_decl(doc).map(Item::TypeAlias),
+            Token::Keyword(Keyword::Struct) => self
+                .parse_struct_decl(doc, visibility, start)
+                .map(Item::Struct),
+            Token::Keyword(Keyword::Type) => self
+                .parse_type_alias_decl(doc, visibility, start)
+                .map(Item::TypeAlias),
             Token::Keyword(Keyword::Impl) => self.parse_impl_block().map(Item::Impl),
-            Token::Keyword(Keyword::Enum) => self.parse_enum_decl(doc).map(Item::Enum),
-            Token::Keyword(Keyword::Trait) => {
-                self.parse_trait_decl(doc).map(Item::Trait)
+            Token::Keyword(Keyword::Enum) => {
+                self.parse_enum_decl(doc, visibility, start).map(Item::Enum)
             }
-            Token::Keyword(Keyword::Fn) => self.parse_fn_decl(doc).map(Item::Fn),
-            Token::Keyword(Keyword::Use) => self.parse_use_decl().map(Item::Use),
-            Token::Keyword(Keyword::Mod) => {
-                let start = self.peek_span();
-                self.parse_mod_decl(false, start).map(Item::Mod)
-            }
+            Token::Keyword(Keyword::Trait) => self
+                .parse_trait_decl(doc, visibility, start)
+                .map(Item::Trait),
+            Token::Keyword(Keyword::Fn) => self.parse_fn_decl(doc, visibility, start).map(Item::Fn),
+            Token::Keyword(Keyword::Use) => self.parse_use_decl(visibility, start).map(Item::Use),
+            Token::Keyword(Keyword::Mod) => self.parse_mod_decl(visibility, start).map(Item::Mod),
             other => {
                 let span = self.peek_span();
                 self.error(
@@ -88,6 +86,7 @@ impl Parser {
                     | Token::Keyword(Keyword::Fn)
                     | Token::Keyword(Keyword::Use)
                     | Token::Keyword(Keyword::Mod)
+                    | Token::Keyword(Keyword::Pub)
             ) {
                 break;
             }
@@ -95,8 +94,13 @@ impl Parser {
         }
     }
 
-    fn parse_struct_decl(&mut self, doc: Option<String>) -> Option<StructDecl> {
-        let start = self.expect_keyword(Keyword::Struct);
+    fn parse_struct_decl(
+        &mut self,
+        doc: Option<String>,
+        visibility: Visibility,
+        start: Span,
+    ) -> Option<StructDecl> {
+        self.expect_keyword(Keyword::Struct);
         let id = self.next_id();
         let name = self.expect_ident();
         let generics = self.parse_optional_generic_params();
@@ -144,6 +148,7 @@ impl Parser {
         Some(StructDecl {
             id,
             name,
+            visibility,
             generics,
             traits,
             kind,
@@ -157,8 +162,13 @@ impl Parser {
     /// far enough to report that it isn't supported yet, then recovers by
     /// parsing the rest as an ordinary alias rather than cascading further
     /// diagnostics.
-    fn parse_type_alias_decl(&mut self, doc: Option<String>) -> Option<TypeAliasDecl> {
-        let start = self.expect_keyword(Keyword::Type);
+    fn parse_type_alias_decl(
+        &mut self,
+        doc: Option<String>,
+        visibility: Visibility,
+        start: Span,
+    ) -> Option<TypeAliasDecl> {
+        self.expect_keyword(Keyword::Type);
         if matches!(self.peek(), Token::Punct(Punct::Colon)) {
             let span = self.peek_span();
             self.error(
@@ -175,6 +185,7 @@ impl Parser {
         Some(TypeAliasDecl {
             id,
             name,
+            visibility,
             ty,
             doc,
             span: start.to(end),
@@ -184,11 +195,18 @@ impl Parser {
     /// A struct field — `name Type` (language-spec §4.2; no colon, unlike
     /// the pre-rewrite MVP's `name: Type`).
     fn parse_field(&mut self) -> Field {
-        let is_private_kw = self.eat_keyword(Keyword::Private);
+        let visibility = if self.eat_keyword(Keyword::Pub) {
+            Visibility::Public
+        } else {
+            Visibility::Private
+        };
         let name = self.expect_ident();
         let ty = self.parse_type_expr();
-        let private = is_private_kw || name.is_underscore_private();
-        Field { name, ty, private }
+        Field {
+            name,
+            ty,
+            visibility,
+        }
     }
 
     fn parse_impl_block(&mut self) -> Option<ImplBlock> {
@@ -221,8 +239,13 @@ impl Parser {
         })
     }
 
-    fn parse_enum_decl(&mut self, doc: Option<String>) -> Option<EnumDecl> {
-        let start = self.expect_keyword(Keyword::Enum);
+    fn parse_enum_decl(
+        &mut self,
+        doc: Option<String>,
+        visibility: Visibility,
+        start: Span,
+    ) -> Option<EnumDecl> {
+        self.expect_keyword(Keyword::Enum);
         let id = self.next_id();
         let name = self.expect_ident();
         let generics = self.parse_optional_generic_params();
@@ -239,6 +262,7 @@ impl Parser {
         Some(EnumDecl {
             id,
             name,
+            visibility,
             generics,
             traits,
             variants,
@@ -274,8 +298,13 @@ impl Parser {
         }
     }
 
-    fn parse_trait_decl(&mut self, doc: Option<String>) -> Option<TraitDecl> {
-        let start = self.expect_keyword(Keyword::Trait);
+    fn parse_trait_decl(
+        &mut self,
+        doc: Option<String>,
+        visibility: Visibility,
+        start: Span,
+    ) -> Option<TraitDecl> {
+        self.expect_keyword(Keyword::Trait);
         let id = self.next_id();
         let name = self.expect_ident();
         let generics = self.parse_optional_generic_params();
@@ -295,6 +324,7 @@ impl Parser {
         Some(TraitDecl {
             id,
             name,
+            visibility,
             generics,
             parents,
             methods,
@@ -321,19 +351,20 @@ impl Parser {
         traits
     }
 
-    fn parse_use_decl(&mut self) -> Option<UseDecl> {
-        let start = self.expect_keyword(Keyword::Use);
+    fn parse_use_decl(&mut self, visibility: Visibility, start: Span) -> Option<UseDecl> {
+        self.expect_keyword(Keyword::Use);
         let id = self.next_id();
         let path = self.parse_use_path();
         let end = self.expect_punct(Punct::Semi, "after a use declaration");
         Some(UseDecl {
             id,
+            visibility,
             path,
             span: start.to(end),
         })
     }
 
-    fn parse_mod_decl(&mut self, private: bool, start: Span) -> Option<ModDecl> {
+    fn parse_mod_decl(&mut self, visibility: Visibility, start: Span) -> Option<ModDecl> {
         self.expect_keyword(Keyword::Mod);
         let id = self.next_id();
         let name = self.expect_ident();
@@ -341,15 +372,20 @@ impl Parser {
         Some(ModDecl {
             id,
             name,
-            private,
+            visibility,
             span: start.to(end),
         })
     }
 
     /// A standalone `fn` declaration — always has the `fn` keyword and
     /// never a `self` parameter (language-spec §6.1).
-    fn parse_fn_decl(&mut self, doc: Option<String>) -> Option<FnDecl> {
-        let start = self.expect_keyword(Keyword::Fn);
+    fn parse_fn_decl(
+        &mut self,
+        doc: Option<String>,
+        visibility: Visibility,
+        start: Span,
+    ) -> Option<FnDecl> {
+        self.expect_keyword(Keyword::Fn);
         let id = self.next_id();
         let name = self.expect_ident();
         let generics = self.parse_optional_generic_params();
@@ -368,16 +404,15 @@ impl Parser {
             .map(|b| b.span)
             .or_else(|| ret.as_ref().map(|r| r.span()))
             .unwrap_or_else(|| self.prev_span());
-        let private = name.is_underscore_private();
         Some(FnDecl {
             id,
             name,
+            visibility,
             generics,
             self_param: None,
             params,
             ret,
             body,
-            private,
             doc,
             span: start.to(end),
         })
@@ -389,7 +424,11 @@ impl Parser {
     /// (language-spec §7).
     pub(crate) fn parse_method_decl(&mut self, doc: Option<String>) -> Option<FnDecl> {
         let start = self.peek_span();
-        let is_private_kw = self.eat_keyword(Keyword::Private);
+        let visibility = if self.eat_keyword(Keyword::Pub) {
+            Visibility::Public
+        } else {
+            Visibility::Private
+        };
         if !matches!(self.peek(), Token::Ident(_)) {
             let span = self.peek_span();
             self.error(
@@ -417,16 +456,15 @@ impl Parser {
             .map(|b| b.span)
             .or_else(|| ret.as_ref().map(|r| r.span()))
             .unwrap_or_else(|| self.prev_span());
-        let private = is_private_kw || name.is_underscore_private();
         Some(FnDecl {
             id,
             name,
+            visibility,
             generics,
             self_param,
             params,
             ret,
             body,
-            private,
             doc,
             span: start.to(end),
         })

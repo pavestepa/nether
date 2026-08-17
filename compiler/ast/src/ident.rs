@@ -17,10 +17,8 @@ impl Ident {
         }
     }
 
-    /// Whether this name is private per language-spec §4: a leading `_`.
-    /// (The `private` keyword modifier is tracked separately by whichever
-    /// declaration node it modifies, since it is written before the item,
-    /// not part of the name itself.)
+    /// Whether this identifier follows the leading-underscore naming
+    /// convention. Visibility is independent and stored on declarations.
     pub fn is_underscore_private(&self) -> bool {
         self.name.as_str().starts_with('_')
     }

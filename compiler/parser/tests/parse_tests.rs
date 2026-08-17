@@ -141,19 +141,48 @@ fn use_enum_variant_path_parses_with_three_segments() {
 }
 
 #[test]
-fn private_mod_declaration_parses() {
-    // `stdlib/mod.nr` writes its children this way — `private` recorded on
-    // `ModDecl` but (like `Field`/`FnDecl` privacy) not yet enforced.
-    let module = parse_ok("private mod option;\nmod result;\n");
+fn module_visibility_is_private_by_default_and_pub_is_explicit() {
+    let module = parse_ok("mod option;\npub mod result;\n");
     let Item::Mod(option) = &module.items[0] else {
         panic!("expected ModDecl")
     };
     assert_eq!(option.name.name.as_str(), "option");
-    assert!(option.private);
+    assert_eq!(option.visibility, nether_ast::Visibility::Private);
     let Item::Mod(result) = &module.items[1] else {
         panic!("expected ModDecl")
     };
-    assert!(!result.private);
+    assert_eq!(result.visibility, nether_ast::Visibility::Public);
+}
+
+#[test]
+fn pub_applies_to_every_api_item_and_method_shape() {
+    let module = parse_ok(
+        r#"
+pub use api.Value;
+pub struct Value { pub exposed i32, hidden i32 }
+pub type count = i32;
+pub enum Choice { One }
+pub trait Named { pub name(self) String; }
+pub fn make() Value { return Value { exposed = 1, hidden = 2 }; }
+impl Value {
+    pub new() Value { return make(); }
+    pub get(self) i32 { return self.exposed; }
+}
+"#,
+    );
+    assert!(matches!(&module.items[0], Item::Use(item) if item.visibility.is_public()));
+    assert!(matches!(&module.items[1], Item::Struct(item) if item.visibility.is_public()));
+    assert!(matches!(&module.items[2], Item::TypeAlias(item) if item.visibility.is_public()));
+    assert!(matches!(&module.items[3], Item::Enum(item) if item.visibility.is_public()));
+    assert!(matches!(&module.items[4], Item::Trait(item) if item.visibility.is_public()));
+    assert!(matches!(&module.items[5], Item::Fn(item) if item.visibility.is_public()));
+    let Item::Impl(block) = &module.items[6] else {
+        panic!("expected impl")
+    };
+    assert!(block
+        .methods
+        .iter()
+        .all(|method| method.visibility.is_public()));
 }
 
 #[test]
@@ -171,13 +200,13 @@ fn tuple_struct_and_unit_type() {
 }
 
 #[test]
-fn struct_with_private_field_via_underscore_and_keyword() {
+fn struct_fields_are_private_by_default_and_pub_is_explicit() {
     let module = parse_ok(
         r#"
 struct Config {
-    name String,
+    pub name String,
     _secret String,
-    private token String
+    token String
 }
 "#,
     );
@@ -187,9 +216,9 @@ struct Config {
     let StructDeclKind::Struct(fields) = &decl.kind else {
         panic!("expected Struct")
     };
-    assert!(!fields[0].private);
-    assert!(fields[1].private);
-    assert!(fields[2].private);
+    assert_eq!(fields[0].visibility, nether_ast::Visibility::Public);
+    assert_eq!(fields[1].visibility, nether_ast::Visibility::Private);
+    assert_eq!(fields[2].visibility, nether_ast::Visibility::Private);
 }
 
 #[test]
@@ -242,19 +271,10 @@ fn variadic_parameter_must_be_last() {
 }
 
 #[test]
-fn private_before_a_non_mod_item_reports_a_diagnostic_and_terminates() {
-    // Regression: `private` followed by anything but `mod` used to hang
-    // the parser forever. `parse_item`'s dedicated `private mod` lookahead
-    // consumes `private` only when `mod` follows; every other case falls
-    // through to the ordinary "expected an item" diagnostic — but
-    // `synchronize_item`'s recovery loop used to list bare `Private` as a
-    // safe restart point, so it broke immediately without ever consuming
-    // the token, and the outer parse loop re-entered `parse_item` at the
-    // same position forever. This test itself hanging (rather than
-    // failing) would be exactly that regression.
+fn removed_private_keyword_reports_a_diagnostic_and_recovers() {
     let (module, diags) =
         parse_with_diagnostics("private struct printsys;\nfn after() i32 { return 1; }\n");
-    assert!(diags.iter().any(|d| d.message.contains("Private")));
+    assert!(diags.iter().any(|d| d.message.contains("expected an item")));
     // Recovery must still make it to the next real item.
     assert!(module.items.iter().any(|item| matches!(
         item,

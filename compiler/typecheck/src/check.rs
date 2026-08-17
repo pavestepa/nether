@@ -415,6 +415,8 @@ fn build_fn_sig(
         .map(|r| lower_type_expr(r, resolved, decls, diags))
         .unwrap_or_else(Type::unit);
     FnSig {
+        visibility: f.visibility,
+        file: f.span.file,
         self_param: f.self_param,
         params,
         ret,

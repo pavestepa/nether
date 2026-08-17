@@ -19,6 +19,7 @@ The compiler implements:
 - HIR, closure conversion, CFG-based MIR, and ARC insertion;
 - structs, tuples, enums/match, arrays, weak references, and closures;
 - local multi-file modules through `use`;
+- default-private declarations with explicit `pub` APIs and re-exports;
 - LLVM object emission, optimization levels, and native linking;
 - a small Nether-source Option/Result/Array standard library.
 
@@ -122,11 +123,16 @@ have their Rust meanings: `self` is the current
 module, `super` is its parent, and `crate` is the entry module. Nether uses
 `.` everywhere instead of Rust's `::`.
 
+All declarations are private by default. A declaration that must cross a
+module boundary is marked `pub`; this applies independently to modules,
+functions, imports, structs/enums/type aliases, named struct fields, and both
+instance and static methods. A plain `use` is local to its file, while
+`pub use` re-exports the imported name.
+
 Each file has its own top-level namespace, while an `impl` in a child can
 extend a parent type after `use super.Type;`. Import aliases, globs, and
-inline `mod name { ... }` blocks are not implemented; general per-file
-`use` re-export isn't either, except for the one bundled case described
-next. Bundled standard-library modules are available without a `mod
+inline `mod name { ... }` blocks are not implemented. Bundled
+standard-library modules are available without a `mod
 stdlib;` declaration:
 
 ```nether
@@ -139,7 +145,7 @@ fn main() {
 ```
 
 `stdlib/mod.nr` is additionally always loaded as a program-wide prelude,
-independent of whether anything `use`s it: every top-level `use` written
+independent of whether anything `use`s it: every top-level `pub use` written
 in that one file is re-exported to every other file with no `use`/`mod`
 of its own (a local declaration of the same name is a legal shadow, not
 a conflict). `Option`/`Result`/`Array` themselves are ordinary generic

@@ -23,7 +23,7 @@ rebuilding.
 | `compiler/lexer` | **keep + minor extension** | Generic hand-rolled scanner. Stage 1 adds one keyword (`struct`); no other lexer change needed for Stage 1's grammar. |
 | `compiler/ast` | **refactor** | Data-only node shapes are a good foundation. Stage 1 adds `TypeExpr::{Unique,Ref,MutRef}`, a `StructDecl`/`Item::Struct` split from the alias-only `Item::Type`, `TypeAliasDecl`, extended `SelfParam`, and `=`-based struct-literal fields. |
 | `compiler/parser` | **refactor** | Recursive-descent/Pratt mechanics are reusable; the *grammar rules* encoded old syntax (colon-before-return-type, `mut name: Type`, `type` for structs, `:` struct-literal fields, bare-block expressions). Stage 1 rewrites these rules without touching the parsing mechanism. |
-| `compiler/resolver` | **keep, minor threading** | Flat single-namespace, file=module design is sound. Stage 1 threads through the new `Item::Struct`/`Item::TypeAlias` items. Visibility enforcement remains a pre-existing gap, not newly introduced. |
+| `compiler/resolver` | **keep, minor threading** | Flat single-namespace, file=module design is sound. Stage 1 threads through the new `Item::Struct`/`Item::TypeAlias` items; the current compiler also enforces default-private declarations and explicit `pub` imports/re-exports. |
 | `compiler/hir` | **refactor** | Straightforward AST→HIR desugaring. Stage 1 adds `Unique`/`Ref`/`MutRef` lowering (mirroring the existing `Weak` handling), alias substitution with a cycle guard, and moves fn-body tail-expression suppression here. |
 | `compiler/typecheck` | **largest refactor** | The structural `Type` enum was already good design; Stage 1's biggest, riskiest change is extending it with `Unique`/`Ref`/`MutRef` and replacing casing-as-mechanism with casing-as-validation in `alloc.rs`. |
 | `compiler/monomorphization` | **keep** | Always-monomorphized generics remain the Stage 1 strategy; dev-mode witness tables are a Stage 3 addition alongside this crate, not a replacement of it. |
@@ -42,6 +42,8 @@ rebuilding.
 flow-sensitive move checking, reference parameters and receiver calls,
 lexically scoped stored heap borrows, plus three sound `to(value)`
 ownership-domain conversions. Direct returned-reference origins are checked;
+default-private visibility with explicit `pub` is implemented for declarations,
+imports/re-exports, fields, and methods;
 NLL-style last-use inference and propagating origin summaries through calls
 remain open. Stages 3–6 have not
 started as staged projects, although the pre-existing compiler already has

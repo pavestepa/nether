@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
-use nether_ast::{NodeId, SelfParam, Symbol};
+use nether_ast::{NodeId, SelfParam, Symbol, Visibility};
+use nether_diagnostics::FileId;
 use nether_resolver::{DefId, Definitions};
 
 use crate::alloc::{alloc_kind, AllocKind};
@@ -72,6 +73,8 @@ impl ReceiverDomain {
 /// included, unlike a closure's plain [`Type::Function`].
 #[derive(Debug, Clone)]
 pub struct FnSig {
+    pub visibility: Visibility,
+    pub file: FileId,
     pub self_param: Option<SelfParam>,
     pub params: Vec<ParamSig>,
     pub ret: Type,
@@ -154,6 +157,7 @@ pub struct EnumSig {
 #[derive(Default)]
 pub struct Signatures {
     pub type_shapes: HashMap<DefId, TypeShape>,
+    pub field_visibility: HashMap<(DefId, Symbol), Visibility>,
     /// Generic parameters for each `type` declaration, in declaration
     /// order. `type_shapes` keeps the corresponding fields in terms of
     /// these parameters; [`Signatures::type_fields`] performs the
@@ -229,9 +233,13 @@ impl Signatures {
     /// definition error, unchanged by this pass), so at most one domain
     /// ever matches in practice.
     pub fn method_any_domain(&self, owner: DefId, name: &Symbol) -> Option<&FnSig> {
-        [ReceiverDomain::Static, ReceiverDomain::Arc, ReceiverDomain::Owned]
-            .into_iter()
-            .find_map(|domain| self.method(owner, name, domain))
+        [
+            ReceiverDomain::Static,
+            ReceiverDomain::Arc,
+            ReceiverDomain::Owned,
+        ]
+        .into_iter()
+        .find_map(|domain| self.method(owner, name, domain))
     }
 
     /// The signature to use for an instance-method call whose receiver's
@@ -243,7 +251,9 @@ impl Signatures {
         domain: ReceiverDomain,
         args: &[Type],
     ) -> Option<&FnSig> {
-        self.methods.get(&(owner, name.clone(), domain))?.for_args(args)
+        self.methods
+            .get(&(owner, name.clone(), domain))?
+            .for_args(args)
     }
 
     pub fn satisfies(&self, ty: &Type, bound: &GenericBound) -> bool {

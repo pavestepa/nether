@@ -124,10 +124,10 @@ fn local_modules_compile_link_and_run() {
     std::fs::write(
         &module_path,
         r#"
-struct Lang { name String }
+pub struct Lang { name String }
 impl Lang {
-    new(name String) Lang { return Lang { name }; }
-    greeting(self) String { return `hello ${self.name}`; }
+    pub new(name String) Lang { return Lang { name }; }
+    pub greeting(self) String { return `hello ${self.name}`; }
 }
 "#,
     )
@@ -177,7 +177,7 @@ fn modules_keep_private_top_level_names_separate() {
         r#"
 struct Item { text String }
 fn helper() String { return Item { text = "alpha" }.text; }
-fn from_alpha() String { return helper(); }
+pub fn from_alpha() String { return helper(); }
 "#,
     )
     .unwrap();
@@ -186,7 +186,7 @@ fn from_alpha() String { return helper(); }
         r#"
 struct Item { value String }
 fn helper() String { return Item { value = "beta" }.value; }
-fn from_beta() String { return helper(); }
+pub fn from_beta() String { return helper(); }
 "#,
     )
     .unwrap();
@@ -223,6 +223,81 @@ fn main() {
 }
 
 #[test]
+fn default_private_fields_and_methods_are_rejected_across_module_boundaries() {
+    let dir = std::env::temp_dir().join(format!("nether_visibility_test_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("api.nr"),
+        r#"
+pub struct Value { hidden i32 }
+impl Value {
+    pub new() Value { return Value { hidden = 1 }; }
+    secret(self) i32 { return self.hidden; }
+}
+fn hidden_fn() i32 { return 1; }
+"#,
+    )
+    .unwrap();
+    let entry = dir.join("main.nr");
+    std::fs::write(
+        &entry,
+        r#"
+mod api;
+use api.Value;
+fn main() {
+    let value = Value.new();
+    println(`${value.hidden}`);
+    println(`${value.secret()}`);
+}
+"#,
+    )
+    .unwrap();
+    let result = nether_driver::check(&entry).unwrap();
+    let messages = result
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("field `hidden` is private")),
+        "{messages:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("method `secret` is private")),
+        "{messages:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn pub_use_reexports_an_imported_name() {
+    let dir = std::env::temp_dir().join(format!("nether_pub_use_test_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("inner.nr"), "pub fn answer() i32 { return 42; }\n").unwrap();
+    std::fs::write(dir.join("api.nr"), "pub use inner.answer;\n").unwrap();
+    let entry = dir.join("main.nr");
+    std::fs::write(
+        &entry,
+        "mod api;\nuse api.answer;\nfn main() { println(`${answer()}`); }\n",
+    )
+    .unwrap();
+    let result = nether_driver::check(&entry).unwrap();
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .all(|diagnostic| !diagnostic.is_error()),
+        "{:?}",
+        result.diagnostics
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn rust_style_mod_files_relative_roots_and_cross_module_impls_run() {
     ensure_runtime_built();
     let dir = std::env::temp_dir().join(format!("nether_rust_modules_test_{}", std::process::id()));
@@ -235,7 +310,7 @@ mod impl_into_i32;
 mod labels;
 use self.labels.label;
 
-struct Cat { name String }
+pub struct Cat { pub name String }
 impl Cat {
     new(name String) Cat { return Cat { name }; }
 }
@@ -256,7 +331,7 @@ fn main() {
         r#"
 use super.Cat;
 impl Cat {
-    into_i32(self) i32 { return 1; }
+    pub into_i32(self) i32 { return 1; }
 }
 "#,
     )
@@ -265,7 +340,7 @@ impl Cat {
         dir.join("labels/mod.nr"),
         r#"
 use crate.Cat;
-fn label(cat Cat) String { return cat.name; }
+pub fn label(cat Cat) String { return cat.name; }
 "#,
     )
     .unwrap();
@@ -413,7 +488,7 @@ fn use_enum_variant_path_rejects_an_unknown_module_member() {
     let dir =
         std::env::temp_dir().join(format!("nether_variant_bad_member_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("helper.nr"), "enum Color { Red, Green }\n").unwrap();
+    std::fs::write(dir.join("helper.nr"), "pub enum Color { Red, Green }\n").unwrap();
     let entry = dir.join("main.nr");
     std::fs::write(
         &entry,
@@ -437,7 +512,7 @@ fn use_enum_variant_path_rejects_an_unknown_variant() {
     let dir =
         std::env::temp_dir().join(format!("nether_variant_bad_variant_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("helper.nr"), "enum Color { Red, Green }\n").unwrap();
+    std::fs::write(dir.join("helper.nr"), "pub enum Color { Red, Green }\n").unwrap();
     let entry = dir.join("main.nr");
     std::fs::write(
         &entry,

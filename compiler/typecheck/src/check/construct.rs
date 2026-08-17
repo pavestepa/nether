@@ -58,6 +58,15 @@ impl Checker<'_> {
         for (fname, value) in fields {
             seen.insert(fname.name.clone());
             if let Some((_, declared)) = decl_fields.iter().find(|(n, _)| n == &fname.name) {
+                let crosses_module = def.file.is_some_and(|file| file != fname.span.file);
+                let is_public = self
+                    .sigs
+                    .field_visibility
+                    .get(&(id, fname.name.clone()))
+                    .is_some_and(|visibility| visibility.is_public());
+                if crosses_module && !is_public {
+                    self.err(fname.span, format!("field `{}` is private", fname.name));
+                }
                 let concrete_expected = substitute_generic(declared, &subst);
                 let actual = self.check_expr_with_expected(value, Some(&concrete_expected));
                 collect_generic_bindings(declared, &actual, &mut subst);

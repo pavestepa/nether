@@ -356,11 +356,20 @@ safety, or borrow semantics.
 
 ---
 
-## 6. Visibility **[current behavior, unchanged by Stage 1]**
+## 6. Visibility
 
-Everything is public by default. A name is private if it starts with `_` or
-is declared with `private` — both are equivalent. `private` is recorded in
-the AST but not yet enforced by the resolver.
+Everything is private by default. Public API is always explicit with `pub`:
+`pub mod`, `pub use`, `pub struct`, `pub enum`, `pub type`, `pub trait`, and
+`pub fn`. Named struct fields and both instance and static methods follow the
+same rule and require their own `pub`; making the containing type public does
+not make its fields or methods public. Enum variants inherit the visibility of
+their enum. The former `private` modifier and underscore-derived visibility
+are not part of the language.
+
+A private declaration remains usable throughout its defining file. Crossing a
+file/module boundary requires the referenced declaration to be public. A
+`pub use` explicitly re-exports its imported name; a plain `use` only binds it
+inside the importing module.
 
 ---
 

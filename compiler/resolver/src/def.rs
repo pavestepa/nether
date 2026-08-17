@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use nether_ast::{Item, Module, Symbol, TypeExpr};
+use nether_ast::{Item, Module, Symbol, TypeExpr, Visibility};
 use nether_diagnostics::{Diagnostic, FileId};
 
 use crate::resolve::variant_index;
@@ -52,6 +52,8 @@ pub struct Def {
     pub kind: DefKind,
     pub variants: Vec<Symbol>,
     pub methods: Vec<Symbol>,
+    pub visibility: Visibility,
+    pub file: Option<FileId>,
 }
 
 /// The top-level namespace for one resolved module: every primitive,
@@ -64,6 +66,7 @@ pub struct Definitions {
     builtins: HashMap<Symbol, DefId>,
     by_file_name: HashMap<(FileId, Symbol), DefId>,
     imports: HashMap<(FileId, Symbol), DefId>,
+    public_imports: HashSet<(FileId, Symbol)>,
     /// Names re-exported by the bundled prelude file (`stdlib/mod.nr`'s
     /// own top-level `use` declarations) — visible from every file with no
     /// `use` of their own, like `builtins`, but with lower priority: a
@@ -172,10 +175,27 @@ impl Definitions {
         }
     }
 
-    fn import(&mut self, file: FileId, name: Symbol, id: DefId) {
+    fn import(&mut self, file: FileId, name: Symbol, id: DefId, public: bool) {
         if !self.by_file_name.contains_key(&(file, name.clone())) {
+            if public {
+                self.public_imports.insert((file, name.clone()));
+            }
             self.imports.insert((file, name), id);
         }
+    }
+
+    fn exported_from(&self, file: FileId, name: &Symbol) -> Option<DefId> {
+        let key = (file, name.clone());
+        self.by_file_name
+            .get(&key)
+            .copied()
+            .filter(|id| self.get(*id).visibility.is_public())
+            .or_else(|| {
+                self.public_imports
+                    .contains(&key)
+                    .then(|| self.imports.get(&key).copied())
+                    .flatten()
+            })
     }
 
     fn insert(&mut self, name: Symbol, kind: DefKind) -> DefId {
@@ -185,6 +205,8 @@ impl Definitions {
             kind,
             variants: Vec::new(),
             methods: Vec::new(),
+            visibility: Visibility::Public,
+            file: None,
         });
         self.by_name.insert(name, id);
         id
@@ -200,6 +222,7 @@ impl Definitions {
         &mut self,
         name: &nether_ast::Ident,
         kind: DefKind,
+        visibility: Visibility,
         diags: &mut Vec<Diagnostic>,
     ) -> DefId {
         let key = (name.span.file, name.name.clone());
@@ -223,6 +246,8 @@ impl Definitions {
             kind,
             variants: Vec::new(),
             methods: Vec::new(),
+            visibility,
+            file: Some(name.span.file),
         });
         self.by_file_name.insert(key, id);
         self.by_name.entry(name.name.clone()).or_insert(id);

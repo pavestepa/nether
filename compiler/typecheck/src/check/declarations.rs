@@ -7,6 +7,12 @@ pub(super) fn build_type_shapes(
     diags: &mut Vec<Diagnostic>,
 ) {
     for (&id, t) in &decls.type_decls {
+        if let StructDeclKind::Struct(fields) = &t.kind {
+            for field in fields {
+                sigs.field_visibility
+                    .insert((id, field.name.name.clone()), field.visibility);
+            }
+        }
         sigs.type_generics
             .insert(id, t.generics.iter().map(|g| g.name.name.clone()).collect());
         sigs.generic_type_bounds.insert(
@@ -126,6 +132,8 @@ pub(super) type TraitMethodTable = HashMap<DefId, HashMap<Symbol, TraitMethod>>;
 
 pub(super) fn specialize_fn_sig(sig: &FnSig, subst: &HashMap<Symbol, Type>) -> FnSig {
     FnSig {
+        visibility: sig.visibility,
+        file: sig.file,
         self_param: sig.self_param,
         params: sig
             .params
