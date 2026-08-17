@@ -165,3 +165,59 @@ fn choose(flag bool, left: &Dog, right: &Dog): &Dog {
         "ambiguous origins",
     );
 }
+
+#[test]
+fn returned_reference_origin_flows_through_call_chains_and_into_let() {
+    assert_ok(
+        r#"
+struct Dog { name String }
+fn identity(d: &Dog): &Dog { return d; }
+fn middle(d: &Dog): &Dog { return identity(d); }
+fn outer(d: &Dog): &Dog { return middle(d); }
+fn consume(d: Dog) {}
+fn main() {
+    let dog: Dog = :Dog { name = "Rex" };
+    if true {
+        let view = outer(dog);
+        println(view.name);
+    }
+    consume(dog);
+}
+"#,
+    );
+}
+
+#[test]
+fn stored_call_result_keeps_its_argument_borrow_live() {
+    assert_err(
+        r#"
+struct Dog { name String }
+fn identity(d: &Dog): &Dog { return d; }
+fn middle(d: &Dog): &Dog { return identity(d); }
+fn consume(d: Dog) {}
+fn main() {
+    let dog: Dog = :Dog { name = "Rex" };
+    let view: &Dog = middle(dog);
+    consume(dog);
+    println(view.name);
+}
+"#,
+        "while it is borrowed",
+    );
+}
+
+#[test]
+fn ambiguous_origin_propagates_through_callers() {
+    assert_err(
+        r#"
+struct Dog { name String }
+fn choose(flag bool, left: &Dog, right: &Dog): &Dog {
+    return if flag { left } else { right };
+}
+fn forwarded(flag bool, left: &Dog, right: &Dog): &Dog {
+    return choose(flag, left, right);
+}
+"#,
+        "ambiguous origins",
+    );
+}

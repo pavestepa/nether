@@ -113,6 +113,197 @@ pub(super) fn build_fn_sigs(
     }
 }
 
+/// Computes reference-return dependencies before body checking. Repeating to
+/// a fixed point lets `outer -> middle -> identity` chains converge without
+/// making declaration order observable.
+pub(super) fn infer_return_origin_summaries(
+    module: &Module,
+    resolved: &ResolvedNames,
+    sigs: &mut Signatures,
+) {
+    let functions = module
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Fn(function) => resolved
+                .definitions
+                .lookup_in(function.span.file, &function.name.name)
+                .map(|id| (id, function)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    for _ in 0..=functions.len() {
+        let previous = sigs
+            .fns
+            .iter()
+            .map(|(id, sig)| (*id, sig.return_origins.clone()))
+            .collect::<HashMap<_, _>>();
+        let mut changed = false;
+        for (id, function) in &functions {
+            let Some(sig) = sigs.fns.get(id) else {
+                continue;
+            };
+            if !matches!(sig.ret, Type::Ref(_) | Type::MutRef(_)) {
+                continue;
+            }
+            let mut env = HashMap::<LocalId, HashSet<usize>>::new();
+            for (index, parameter) in function.params.iter().enumerate() {
+                if let Some(local) = resolved.locals.get(&parameter.id).copied() {
+                    env.insert(local, HashSet::from([index]));
+                }
+            }
+            let origins = function
+                .body
+                .as_ref()
+                .map(|body| summary_block(body, resolved, &previous, &mut env))
+                .unwrap_or_default();
+            let mut origins = origins.into_iter().collect::<Vec<_>>();
+            origins.sort_unstable();
+            if sigs
+                .fns
+                .get(id)
+                .is_some_and(|sig| sig.return_origins != origins)
+            {
+                sigs.fns.get_mut(id).unwrap().return_origins = origins;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
+fn summary_block(
+    block: &Block,
+    resolved: &ResolvedNames,
+    summaries: &HashMap<DefId, Vec<usize>>,
+    env: &mut HashMap<LocalId, HashSet<usize>>,
+) -> HashSet<usize> {
+    let mut returned = HashSet::new();
+    for statement in &block.stmts {
+        match statement {
+            Stmt::Let(binding) => {
+                returned.extend(summary_returns_in_expr(
+                    &binding.value,
+                    resolved,
+                    summaries,
+                    env,
+                ));
+                if let Some(local) = resolved.locals.get(&binding.id).copied() {
+                    env.insert(
+                        local,
+                        summary_expr(&binding.value, resolved, summaries, env),
+                    );
+                }
+            }
+            Stmt::Expr(expr) => {
+                returned.extend(summary_returns_in_expr(expr, resolved, summaries, env))
+            }
+        }
+    }
+    if let Some(tail) = &block.tail {
+        returned.extend(summary_returns_in_expr(tail, resolved, summaries, env));
+    }
+    returned
+}
+
+fn summary_returns_in_expr(
+    expr: &Expr,
+    resolved: &ResolvedNames,
+    summaries: &HashMap<DefId, Vec<usize>>,
+    env: &HashMap<LocalId, HashSet<usize>>,
+) -> HashSet<usize> {
+    match &expr.kind {
+        ExprKind::Return(Some(value)) => summary_expr(value, resolved, summaries, env),
+        ExprKind::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let mut origins = summary_block(then_branch, resolved, summaries, &mut env.clone());
+            if let Some(branch) = else_branch {
+                origins.extend(summary_returns_in_expr(branch, resolved, summaries, env));
+            }
+            origins
+        }
+        ExprKind::Match { arms, .. } => arms
+            .iter()
+            .flat_map(|arm| summary_returns_in_expr(&arm.body, resolved, summaries, env))
+            .collect(),
+        ExprKind::Block(block) | ExprKind::Loop { body: block } => {
+            summary_block(block, resolved, summaries, &mut env.clone())
+        }
+        ExprKind::While { body, .. } | ExprKind::ForIn { body, .. } => {
+            summary_block(body, resolved, summaries, &mut env.clone())
+        }
+        _ => HashSet::new(),
+    }
+}
+
+fn summary_expr(
+    expr: &Expr,
+    resolved: &ResolvedNames,
+    summaries: &HashMap<DefId, Vec<usize>>,
+    env: &HashMap<LocalId, HashSet<usize>>,
+) -> HashSet<usize> {
+    match &expr.kind {
+        ExprKind::Path(path) => resolved
+            .path_res
+            .get(&path.id)
+            .and_then(|resolution| match resolution.base {
+                Resolution::Local(local) => env.get(&local).cloned(),
+                _ => None,
+            })
+            .unwrap_or_default(),
+        ExprKind::Call { callee, args, .. } => {
+            let ExprKind::Path(path) = &callee.kind else {
+                return HashSet::new();
+            };
+            let Some(Resolution::Def(id)) = resolved
+                .path_res
+                .get(&path.id)
+                .map(|resolution| resolution.base)
+            else {
+                return HashSet::new();
+            };
+            summaries
+                .get(&id)
+                .into_iter()
+                .flatten()
+                .filter_map(|index| args.get(*index))
+                .flat_map(|arg| summary_expr(arg, resolved, summaries, env))
+                .collect()
+        }
+        ExprKind::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let mut origins = then_branch
+                .tail
+                .as_deref()
+                .map(|tail| summary_expr(tail, resolved, summaries, env))
+                .unwrap_or_default();
+            if let Some(branch) = else_branch {
+                origins.extend(summary_expr(branch, resolved, summaries, env));
+            }
+            origins
+        }
+        ExprKind::Match { arms, .. } => arms
+            .iter()
+            .flat_map(|arm| summary_expr(&arm.body, resolved, summaries, env))
+            .collect(),
+        ExprKind::Block(block) => block
+            .tail
+            .as_deref()
+            .map(|tail| summary_expr(tail, resolved, summaries, env))
+            .unwrap_or_default(),
+        _ => HashSet::new(),
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct TraitDefault {
     pub(super) source: DefId,
@@ -163,6 +354,7 @@ pub(super) fn specialize_fn_sig(sig: &FnSig, subst: &HashMap<Symbol, Type>) -> F
                 )
             })
             .collect(),
+        return_origins: sig.return_origins.clone(),
     }
 }
 

@@ -290,23 +290,32 @@ impl<'a> Checker<'a> {
         &mut self,
         value: &Expr,
         declared: &Type,
-    ) -> Option<(Type, Option<LocalId>, bool)> {
+    ) -> Option<(Type, Option<BorrowOrigin>, bool)> {
         let (expected_inner, mutable) = match declared {
             Type::Ref(inner) => (inner.as_ref(), false),
             Type::MutRef(inner) => (inner.as_ref(), true),
             _ => return None,
         };
         let Some(origin) = self.bare_local_of(value) else {
-            self.err(
-                value.span,
-                "a stored borrow must originate from a plain owned local",
-            );
-            self.expr_types.insert(value.id, Type::Error);
-            return Some((Type::Error, None, mutable));
+            let actual = self.check_expr_with_expected(value, Some(declared));
+            let origins = self.reference_origins_of_expr(value);
+            if origins.len() != 1 {
+                self.err(
+                    value.span,
+                    "cannot infer one unambiguous origin for this stored reference",
+                );
+                return Some((actual, None, mutable));
+            }
+            return Some((actual, origins.into_iter().next(), mutable));
         };
         let Some((origin_ty, origin_mutable)) = self.locals.get(&origin).cloned() else {
             return Some((Type::Error, None, mutable));
         };
+        if matches!(origin_ty, Type::Ref(_) | Type::MutRef(_)) {
+            let actual = self.check_expr_with_expected(value, Some(declared));
+            let semantic_origin = self.reference_origins.get(&origin).copied();
+            return Some((actual, semantic_origin, mutable));
+        }
         let Type::Unique(actual_inner) = &origin_ty else {
             self.err(
                 value.span,
@@ -345,7 +354,7 @@ impl<'a> Checker<'a> {
         }
         self.check_move(origin, &origin_ty, value.span, false);
         self.expr_types.insert(value.id, declared.clone());
-        Some((declared.clone(), Some(origin), mutable))
+        Some((declared.clone(), Some(BorrowOrigin::Local(origin)), mutable))
     }
 
     pub(super) fn lower_call_generic_args(&mut self, args: &[TypeExpr]) -> Vec<Type> {
@@ -495,6 +504,7 @@ impl<'a> Checker<'a> {
                         self.check_expr_with_expected(&let_stmt.value, declared_ty.as_ref())
                     });
                 let diverges = matches!(value_ty, Type::Never);
+                let inferred_reference_mutable = matches!(value_ty, Type::MutRef(_));
                 let final_ty = match declared_ty {
                     Some(declared) => {
                         if !value_ty.compatible(&declared) {
@@ -515,10 +525,46 @@ impl<'a> Checker<'a> {
                         "cannot infer all generic type arguments from this initializer; add a type annotation",
                     );
                 }
+                let inferred_reference_origin = if stored_borrow.is_none()
+                    && matches!(final_ty, Type::Ref(_) | Type::MutRef(_))
+                {
+                    let origins = self.reference_origins_of_expr(&let_stmt.value);
+                    if origins.len() == 1 {
+                        origins.into_iter().next()
+                    } else {
+                        self.err(
+                            let_stmt.value.span,
+                            "cannot infer one unambiguous origin for this stored reference",
+                        );
+                        None
+                    }
+                } else {
+                    None
+                };
                 let binding_mutable = let_stmt.mutable || matches!(final_ty, Type::MutRef(_));
                 self.bind_local(let_stmt.id, final_ty, binding_mutable);
-                if let Some((_, Some(origin), mutable)) = stored_borrow {
-                    self.register_stored_borrow(let_stmt.id, origin, mutable, let_stmt.value.span);
+                let stored_origin = stored_borrow
+                    .and_then(|(_, origin, mutable)| origin.map(|origin| (origin, mutable)))
+                    .or_else(|| {
+                        inferred_reference_origin
+                            .map(|origin| (origin, inferred_reference_mutable))
+                    });
+                if let Some((origin, mutable)) = stored_origin {
+                    match origin {
+                        BorrowOrigin::Local(origin) => self.register_stored_borrow(
+                            let_stmt.id,
+                            origin,
+                            mutable,
+                            let_stmt.value.span,
+                        ),
+                        BorrowOrigin::Parameter(origin) => {
+                            if let Some(reference) = self.resolved.locals.get(&let_stmt.id).copied()
+                            {
+                                self.reference_origins
+                                    .insert(reference, BorrowOrigin::Parameter(origin));
+                            }
+                        }
+                    }
                 }
                 if diverges {
                     Type::Never

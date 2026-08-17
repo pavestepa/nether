@@ -500,13 +500,34 @@ impl Checker<'_> {
         }
     }
 
-    fn reference_origins_of_expr(&self, expr: &Expr) -> HashSet<BorrowOrigin> {
+    pub(super) fn reference_origins_of_expr(&self, expr: &Expr) -> HashSet<BorrowOrigin> {
         match &expr.kind {
             ExprKind::Path(_) => self
                 .bare_local_of(expr)
                 .and_then(|local| self.reference_origins.get(&local).copied())
                 .into_iter()
                 .collect(),
+            ExprKind::Call { callee, args, .. } => {
+                let ExprKind::Path(path) = &callee.kind else {
+                    return HashSet::new();
+                };
+                let Some(Resolution::Def(id)) = self
+                    .resolved
+                    .path_res
+                    .get(&path.id)
+                    .map(|resolution| resolution.base)
+                else {
+                    return HashSet::new();
+                };
+                let Some(sig) = self.sigs.fns.get(&id) else {
+                    return HashSet::new();
+                };
+                sig.return_origins
+                    .iter()
+                    .filter_map(|index| args.get(*index))
+                    .flat_map(|argument| self.reference_origins_of_argument(argument))
+                    .collect()
+            }
             ExprKind::If {
                 then_branch,
                 else_branch,
@@ -525,6 +546,21 @@ impl Checker<'_> {
             ExprKind::Block(block) => self.reference_origins_of_block_tail(block),
             _ => HashSet::new(),
         }
+    }
+
+    fn reference_origins_of_argument(&self, argument: &Expr) -> HashSet<BorrowOrigin> {
+        if let Some(local) = self.bare_local_of(argument) {
+            if let Some(origin) = self.reference_origins.get(&local).copied() {
+                return HashSet::from([origin]);
+            }
+            if matches!(
+                self.locals.get(&local).map(|(ty, _)| ty),
+                Some(Type::Unique(_))
+            ) {
+                return HashSet::from([BorrowOrigin::Local(local)]);
+            }
+        }
+        self.reference_origins_of_expr(argument)
     }
 
     fn reference_origins_of_block_tail(&self, block: &Block) -> HashSet<BorrowOrigin> {

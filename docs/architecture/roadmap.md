@@ -41,11 +41,12 @@ rebuilding.
 **Implementation snapshot (2026-08-17).** Stage 1 is complete. Stage 2 has
 flow-sensitive move checking, reference parameters and receiver calls,
 lexically scoped stored heap borrows, plus three sound `to(value)`
-ownership-domain conversions. Direct returned-reference origins are checked;
+ownership-domain conversions. Returned-reference origins are checked and
+propagated through named-function call chains, including storage in `let`;
 default-private visibility with explicit `pub` is implemented for declarations,
 imports/re-exports, fields, and methods;
-NLL-style last-use inference and propagating origin summaries through calls
-remain open. Stages 3–6 have not
+NLL-style last-use inference and method/closure origin summaries remain open.
+Stages 3–6 have not
 started as staged projects, although the pre-existing compiler already has
 the baseline trait system and limited concrete instance-method
 specialization described elsewhere in the docs.
@@ -145,15 +146,18 @@ HIR/MIR/codegen. This is deliberately lexical, not NLL: last-use shortening
 inside a block remains part of the origin-inference remainder, and inline
 references still await addressable-local codegen.
 
-*Direct returned-reference origin inference — done.* A `:&T`/`:&mut T`
+*Returned-reference origin inference and function summaries — done.* A `:&T`/`:&mut T`
 return expression is traced through bare reference locals and `if`/`match`/
 block result branches. Exactly one incoming reference-parameter origin is
 accepted; a reference borrowed from a local owned value is rejected as an
 escape, and multiple possible parameter origins receive a dedicated
 ambiguous-origin diagnostic. A direct single-parameter return is covered
-end-to-end through native execution. Function signatures do not yet carry
-an origin summary, so a returned reference can be consumed immediately but
-cannot yet be stored/reborrowed at the caller across a call boundary.
+end-to-end through native execution. Function signatures carry parameter-index
+origin summaries computed to a fixed point, so origin is preserved through
+declaration-order-independent call chains. A returned reference can be stored
+in `let`; its ultimate owned-local origin is then registered as a lexical
+borrow and prevents moves, mutation, and conflicting borrows until scope exit.
+Method and closure summaries remain follow-up work.
 
 *`to(value)` domain conversion — 3 of 4 transitions done.* Checked each of
 the spec's four transitions (spec §9) against what's actually sound without
@@ -179,8 +183,8 @@ ownership-qualified type appear in a `<...>` generic-argument list at
 all, given nothing else in the grammar has exercised that position).
 
 *Still open, this stage:* NLL-style last-use lifetime/origin inference (no
-surface syntax — Rust NLL/Polonius-inspired internally), interprocedural
-origin summaries for storing/reborrowing returned references; `to<T>(value)`'s
+surface syntax — Rust NLL/Polonius-inspired internally), method/closure origin
+summaries; `to<T>(value)`'s
 explicit form; `T -> :T` (needs `Clone`, Stage 3); reference-to-inline-
 value codegen; `move () => {}` closure captures (today's closures already
 move-check a captured `:T`/`:t` free variable at the closure literal's own

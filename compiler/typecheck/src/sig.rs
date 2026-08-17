@@ -81,6 +81,10 @@ pub struct FnSig {
     /// This item's own generic parameters: name plus an optional bound
     /// trait, used for call-site bound checking (`check.rs`).
     pub generics: Vec<(Symbol, Option<GenericBound>)>,
+    /// Reference-return origin summary: zero-based parameter indices the
+    /// returned reference may originate from. Empty for non-reference
+    /// returns or while no safe origin can be inferred.
+    pub return_origins: Vec<usize>,
 }
 
 #[derive(Debug, Clone)]

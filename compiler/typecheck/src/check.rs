@@ -421,5 +421,6 @@ fn build_fn_sig(
         params,
         ret,
         generics,
+        return_origins: Vec::new(),
     }
 }

@@ -13,6 +13,7 @@ pub fn check(module: &Module, resolved: &ResolvedNames) -> (TypedTables, Vec<Dia
     build_type_shapes(&decls, resolved, &mut sigs, &mut diagnostics);
     build_enum_sigs(module, resolved, &decls, &mut sigs, &mut diagnostics);
     build_fn_sigs(module, resolved, &decls, &mut sigs, &mut diagnostics);
+    infer_return_origin_summaries(module, resolved, &mut sigs);
     let trait_methods = build_trait_method_table(&decls, resolved, &mut sigs, &mut diagnostics);
     build_impl_methods(
         module,

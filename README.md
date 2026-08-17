@@ -26,11 +26,11 @@ The compiler implements:
 Flow-sensitive move checking for uniquely owned locals is implemented.
 Borrowing is enforced for call-scoped `:&T`/`:&mut T` parameters and
 receivers and for heap references stored in explicitly typed `let`
-bindings. A returned reference may currently originate from one unambiguous
-reference parameter; local origins and multiple possible parameter origins
-are rejected. Stored borrows live to the end of their lexical block, while
-NLL-style last-use shortening and interprocedural origin propagation remain
-Stage 2 work. See the roadmap for the exact boundary.
+bindings. Returned-reference origins are propagated through named-function
+call chains, so a safely returned reference can be stored in `let`; the
+resulting borrow remains live to the end of that lexical block. Local origins
+and multiple possible parameter origins are rejected. NLL-style last-use
+shortening remains Stage 2 work. See the roadmap for the exact boundary.
 
 ## Requirements
 

@@ -40,7 +40,7 @@ system — not one or the other.
 | Generics | monomorphized in release builds; witness-table/dictionary dispatch in development builds *(dev-mode witness tables: not yet implemented — Stage 3+; Stage 1 stays always-monomorphized)* |
 | Concurrency | async/await over a Tokio-backed runtime, plus raw OS threads *(not yet implemented — Stage 4)* |
 | Unsafe code | explicit `unsafe`, raw pointers, C ABI FFI *(not yet implemented — Stage 5)* |
-| Lifetimes | no explicit lifetime syntax; internally inferred origins power borrow checking *(region/origin inference not yet implemented — Stage 2, remainder; move checking itself needs none of this — see §3)* |
+| Lifetimes | no explicit lifetime syntax; lexical origins and interprocedural function summaries power current borrow checking *(NLL last-use inference remains Stage 2 work — see §3)* |
 
 Everything below assumes these are the only permanent design constraints:
 no explicit lifetime syntax, no `dyn` keyword, no `::` path separator.
@@ -213,12 +213,15 @@ release that restriction when `view`'s block ends. This is intentionally
 more conservative than NLL: the borrow is not yet shortened after its last
 use within the block. References to inline values remain unavailable.
 
-**Returned references are origin-checked for direct parameter flows.** A
+**Returned references are origin-checked and propagated through function calls.** A
 return traced to exactly one incoming reference parameter is accepted;
 returning a reference borrowed from a local owned value is rejected, as is
-an `if`/`match` result that may originate from multiple parameters. Origin
-summaries are not yet propagated through calls, so a returned reference may
-be consumed immediately but cannot yet be stored/reborrowed at the caller.
+an `if`/`match` result that may originate from multiple parameters. Named
+functions carry parameter-index origin summaries computed to a fixed point.
+Consequently, origin survives arbitrary named-function call chains and a
+returned reference may be stored in `let`; that binding keeps the ultimate
+owned source borrowed until its lexical scope ends. Method and closure
+summaries and NLL shortening remain Stage 2 work.
 NLL/Polonius-style last-use shortening is also still pending.
 
 ### 3.2 Runtime representation of `:T` in Stage 1
@@ -530,9 +533,9 @@ move vs. a read-through):
 
 Move diagnostics carry two labels: where the value was moved, and where it
 was used again. Borrow exclusivity now also blocks moves and direct mutation
-for lexically live stored borrows. Direct returned-reference origins are
-checked and ambiguous parameter origins are diagnosed; NLL shortening and
-interprocedural origin summaries remain deferred to Stage 2's remainder.
+for lexically live stored borrows. Returned-reference origins propagate through
+named-function calls and ambiguous parameter origins are diagnosed; NLL
+shortening and method/closure summaries remain deferred to Stage 2's remainder.
 
 ### 8.7 Variadic parameters **[Stage 1]**
 
@@ -770,8 +773,8 @@ Full retain/release insertion rules live in
 | Calling a *method* (not just field access) through a `:&T`/`:&mut T` receiver (§3.1) | **Stage 2 — done** |
 | `to(value)` domain conversion, target-inferred form, 3 of 4 transitions (§9) | **Stage 2 — done** |
 | `to<T>(value)`'s explicit-target form; `T -> :T` (needs `Clone`, §10) | Stage 2/3 — remaining |
-| Lexically scoped stored heap borrows; direct single-parameter returned-reference origins and ambiguous-origin diagnostics | **Stage 2 — done** |
-| NLL last-use shortening, interprocedural origin summaries, `move () => {}` closures, `:T`'s unrefcounted runtime representation | Stage 2 — remaining |
+| Lexically scoped stored heap borrows; interprocedural named-function origin summaries; safe storage of returned references; ambiguous-origin diagnostics | **Stage 2 — done** |
+| NLL last-use shortening, method/closure origin summaries, `move () => {}` closures, `:T`'s unrefcounted runtime representation | Stage 2 — remaining |
 | Reference-to-inline-value codegen | Stage 2 — remaining |
 | Associated types, const generics, specialization, `any`/`some`, multi-bound generics, derivable traits, `#[allow_pascal_case]` | Stage 3 |
 | Development-mode witness-table generics dispatch | Stage 3 |

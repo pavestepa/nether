@@ -512,6 +512,25 @@ impl Checker<'_> {
         let Some((local_ty, local_mutable)) = self.locals.get(&id).cloned() else {
             return error(self, arg);
         };
+        if matches!(local_ty, Type::Ref(_) | Type::MutRef(_)) {
+            let compatible = match (&local_ty, param_ty) {
+                (Type::Ref(actual), Type::Ref(expected))
+                | (Type::MutRef(actual), Type::Ref(expected))
+                | (Type::MutRef(actual), Type::MutRef(expected)) => actual.compatible(expected),
+                _ => false,
+            };
+            if !compatible {
+                let expected = self.describe(param_ty);
+                let found = self.describe(&local_ty);
+                self.err(arg.span, format!("expected `{expected}`, found `{found}`"));
+                return error(self, arg);
+            }
+            if is_mut && !local_mutable {
+                self.err(arg.span, "cannot pass an immutable reference as `:&mut`");
+            }
+            self.expr_types.insert(arg.id, param_ty.clone());
+            return param_ty.clone();
+        }
         let Type::Unique(actual_inner) = &local_ty else {
             let desc = self.describe(&local_ty);
             self.err(
