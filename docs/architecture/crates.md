@@ -13,7 +13,7 @@ compiler/
 runtime/
   arc/ string/ array/ io/
 stdlib/
-  option.nt result.nt
+  mod.nr option.nr result.nr array.nr
 cli/
 examples/
 ```
@@ -27,7 +27,7 @@ API unchanged:
   and precedence helpers;
 - resolver separates declaration collection, expression traversal, path
   resolution, and diagnostic helpers;
-- typecheck separates declaration signatures, interface assembly, layout
+- typecheck separates declaration signatures, trait assembly, layout
   validation, expression/control/call checking, and generic inference;
 - HIR, monomorphization, and MIR separate core context from expression,
   call, pattern, closure, and control-flow lowering;
@@ -66,7 +66,7 @@ instead of aborting the process.
 ## `compiler/parser`
 
 Uses recursive descent for declarations/statements/patterns and Pratt
-parsing for expressions. It represents closures, generics, interfaces,
+parsing for expressions. It represents closures, generics, traits,
 enums, `match`, loops, weak types and `mod`/`use` syntax without attempting
 name or type resolution.
 
@@ -104,8 +104,8 @@ expression/local needed by HIR. It checks:
 - structs, tuples, arrays, enums, patterns and match exhaustiveness;
 - weak references and implicit weak reads as `Option<T>`;
 - inferred and explicit call-site generic arguments, declaration bounds
-  and generic interface arguments;
-- interface inheritance, implementation completeness, default conflicts
+  and generic trait arguments;
+- trait inheritance, implementation completeness, default conflicts
   and method signatures;
 - `Into<String>` for interpolation and variadic print calls;
 - finite value layouts, legal entry-point signatures and loop control.
@@ -125,7 +125,7 @@ Lowers a successful typed AST to a smaller typed representation. It:
 - resolves calls to declaration IDs;
 - desugars method calls, interpolation, weak upgrades and `for`;
 - performs closure capture analysis and closure conversion;
-- copies declaration-opted-in interface default bodies, including
+- copies declaration-opted-in trait default bodies, including
   inherited and specialized defaults, into concrete implementations;
 - preserves generics and resolved call-site specializations for the
   monomorphization pass.
@@ -245,7 +245,7 @@ Implements the `print` and `println` built-ins for Nether `String` values.
 ## `stdlib`
 
 `Option`, `Result`, and `Array` are ordinary generic Nether declarations in
-`stdlib/option.nt`, `stdlib/result.nt`, and `stdlib/array.nt`. Their methods
+`stdlib/option.nr`, `stdlib/result.nr`, and `stdlib/array.nr`. Their methods
 compile through the same module graph as user code; there are no native
 option/result runtime crates.
 
@@ -267,7 +267,7 @@ front-end or toolchain failures.
 
 Stage-specific tests live with their crates. Driver integration tests
 exercise parse-to-object, compile-link-run, module isolation, stdlib,
-closures, weak references, generic interfaces/types/methods, aggregates,
+closures, weak references, generic traits/types/methods, aggregates,
 arrays, mutable parameters, diagnostics, options and every checked-in
 example.
 

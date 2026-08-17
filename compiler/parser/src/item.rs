@@ -1,6 +1,6 @@
 use nether_ast::{
-    EnumDecl, EnumVariant, Field, FnDecl, GenericParam, ImplBlock, InterfaceDecl, Item, ModDecl,
-    Param, SelfParam, TypeDecl, TypeDeclKind, UseDecl,
+    EnumDecl, EnumVariant, Field, FnDecl, GenericParam, ImplBlock, TraitDecl, Item, ModDecl,
+    Param, SelfParam, StructDecl, StructDeclKind, TypeAliasDecl, UseDecl,
 };
 use nether_diagnostics::Span;
 use nether_lexer::{Keyword, Punct, Token};
@@ -23,7 +23,7 @@ impl Parser {
         let doc = self.take_doc_comments();
         // `private` currently only prefixes `mod` at the top level (`type`
         // and `fn` privacy is the underscore-name convention instead, and
-        // `impl`/`interface` bodies have their own `private` handling in
+        // `impl`/`trait` bodies have their own `private` handling in
         // `parse_method_decl`).
         if matches!(self.peek(), Token::Keyword(Keyword::Private))
             && matches!(self.peek_at(1), Token::Keyword(Keyword::Mod))
@@ -33,11 +33,12 @@ impl Parser {
             return self.parse_mod_decl(true, start).map(Item::Mod);
         }
         match self.peek() {
-            Token::Keyword(Keyword::Type) => self.parse_type_decl(doc).map(Item::Type),
+            Token::Keyword(Keyword::Struct) => self.parse_struct_decl(doc).map(Item::Struct),
+            Token::Keyword(Keyword::Type) => self.parse_type_alias_decl(doc).map(Item::TypeAlias),
             Token::Keyword(Keyword::Impl) => self.parse_impl_block().map(Item::Impl),
             Token::Keyword(Keyword::Enum) => self.parse_enum_decl(doc).map(Item::Enum),
-            Token::Keyword(Keyword::Interface) => {
-                self.parse_interface_decl(doc).map(Item::Interface)
+            Token::Keyword(Keyword::Trait) => {
+                self.parse_trait_decl(doc).map(Item::Trait)
             }
             Token::Keyword(Keyword::Fn) => self.parse_fn_decl(doc).map(Item::Fn),
             Token::Keyword(Keyword::Use) => self.parse_use_decl().map(Item::Use),
@@ -50,7 +51,7 @@ impl Parser {
                 self.error(
                     span,
                     format!(
-                        "expected an item (`type`, `impl`, `enum`, `interface`, `fn`, `use`, `mod`), found {other:?}"
+                        "expected an item (`struct`, `type`, `impl`, `enum`, `trait`, `fn`, `use`, `mod`), found {other:?}"
                     ),
                 );
                 None
@@ -79,10 +80,11 @@ impl Parser {
         while !self.is_eof() {
             if matches!(
                 self.peek(),
-                Token::Keyword(Keyword::Type)
+                Token::Keyword(Keyword::Struct)
+                    | Token::Keyword(Keyword::Type)
                     | Token::Keyword(Keyword::Impl)
                     | Token::Keyword(Keyword::Enum)
-                    | Token::Keyword(Keyword::Interface)
+                    | Token::Keyword(Keyword::Trait)
                     | Token::Keyword(Keyword::Fn)
                     | Token::Keyword(Keyword::Use)
                     | Token::Keyword(Keyword::Mod)
@@ -93,12 +95,12 @@ impl Parser {
         }
     }
 
-    fn parse_type_decl(&mut self, doc: Option<String>) -> Option<TypeDecl> {
-        let start = self.expect_keyword(Keyword::Type);
+    fn parse_struct_decl(&mut self, doc: Option<String>) -> Option<StructDecl> {
+        let start = self.expect_keyword(Keyword::Struct);
         let id = self.next_id();
         let name = self.expect_ident();
         let generics = self.parse_optional_generic_params();
-        let interfaces = self.parse_interface_list();
+        let traits = self.parse_trait_list();
         let kind = match self.peek() {
             Token::Punct(Punct::LBrace) => {
                 self.bump();
@@ -110,7 +112,7 @@ impl Parser {
                     }
                 }
                 self.expect_punct(Punct::RBrace, "to close struct fields");
-                TypeDeclKind::Struct(fields)
+                StructDeclKind::Struct(fields)
             }
             Token::Punct(Punct::LParen) => {
                 self.bump();
@@ -123,37 +125,67 @@ impl Parser {
                 }
                 self.expect_punct(Punct::RParen, "to close tuple-struct fields");
                 self.expect_punct(Punct::Semi, "after a tuple-struct declaration");
-                TypeDeclKind::TupleStruct(tys)
+                StructDeclKind::TupleStruct(tys)
             }
             Token::Punct(Punct::Semi) => {
                 self.bump();
-                TypeDeclKind::Unit
+                StructDeclKind::Unit
             }
             other => {
                 let span = self.peek_span();
                 self.error(
                     span,
-                    format!("expected `{{`, `(`, or `;` after a type name, found {other:?}"),
+                    format!("expected `{{`, `(`, or `;` after a struct name, found {other:?}"),
                 );
-                TypeDeclKind::Unit
+                StructDeclKind::Unit
             }
         };
         let end = self.prev_span();
-        Some(TypeDecl {
+        Some(StructDecl {
             id,
             name,
             generics,
-            interfaces,
+            traits,
             kind,
             doc,
             span: start.to(end),
         })
     }
 
+    /// `type color = (u32, u32, u32);` (language-spec §4.3). The
+    /// ownership-qualified form (`type: Name = ...`) is recognized just
+    /// far enough to report that it isn't supported yet, then recovers by
+    /// parsing the rest as an ordinary alias rather than cascading further
+    /// diagnostics.
+    fn parse_type_alias_decl(&mut self, doc: Option<String>) -> Option<TypeAliasDecl> {
+        let start = self.expect_keyword(Keyword::Type);
+        if matches!(self.peek(), Token::Punct(Punct::Colon)) {
+            let span = self.peek_span();
+            self.error(
+                span,
+                "ownership-qualified alias declarations (`type: Name = ...`) are not yet supported",
+            );
+            self.bump();
+        }
+        let id = self.next_id();
+        let name = self.expect_ident();
+        self.expect_punct(Punct::Eq, "after a type alias name");
+        let ty = self.parse_type_expr();
+        let end = self.expect_punct(Punct::Semi, "after a type alias declaration");
+        Some(TypeAliasDecl {
+            id,
+            name,
+            ty,
+            doc,
+            span: start.to(end),
+        })
+    }
+
+    /// A struct field — `name Type` (language-spec §4.2; no colon, unlike
+    /// the pre-rewrite MVP's `name: Type`).
     fn parse_field(&mut self) -> Field {
         let is_private_kw = self.eat_keyword(Keyword::Private);
         let name = self.expect_ident();
-        self.expect_punct(Punct::Colon, "after a field name");
         let ty = self.parse_type_expr();
         let private = is_private_kw || name.is_underscore_private();
         Field { name, ty, private }
@@ -165,7 +197,7 @@ impl Parser {
         let generics = self.parse_optional_generic_params();
         let target = self.expect_ident();
         let target_args = self.parse_optional_generic_args();
-        let interfaces = self.parse_interface_list();
+        let traits = self.parse_trait_list();
         self.expect_punct(Punct::LBrace, "to start an impl body");
         let mut methods = Vec::new();
         while !matches!(self.peek(), Token::Punct(Punct::RBrace)) && !self.is_eof() {
@@ -183,7 +215,7 @@ impl Parser {
             generics,
             target,
             target_args,
-            interfaces,
+            traits,
             methods,
             span: start.to(end),
         })
@@ -194,7 +226,7 @@ impl Parser {
         let id = self.next_id();
         let name = self.expect_ident();
         let generics = self.parse_optional_generic_params();
-        let interfaces = self.parse_interface_list();
+        let traits = self.parse_trait_list();
         self.expect_punct(Punct::LBrace, "to start an enum body");
         let mut variants = Vec::new();
         while !matches!(self.peek(), Token::Punct(Punct::RBrace)) && !self.is_eof() {
@@ -208,7 +240,7 @@ impl Parser {
             id,
             name,
             generics,
-            interfaces,
+            traits,
             variants,
             doc,
             span: start.to(end),
@@ -242,13 +274,13 @@ impl Parser {
         }
     }
 
-    fn parse_interface_decl(&mut self, doc: Option<String>) -> Option<InterfaceDecl> {
-        let start = self.expect_keyword(Keyword::Interface);
+    fn parse_trait_decl(&mut self, doc: Option<String>) -> Option<TraitDecl> {
+        let start = self.expect_keyword(Keyword::Trait);
         let id = self.next_id();
         let name = self.expect_ident();
         let generics = self.parse_optional_generic_params();
-        let parents = self.parse_interface_list();
-        self.expect_punct(Punct::LBrace, "to start an interface body");
+        let parents = self.parse_trait_list();
+        self.expect_punct(Punct::LBrace, "to start a trait body");
         let mut methods = Vec::new();
         while !matches!(self.peek(), Token::Punct(Punct::RBrace)) && !self.is_eof() {
             let mdoc = self.take_doc_comments();
@@ -259,8 +291,8 @@ impl Parser {
                 }
             }
         }
-        let end = self.expect_punct(Punct::RBrace, "to close an interface body");
-        Some(InterfaceDecl {
+        let end = self.expect_punct(Punct::RBrace, "to close a trait body");
+        Some(TraitDecl {
             id,
             name,
             generics,
@@ -271,15 +303,22 @@ impl Parser {
         })
     }
 
-    fn parse_interface_list(&mut self) -> Vec<nether_ast::TypeExpr> {
-        if !self.eat_punct(Punct::Colon) {
+    /// `struct Dog Sound, Clone { ... }` / `impl Dog Sound, Clone { ... }`
+    /// / `trait Child Parent1, Parent2 { ... }` — a trait list has no
+    /// leading colon (`:` is reserved for the unique-ownership domain,
+    /// language-spec §3); it's simply zero or more comma-separated trait
+    /// names directly after the declaration head. Unambiguous because a
+    /// declaration body always starts with `{`/`(`/`;`, never a bare
+    /// identifier — so a leading `Ident` here can only be a trait name.
+    fn parse_trait_list(&mut self) -> Vec<nether_ast::TypeExpr> {
+        if !matches!(self.peek(), Token::Ident(_)) {
             return Vec::new();
         }
-        let mut interfaces = vec![self.parse_type_expr()];
+        let mut traits = vec![self.parse_type_expr()];
         while self.eat_punct(Punct::Comma) {
-            interfaces.push(self.parse_type_expr());
+            traits.push(self.parse_type_expr());
         }
-        interfaces
+        traits
     }
 
     fn parse_use_decl(&mut self) -> Option<UseDecl> {
@@ -317,11 +356,7 @@ impl Parser {
         self.expect_punct(Punct::LParen, "to start a parameter list");
         let params = self.parse_params_list();
         self.expect_punct(Punct::RParen, "to close a parameter list");
-        let ret = if self.eat_punct(Punct::Colon) {
-            Some(self.parse_type_expr())
-        } else {
-            None
-        };
+        let ret = self.parse_optional_return_type();
         let body = if matches!(self.peek(), Token::Punct(Punct::LBrace)) {
             Some(self.parse_block())
         } else {
@@ -348,9 +383,9 @@ impl Parser {
         })
     }
 
-    /// A method inside `impl`/`interface` — no `fn` keyword (language-spec
+    /// A method inside `impl`/`trait` — no `fn` keyword (language-spec
     /// §6), may start with `self`/`mut self`, and may have no body only
-    /// when it's an interface method with no default implementation
+    /// when it's a trait method with no default implementation
     /// (language-spec §7).
     pub(crate) fn parse_method_decl(&mut self, doc: Option<String>) -> Option<FnDecl> {
         let start = self.peek_span();
@@ -370,11 +405,7 @@ impl Parser {
         let self_param = self.parse_optional_self_param();
         let params = self.parse_params_list();
         self.expect_punct(Punct::RParen, "to close a parameter list");
-        let ret = if self.eat_punct(Punct::Colon) {
-            Some(self.parse_type_expr())
-        } else {
-            None
-        };
+        let ret = self.parse_optional_return_type();
         let body = if matches!(self.peek(), Token::Punct(Punct::LBrace)) {
             Some(self.parse_block())
         } else {
@@ -401,6 +432,40 @@ impl Parser {
         })
     }
 
+    /// A return type is either absent (next token starts the body or, for
+    /// a bodiless trait method, `;`), an ARC/inline type with no
+    /// leading colon (`fn f() Type`), or an owned type with one
+    /// (`fn f(): Type`) — language-spec §8.2. `parse_type_expr` itself
+    /// consumes that leading colon when present, so this only needs to
+    /// decide *whether* a type follows at all.
+    fn parse_optional_return_type(&mut self) -> Option<nether_ast::TypeExpr> {
+        if self.can_start_type_expr() {
+            Some(self.parse_type_expr())
+        } else {
+            None
+        }
+    }
+
+    /// Whether the upcoming tokens can start a [`TypeExpr`](nether_ast::TypeExpr)
+    /// — shared by return-type parsing here and `let`-binding type
+    /// parsing (`expr.rs`), since both distinguish "no type written" from
+    /// "a type follows" the same way (language-spec §7/§8.2).
+    pub(crate) fn can_start_type_expr(&self) -> bool {
+        matches!(
+            self.peek(),
+            Token::Punct(Punct::Colon)
+                | Token::Keyword(Keyword::Weak)
+                | Token::Punct(Punct::LBracket)
+                | Token::Punct(Punct::LParen)
+                | Token::Ident(_)
+        )
+    }
+
+    /// A method receiver — `self`/`mut self` (ARC domain) or `: self`/
+    /// `: &self`/`: &mut self` (unique-ownership domain; language-spec
+    /// §8.4). The leading-colon forms are unambiguous against an ordinary
+    /// first parameter: every plain parameter starts with an identifier
+    /// name, never a bare `:`.
     fn parse_optional_self_param(&mut self) -> Option<SelfParam> {
         if matches!(self.peek(), Token::Keyword(Keyword::SelfLower)) {
             self.bump();
@@ -413,6 +478,37 @@ impl Parser {
             self.bump();
             self.eat_punct(Punct::Comma);
             Some(SelfParam::ByMutRef)
+        } else if matches!(self.peek(), Token::Punct(Punct::Colon)) {
+            self.bump();
+            let result = if matches!(self.peek(), Token::Keyword(Keyword::SelfLower)) {
+                self.bump();
+                Some(SelfParam::Owned)
+            } else if self.eat_punct(Punct::Amp) {
+                let mutable = self.eat_keyword(Keyword::Mut);
+                if matches!(self.peek(), Token::Keyword(Keyword::SelfLower)) {
+                    self.bump();
+                } else {
+                    let span = self.peek_span();
+                    self.error(span, format!("expected `self`, found {:?}", self.peek()));
+                }
+                Some(if mutable {
+                    SelfParam::OwnedMutRef
+                } else {
+                    SelfParam::OwnedRef
+                })
+            } else {
+                let span = self.peek_span();
+                self.error(
+                    span,
+                    format!(
+                        "expected `self`, `&self`, or `&mut self` after `:`, found {:?}",
+                        self.peek()
+                    ),
+                );
+                None
+            };
+            self.eat_punct(Punct::Comma);
+            result
         } else {
             None
         }
@@ -436,12 +532,20 @@ impl Parser {
         params
     }
 
+    /// One of the five parameter forms (language-spec §8.1):
+    /// `a Animal` (ordinary ARC), `b mut Animal` (ARC + mutation
+    /// permission — note `mut` comes *after* the name here, unlike
+    /// `let mut`), `c: Animal` (owned), `d: &Animal` / `e: &mut Animal`
+    /// (borrows), and `items ...Type` (variadic — no colon). `mutable`/
+    /// `variadic` are recorded on `Param` directly; the owned/ref/mut-ref
+    /// distinction lives entirely in `ty`'s shape
+    /// (`Unique`/`Ref`/`MutRef`), since `parse_type_expr` already consumes
+    /// a leading `:` itself.
     pub(crate) fn parse_param(&mut self) -> Param {
         let start = self.peek_span();
         let id = self.next_id();
-        let mutable = self.eat_keyword(Keyword::Mut);
         let name = self.expect_ident();
-        self.expect_punct(Punct::Colon, "after a parameter name");
+        let mutable = self.eat_keyword(Keyword::Mut);
         let variadic = self.eat_punct(Punct::DotDotDot);
         let ty = self.parse_type_expr();
         let span = start.to(ty.span());

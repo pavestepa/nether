@@ -4,57 +4,57 @@ use super::*;
 fn explicit_generic_call_arguments_control_specialization() {
     assert_ok(
         r#"
-fn opaque<T>(value: i32): i32 { value }
-fn pair<T, U>(left: T, right: U): (T, U) { (left, right) }
+fn opaque<T>(value i32) i32 { return value; }
+fn pair<T, U>(left T, right U) (T, U) { return (left, right); }
 
-type Boxed<T> { value: T }
+struct Boxed<T> { value T }
 impl Boxed {
-    replace<U>(self, value: U): Boxed<U> { Boxed { value } }
+    replace<U>(self, value U) Boxed<U> { return Boxed { value }; }
 }
 
 fn main() {
-    let value: i32 = opaque<String>(2);
-    let both: (u32, String) = pair<u32, String>(2, "ready");
-    let number = Boxed { value: 1 };
-    let text: Boxed<String> = number.replace<String>("one");
+    let value i32 = opaque<String>(2);
+    let both (u32, String) = pair<u32, String>(2, "ready");
+    let number = Boxed { value = 1 };
+    let text Boxed<String> = number.replace<String>("one");
 }
 "#,
     );
     assert_ok(
         r#"
-interface Transform {
-    transform<U>(self, value: U): U;
+trait Transform {
+    transform<U>(self, value U) U;
 }
-type Boxed<T> { value: T }
-impl Boxed: Transform {
-    transform<U>(self, value: U): U { value }
+struct Boxed<T> { value T }
+impl Boxed Transform {
+    transform<U>(self, value U) U { return value; }
 }
-fn apply<T: Transform>(value: T): String {
-    value.transform<String>("ready")
+fn apply<T: Transform>(value T) String {
+    return value.transform<String>("ready");
 }
 fn main() {
-    let result: String = apply(Boxed { value: 1 });
+    let result String = apply(Boxed { value = 1 });
 }
 "#,
     );
     assert_err(
         r#"
-fn identity<T>(value: T): T { value }
+fn identity<T>(value T) T { return value; }
 fn main() { identity<u32, String>(2); }
 "#,
         "expected 1 explicit generic argument(s), found 2",
     );
     assert_err(
         r#"
-fn identity<T>(value: T): T { value }
+fn identity<T>(value T) T { return value; }
 fn main() { identity<String>(2); }
 "#,
         "expected `String`, found `i32`",
     );
     assert_err(
         r#"
-interface Sound { sound(self): String; }
-fn make_noise<T: Sound>(value: T): String { value.sound() }
+trait Sound { sound(self) String; }
+fn make_noise<T: Sound>(value T) String { return value.sound(); }
 fn main() { make_noise<u32>(2); }
 "#,
         "does not implement `Sound`",
@@ -65,8 +65,8 @@ fn main() { make_noise<u32>(2); }
 fn into_string_bound_is_checked_inside_generic_bodies() {
     assert_ok(
         r#"
-fn stringify<T: Into<String>>(value: T): String {
-    value.into_string()
+fn stringify<T: Into<String>>(value T) String {
+    return value.into_string();
 }
 fn main() {
     let number = stringify(42);
@@ -76,7 +76,7 @@ fn main() {
     );
     assert_err(
         r#"
-fn invalid<T>(value: T) {
+fn invalid<T>(value T) {
     println(value);
 }
 "#,
@@ -85,58 +85,58 @@ fn invalid<T>(value: T) {
 }
 
 #[test]
-fn generic_interfaces_preserve_arguments_and_specialize_methods() {
+fn generic_traits_preserve_arguments_and_specialize_methods() {
     assert_ok(
         r#"
-interface Convert<T> {
-    convert(self): T;
+trait Convert<T> {
+    convert(self) T;
 }
-interface Identity<T> {
-    identity(self, value: T): T { value }
+trait Identity<T> {
+    identity(self, value T) T { return value; }
 }
-type Dog: Identity<String> { name: String }
-impl Dog: Convert<String> {
-    convert(self): String { self.name }
+struct Dog Identity<String> { name String }
+impl Dog Convert<String> {
+    convert(self) String { return self.name; }
 }
-fn convert<U: Convert<String>>(value: U): String {
-    value.convert()
+fn convert<U: Convert<String>>(value U) String {
+    return value.convert();
 }
-fn identify<U: Identity<String>>(value: U): String {
-    value.identity("ready")
+fn identify<U: Identity<String>>(value U) String {
+    return value.identity("ready");
 }
 fn main() {
-    let dog = Dog { name: "Bobby" };
-    let name: String = convert(dog);
-    let state: String = identify(dog);
+    let dog = Dog { name = "Bobby" };
+    let name String = convert(dog);
+    let state String = identify(dog);
 }
 "#,
     );
     assert_err(
         r#"
-interface Convert<T> { convert(self): T; }
-type Dog;
-impl Dog: Convert<i32> { convert(self): i32 { 1 } }
-fn convert<U: Convert<String>>(value: U): String { value.convert() }
+trait Convert<T> { convert(self) T; }
+struct Dog;
+impl Dog Convert<i32> { convert(self) i32 { 1 } }
+fn convert<U: Convert<String>>(value U) String { return value.convert(); }
 fn main() { convert(Dog); }
 "#,
         "does not implement `Convert<String>`",
     );
     assert_err(
         r#"
-interface Convert<T> { convert(self): T; }
-type Dog;
-impl Dog: Convert<String> { convert(self): i32 { 1 } }
+trait Convert<T> { convert(self) T; }
+struct Dog;
+impl Dog Convert<String> { convert(self) i32 { 1 } }
 "#,
         "does not match its declaration",
     );
     assert_ok(
         r#"
-interface Read<T> { read(self): T; }
-type Boxed<T> { value: T }
-impl Boxed: Read<T> { read(self): T { self.value } }
-fn read_text<U: Read<String>>(value: U): String { value.read() }
+trait Read<T> { read(self) T; }
+struct Boxed<T> { value T }
+impl Boxed Read<T> { read(self) T { return self.value; } }
+fn read_text<U: Read<String>>(value U) String { return value.read(); }
 fn main() {
-    let text = Boxed { value: "ready" };
+    let text = Boxed { value = "ready" };
     println(read_text(text));
 }
 "#,
@@ -147,46 +147,46 @@ fn main() {
 fn static_methods_can_be_called_through_values() {
     assert_ok(
         r#"
-type Animal { name: String }
+struct Animal { name String }
 impl Animal {
-    new(name: String): Animal { Animal { name } }
-    static_method(): String { "A" }
+    new(name String) Animal { return Animal { name }; }
+    static_method() String { return "A"; }
 }
 fn main() {
     let animal = Animal.new("Cat");
-    let value: String = animal.static_method();
+    let value String = animal.static_method();
 }
 "#,
     );
     assert_ok(
         r#"
-interface Static { value(): String; }
-type Animal;
-impl Animal: Static {
-    value(): String { "A" }
+trait Static { value() String; }
+struct Animal;
+impl Animal Static {
+    value() String { return "A"; }
 }
-fn read<T: Static>(animal: T): String {
-    animal.value()
+fn read<T: Static>(animal T) String {
+    return animal.value();
 }
 fn main() {
-    let value: String = read(Animal);
+    let value String = read(Animal);
 }
 "#,
     );
 }
 
 #[test]
-fn interface_implementations_can_be_mixed_across_blocks() {
+fn trait_implementations_can_be_mixed_across_blocks() {
     assert_ok(
         r#"
-interface B { b(self): String; }
-interface C { c(self): String; }
-type A;
-impl A: B, C {}
-impl A { b(self): String { "b" } }
-impl A { c(self): String { "c" } }
-fn use_b<T: B>(value: T): String { value.b() }
-fn use_c<T: C>(value: T): String { value.c() }
+trait B { b(self) String; }
+trait C { c(self) String; }
+struct A;
+impl A B, C {}
+impl A { b(self) String { return "b"; } }
+impl A { c(self) String { return "c"; } }
+fn use_b<T: B>(value T) String { return value.b(); }
+fn use_c<T: C>(value T) String { return value.c(); }
 fn main() {
     use_b(A);
     use_c(A);
@@ -195,9 +195,9 @@ fn main() {
     );
     assert_err(
         r#"
-interface Sound { sound(self): String { "default" } }
-type Animal;
-impl Animal: Sound {}
+trait Sound { sound(self) String { return "default"; } }
+struct Animal;
+impl Animal Sound {}
 "#,
         "must explicitly implement method",
     );
@@ -207,11 +207,11 @@ impl Animal: Sound {}
 fn declarations_opt_into_defaults_for_types_and_enums() {
     assert_ok(
         r#"
-interface Sound { sound(self): String { "default" } }
-type Animal: Sound { name: String }
-enum State: Sound { Ready }
+trait Sound { sound(self) String { return "default"; } }
+struct Animal Sound { name String }
+enum State Sound { Ready }
 fn main() {
-    Animal { name: "Cat" }.sound();
+    Animal { name = "Cat" }.sound();
     State.Ready.sound();
 }
 "#,
@@ -219,48 +219,48 @@ fn main() {
 }
 
 #[test]
-fn interface_inheritance_is_transitive_and_requires_parent_methods() {
+fn trait_inheritance_is_transitive_and_requires_parent_methods() {
     assert_ok(
         r#"
-interface Parent { parent(self): String; }
-interface Child: Parent { child(self): String; }
-type A;
-impl A: Child {}
+trait Parent { parent(self) String; }
+trait Child Parent { child(self) String; }
+struct A;
+impl A Child {}
 impl A {
-    parent(self): String { "parent" }
-    child(self): String { "child" }
+    parent(self) String { return "parent"; }
+    child(self) String { return "child"; }
 }
-fn use_parent<T: Parent>(value: T): String { value.parent() }
+fn use_parent<T: Parent>(value T) String { return value.parent(); }
 fn main() { use_parent(A); }
 "#,
     );
     assert_err(
         r#"
-interface Parent { parent(self): String; }
-interface Child: Parent { child(self): String; }
-type A;
-impl A: Child { child(self): String { "child" } }
+trait Parent { parent(self) String; }
+trait Child Parent { child(self) String; }
+struct A;
+impl A Child { child(self) String { "child" } }
 "#,
         "must explicitly implement method `parent`",
     );
 }
 
 #[test]
-fn conflicting_defaults_and_interface_cycles_are_diagnostics() {
+fn conflicting_defaults_and_trait_cycles_are_diagnostics() {
     assert_err(
         r#"
-interface B { value(self): String { "b" } }
-interface C { value(self): String { "c" } }
-type A: B, C;
+trait B { value(self) String { return "b"; } }
+trait C { value(self) String { return "c"; } }
+struct A B, C;
 "#,
         "multiple default implementations",
     );
     assert_err(
         r#"
-interface A: B {}
-interface B: A {}
+trait A B {}
+trait B A {}
 "#,
-        "interface inheritance cycle",
+        "trait inheritance cycle",
     );
 }
 
@@ -271,15 +271,15 @@ fn explicit_generic_impl_block_on_a_builtin_owner_type_checks_and_runs() {
     assert_ok(
         r#"
 impl<T> Option<T> {
-    unwrap_or(self, fallback: T): T {
-        match self {
+    unwrap_or(self, fallback T) T {
+        return match self {
             Some(item) => item,
             None => fallback,
-        }
+        };
     }
 }
 fn main() {
-    let value: Option<i32> = Option.Some(4);
+    let value Option<i32> = Option.Some(4);
     println(`${value.unwrap_or(0)}`);
 }
 "#,
@@ -294,7 +294,7 @@ fn explicit_impl_generics_reject_a_concrete_target_argument_when_impl_has_its_ow
     // see `impl_concrete_specialization_type_checks_and_runs` below), so
     // it stays rejected.
     assert_err(
-        "impl<T> Option<i32> { foo(self): bool { true } }\n",
+        "impl<T> Option<i32> { foo(self) bool { true } }\n",
         "must name each of",
     );
 }
@@ -302,7 +302,7 @@ fn explicit_impl_generics_reject_a_concrete_target_argument_when_impl_has_its_ow
 #[test]
 fn explicit_impl_generics_reject_a_repeated_target_argument() {
     assert_err(
-        "impl<T> Result<T, T> { foo(self): bool { true } }\n",
+        "impl<T> Result<T, T> { foo(self) bool { true } }\n",
         "must name each of",
     );
 }
@@ -310,7 +310,7 @@ fn explicit_impl_generics_reject_a_repeated_target_argument() {
 #[test]
 fn explicit_impl_generics_reject_an_unused_impl_parameter() {
     assert_err(
-        "impl<T, U> Option<T> { foo(self): bool { true } }\n",
+        "impl<T, U> Option<T> { foo(self) bool { true } }\n",
         "must appear",
     );
 }
@@ -324,15 +324,15 @@ fn explicit_impl_generic_owner_infers_from_receiver_with_no_other_use_of_t() {
     assert_ok(
         r#"
 impl<T> Option<T> {
-    is_some(self): bool {
-        match self {
+    is_some(self) bool {
+        return match self {
             Some(_) => true,
             None => false,
-        }
+        };
     }
 }
 fn main() {
-    let value: Option<i32> = Option.Some(4);
+    let value Option<i32> = Option.Some(4);
     println(`${value.is_some()}`);
 }
 "#,
@@ -342,7 +342,7 @@ fn main() {
 #[test]
 fn explicit_impl_generics_reject_wrong_arity() {
     assert_err(
-        "impl<T> Result<T> { foo(self): bool { true } }\n",
+        "impl<T> Result<T> { foo(self) bool { true } }\n",
         "takes 2 type argument(s), found 1",
     );
 }
@@ -357,13 +357,13 @@ fn impl_concrete_specialization_type_checks_and_runs() {
     assert_ok(
         r#"
 impl<T> Option<T> {
-    describe(self): String {
-        "generic"
+    describe(self) String {
+        return "generic";
     }
 }
 impl Option<i32> {
-    describe(self): String {
-        "int"
+    describe(self) String {
+        return "int";
     }
 }
 fn main() {
@@ -382,7 +382,7 @@ fn impl_specialization_only_method_is_visible_only_on_its_own_concrete_type() {
     assert_ok(
         r#"
 impl Option<i32> {
-    double(self): i32 {
+    double(self) i32 {
         match self {
             Some(item) => item * 2,
             None => 0,
@@ -397,10 +397,10 @@ fn main() {
     assert_err(
         r#"
 impl Option<i32> {
-    double(self): i32 { 0 }
+    double(self) i32 { return 0; }
 }
 fn main() {
-    let value: Option<String> = Option.Some("x");
+    let value Option<String> = Option.Some("x");
     value.double();
 }
 "#,
@@ -412,8 +412,8 @@ fn main() {
 fn impl_specialization_rejects_duplicate_registration() {
     assert_err(
         r#"
-impl Option<i32> { double(self): i32 { 0 } }
-impl Option<i32> { double(self): i32 { 1 } }
+impl Option<i32> { double(self) i32 { 0 } }
+impl Option<i32> { double(self) i32 { 1 } }
 "#,
         "defined more than once for this specialization",
     );
@@ -424,10 +424,10 @@ fn impl_specialization_rejects_a_signature_mismatch_with_the_generic_impl() {
     assert_err(
         r#"
 impl<T> Option<T> {
-    describe(self): String { "generic" }
+    describe(self) String { return "generic"; }
 }
 impl Option<i32> {
-    describe(self): i32 { 0 }
+    describe(self) i32 { return 0; }
 }
 "#,
         "must have the same signature",
@@ -437,20 +437,20 @@ impl Option<i32> {
 #[test]
 fn impl_specialization_rejects_static_methods() {
     assert_err(
-        "impl Option<i32> { make(): i32 { 0 } }\n",
+        "impl Option<i32> { make() i32 { 0 } }\n",
         "cannot override a static method",
     );
 }
 
 #[test]
-fn impl_specialization_rejects_interfaces() {
+fn impl_specialization_rejects_traits() {
     assert_err(
         r#"
-interface Sound { sound(self): String; }
-impl Option<i32>: Sound {
-    sound(self): String { "beep" }
+trait Sound { sound(self) String; }
+impl Option<i32> Sound {
+    sound(self) String { return "beep"; }
 }
 "#,
-        "cannot also implement an interface",
+        "cannot also implement a trait",
     );
 }

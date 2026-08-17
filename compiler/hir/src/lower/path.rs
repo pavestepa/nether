@@ -22,8 +22,19 @@ impl Lowerer<'_> {
             None
         };
 
+        // Tracked alongside `current`/`current_ty` for the same reason as
+        // `Lowerer::receiver_domain_of`: `local_ty`/`lower_field_access_
+        // named` both strip `Type::Unique` from `current_ty`, so an
+        // eventual trailing method-call segment needs its own separate,
+        // un-stripped source of truth. A field access never yields a
+        // `Unique`-typed result (language-spec §4.2 — struct fields are
+        // always ordinary), so it always resets this back to `Arc`; only
+        // the *base* resolution (a bare local, most commonly) can ever
+        // set it to `Owned`.
+        let mut current_domain = ReceiverDomain::Arc;
         let (mut current, mut current_ty) = match res.base {
             Resolution::Local(id) => {
+                current_domain = self.local_domain_of(id);
                 let ty = self.local_ty(id);
                 let local = self.local_for(id);
                 let expr = local_ref(local, ty.clone());
@@ -68,6 +79,7 @@ impl Lowerer<'_> {
                     return self.lower_method_call_on(
                         current,
                         &current_ty,
+                        current_domain,
                         seg,
                         args,
                         generic_args,
@@ -78,6 +90,7 @@ impl Lowerer<'_> {
             let (next, next_ty) = self.lower_field_access_named(current, &current_ty, seg);
             current = next;
             current_ty = next_ty;
+            current_domain = ReceiverDomain::Arc;
         }
         current
     }
@@ -104,6 +117,34 @@ impl Lowerer<'_> {
                         ty: result_ty.clone(),
                     };
                     return (expr, result_ty.clone());
+                }
+                if name.as_str() == "to" {
+                    // Every transition `nether_typecheck` actually accepts
+                    // (Stage 2, slice 4) is pure relabeling — `:T`/`T`
+                    // already share one runtime representation (spec
+                    // §3.2), and an inline value promoted to `:t` aliases
+                    // nothing new — so lowering `to(value)` is just
+                    // lowering `value` itself, re-typed to the call's own
+                    // already-checked result type. No new `HirExprKind`,
+                    // no MIR/codegen involvement.
+                    let arg = call_args.and_then(|args| args.first());
+                    return match arg {
+                        Some(arg) => {
+                            let mut lowered = self.lower_expr(arg);
+                            lowered.ty = result_ty.clone();
+                            (lowered, result_ty.clone())
+                        }
+                        // typecheck already rejected a missing/wrong-arity
+                        // argument list — unreachable for a program that
+                        // type-checked successfully.
+                        None => (
+                            HirExpr {
+                                kind: HirExprKind::Unit,
+                                ty: Type::Error,
+                            },
+                            Type::Error,
+                        ),
+                    };
                 }
                 let fn_id = self.fn_by_def.get(&id).copied();
                 match (fn_id, call_args) {
@@ -219,7 +260,7 @@ impl Lowerer<'_> {
         // static method inside a concrete-specialization `impl` block.
         let Some(fn_id) = self
             .methods
-            .get(&(owner_id, name))
+            .get(&(owner_id, name, ReceiverDomain::Static))
             .and_then(|set| set.generic)
         else {
             return (
@@ -257,11 +298,19 @@ impl Lowerer<'_> {
         &mut self,
         receiver: HirExpr,
         receiver_ty: &Type,
+        receiver_domain: ReceiverDomain,
         method: &Ident,
         args: &[Expr],
         generic_args: &[Type],
         result_ty: &Type,
     ) -> HirExpr {
+        // `receiver_ty` has already been through `ty_of`/`local_ty` by the
+        // time it reaches here (both callers pass an already-lowered
+        // expression's `.ty`), which always strips `Type::Unique` — so
+        // `receiver_domain` must come from the caller, computed from the
+        // *pre-lowering* AST type (`receiver_domain_of`), not re-derived
+        // from `receiver_ty` here.
+        let receiver_ty = receiver_ty.strip_unique();
         if let Type::Array(_) = receiver_ty {
             if matches!(method.name.as_str(), "len" | "push" | "pop") {
                 let lowered = self.lower_args(args);
@@ -281,8 +330,8 @@ impl Lowerer<'_> {
                 .as_ref()
                 .and_then(|bound| {
                     self.sigs
-                        .interface_methods
-                        .get(&(bound.interface, method.name.clone()))
+                        .trait_methods
+                        .get(&(bound.trait_id, method.name.clone()))
                 })
                 .is_some_and(|sig| sig.self_param.is_none());
             let lowered = self.lower_args(args);
@@ -290,9 +339,10 @@ impl Lowerer<'_> {
                 Some(bound) => HirExpr {
                     kind: HirExprKind::CallGenericMethod {
                         receiver: Box::new(receiver),
-                        bound_interface: bound.interface,
+                        bound_trait: bound.trait_id,
                         method_name: method.name.clone(),
                         is_static,
+                        domain: receiver_domain,
                         generic_args: generic_args.to_vec(),
                         args: lowered,
                     },
@@ -310,13 +360,24 @@ impl Lowerer<'_> {
             Type::Array(_) => self.array_owner,
             _ => None,
         };
-        let method_set = owner_id.and_then(|id| self.methods.get(&(id, method.name.clone())));
+        // Try the receiver's own domain first; fall back to `Static` so a
+        // static method can still be called through a value — mirrors
+        // `check_method_call_on`'s identical fallback (at most one of
+        // these two ever matches, since `Static` can't coexist with
+        // `Arc`/`Owned` for the same name).
+        let resolved_method = owner_id.and_then(|id| {
+            self.methods
+                .get(&(id, method.name.clone(), receiver_domain))
+                .map(|set| (set, false))
+                .or_else(|| {
+                    self.methods
+                        .get(&(id, method.name.clone(), ReceiverDomain::Static))
+                        .map(|set| (set, true))
+                })
+        });
         let lowered = self.lower_args(args);
-        match method_set {
-            Some(set) => {
-                let is_static = owner_id
-                    .and_then(|id| self.sigs.method(id, &method.name))
-                    .is_some_and(|sig| sig.self_param.is_none());
+        match resolved_method {
+            Some((set, is_static)) => {
                 if is_static {
                     // Static methods are never specialized (rejected at
                     // `nether_typecheck::check::build_impl_methods`), so
@@ -355,6 +416,7 @@ impl Lowerer<'_> {
                         kind: HirExprKind::CallMethod {
                             receiver: Box::new(receiver),
                             method_name: method.name.clone(),
+                            domain: receiver_domain,
                             generic_args: generic_args.to_vec(),
                             args: lowered,
                         },

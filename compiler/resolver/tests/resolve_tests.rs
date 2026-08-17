@@ -62,34 +62,34 @@ fn main() {
     println(a.into_string());
 }
 
-type Lang {
-    name: String
+struct Lang {
+    name String
 }
 
 impl Lang {
-    new(name: String): Lang {
+    new(name String) Lang {
         Lang { name }
     }
 
-    set_name(mut self, new_name: String) {
+    set_name(mut self, new_name String) {
         self.name = new_name;
     }
 }
 
-impl Lang: Into<String> {
-    into_string(self): String {
+impl Lang Into<String> {
+    into_string(self) String {
         `name: ${self.name}`
     }
 }
 
-interface Sound {
-    sound(): String {
+trait Sound {
+    sound() String {
         "..."
     }
 }
 
-impl Lang: Sound {
-    sound(): String {
+impl Lang Sound {
+    sound() String {
         "Woof! Ruff!"
     }
 }
@@ -113,15 +113,18 @@ impl Lang: Sound {
 
 #[test]
 fn let_binding_resolves_to_local_and_shadowing_works() {
+    // A bare `{ ... }` is no longer an expression (language-spec §2.6), so
+    // this exercises shadowing through an `if` body instead — still a
+    // genuinely nested scope as far as `resolve_block` is concerned.
     let module = parse(
         r#"
 fn main() {
     let x = 1;
     println(x);
-    let y = {
+    if true {
         let x = 2;
-        x
-    };
+        println(x);
+    }
     println(x);
 }
 "#,
@@ -161,15 +164,15 @@ fn main() {
         .expect("path should be resolved");
     assert_eq!(res.base, Resolution::Local(outer_local));
 
-    // stmts[2] = `let y = { let x = 2; x };` — the inner `x` must resolve
-    // to a *different* local than the outer one (shadowing).
-    let Stmt::Let(y_let) = &body.stmts[2] else {
-        panic!("expected let y")
+    // stmts[2] = `if true { let x = 2; println(x); }` — the inner `x`
+    // must resolve to a *different* local than the outer one (shadowing).
+    let Stmt::Expr(if_stmt) = &body.stmts[2] else {
+        panic!("expected if statement")
     };
-    let ExprKind::Block(inner_block) = &y_let.value.kind else {
-        panic!("expected block")
+    let ExprKind::If { then_branch, .. } = &if_stmt.kind else {
+        panic!("expected If")
     };
-    let Stmt::Let(inner_let) = &inner_block.stmts[0] else {
+    let Stmt::Let(inner_let) = &then_branch.stmts[0] else {
         panic!("expected inner let")
     };
     let inner_local = *resolved
@@ -178,11 +181,17 @@ fn main() {
         .expect("inner x should be a binding site");
     assert_ne!(outer_local, inner_local);
 
-    let inner_tail_path = first_path(inner_block.tail.as_ref().unwrap());
-    let inner_res = resolved.path_res.get(&inner_tail_path.id).unwrap();
+    let Stmt::Expr(inner_println) = &then_branch.stmts[1] else {
+        panic!("expected inner call stmt")
+    };
+    let ExprKind::Call { args, .. } = &inner_println.kind else {
+        panic!("expected Call")
+    };
+    let inner_use_path = first_path(&args[0]);
+    let inner_res = resolved.path_res.get(&inner_use_path.id).unwrap();
     assert_eq!(inner_res.base, Resolution::Local(inner_local));
 
-    // stmts[3] = `println(x);` after the block — resolves back to the
+    // stmts[3] = `println(x);` after the `if` — resolves back to the
     // *outer* local, since the inner one went out of scope.
     let Stmt::Expr(second_println) = &body.stmts[3] else {
         panic!("expected call stmt")
@@ -199,9 +208,9 @@ fn main() {
 fn self_resolves_to_a_local_bound_on_the_method() {
     let module = parse(
         r#"
-type Dog { name: String }
+struct Dog { name String }
 impl Dog {
-    set_name(mut self, new_name: String) {
+    set_name(mut self, new_name String) {
         self.name = new_name;
     }
 }
@@ -241,9 +250,9 @@ impl Dog {
 fn static_method_call_resolves_to_static_member() {
     let module = parse(
         r#"
-type Dog { name: String }
+struct Dog { name String }
 impl Dog {
-    new(name: String): Dog {
+    new(name String) Dog {
         Dog { name }
     }
 }
@@ -365,7 +374,7 @@ fn main() {
 #[test]
 fn duplicate_top_level_definition_reports_diagnostic() {
     let (_, _, diags) =
-        resolve_with_diagnostics("type Dog { name: String }\ntype Dog { other: i32 }\n");
+        resolve_with_diagnostics("struct Dog { name String }\nstruct Dog { other i32 }\n");
     assert_eq!(diags.len(), 1);
     assert!(diags[0].message.contains("defined more than once"));
 }

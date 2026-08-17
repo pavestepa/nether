@@ -21,14 +21,19 @@ pub(super) fn placeholder_for(hir_fn: &HirFunction) -> MonoFunction {
 
 /// `Struct`/`TupleStruct`/`Enum`/`Array` are the only `Type` variants that
 /// can own an `impl` block (language-spec §7/§8) — everything else
-/// (primitives, tuples, strings, functions, interfaces-as-bounds) never
+/// (primitives, tuples, strings, functions, traits-as-bounds) never
 /// reaches here for a well-typed program, since `typecheck` only ever
 /// produces a `CallGenericMethod`/`CallMethod` when the bound check
 /// succeeded against a declared `impl`. Unlike the other three, a
 /// `Type::Array(_)` carries no `DefId` of its own — `array_owner` (looked
 /// up once in `hir::lower` and threaded through `HirModule`) supplies it.
 pub(super) fn owner_def_id(ty: &Type, array_owner: Option<DefId>) -> Option<DefId> {
-    match ty {
+    // An owned (`:T`) receiver's substituted type is still `Type::Unique`
+    // at this point (`hir` never strips it from a receiver expression's
+    // own `.ty`, only from the local it derives an owner/method-set key
+    // from) — strip it here too so an owned receiver's method call
+    // resolves instead of hitting this function's own `None` case.
+    match ty.strip_unique() {
         Type::Struct(id, _) | Type::TupleStruct(id, _) => Some(*id),
         Type::Enum(id, _) => Some(*id),
         Type::Array(_) => array_owner,
@@ -55,7 +60,10 @@ pub(super) fn subst_type(ty: &Type, subst: &HashMap<Symbol, Type>) -> Type {
             Box::new(subst_type(ret, subst)),
         ),
         Type::Weak(inner) => Type::Weak(Box::new(subst_type(inner, subst))),
-        Type::Primitive(_) | Type::String | Type::Interface(_) | Type::Never | Type::Error => {
+        Type::Unique(inner) => Type::Unique(Box::new(subst_type(inner, subst))),
+        Type::Ref(inner) => Type::Ref(Box::new(subst_type(inner, subst))),
+        Type::MutRef(inner) => Type::MutRef(Box::new(subst_type(inner, subst))),
+        Type::Primitive(_) | Type::String | Type::Trait(_) | Type::Never | Type::Error => {
             ty.clone()
         }
     }
@@ -122,6 +130,21 @@ pub(super) fn collect_generic_bindings(
                 collect_generic_bindings(inner, concrete_inner, out);
             }
         }
-        Type::Primitive(_) | Type::String | Type::Interface(_) | Type::Never | Type::Error => {}
+        Type::Unique(inner) => {
+            if let Type::Unique(concrete_inner) = concrete {
+                collect_generic_bindings(inner, concrete_inner, out);
+            }
+        }
+        Type::Ref(inner) => {
+            if let Type::Ref(concrete_inner) = concrete {
+                collect_generic_bindings(inner, concrete_inner, out);
+            }
+        }
+        Type::MutRef(inner) => {
+            if let Type::MutRef(concrete_inner) = concrete {
+                collect_generic_bindings(inner, concrete_inner, out);
+            }
+        }
+        Type::Primitive(_) | Type::String | Type::Trait(_) | Type::Never | Type::Error => {}
     }
 }

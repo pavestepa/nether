@@ -22,7 +22,7 @@ pub(super) fn build_type_shapes(
                 .collect(),
         );
         let shape = match &t.kind {
-            TypeDeclKind::Struct(fields) => TypeShape::Struct(
+            StructDeclKind::Struct(fields) => TypeShape::Struct(
                 fields
                     .iter()
                     .map(|f| {
@@ -33,12 +33,12 @@ pub(super) fn build_type_shapes(
                     })
                     .collect(),
             ),
-            TypeDeclKind::TupleStruct(tys) => TypeShape::TupleStruct(
+            StructDeclKind::TupleStruct(tys) => TypeShape::TupleStruct(
                 tys.iter()
                     .map(|ty| lower_type_expr(ty, resolved, decls, diags))
                     .collect(),
             ),
-            TypeDeclKind::Unit => TypeShape::Unit,
+            StructDeclKind::Unit => TypeShape::Unit,
         };
         sigs.type_shapes.insert(id, shape);
     }
@@ -52,7 +52,7 @@ pub(super) fn build_enum_sigs(
     diags: &mut Vec<Diagnostic>,
 ) {
     // `Option`/`Result` need no seeding here — they're ordinary `enum`
-    // items in the bundled prelude (`stdlib/option.nt`/`result.nt`), so
+    // items in the bundled prelude (`stdlib/option.nr`/`result.nt`), so
     // the loop below already covers them exactly like any user-declared
     // generic enum.
     for item in &module.items {
@@ -108,21 +108,21 @@ pub(super) fn build_fn_sigs(
 }
 
 #[derive(Clone)]
-pub(super) struct InterfaceDefault {
+pub(super) struct TraitDefault {
     pub(super) source: DefId,
-    /// Source-interface generic parameters expressed in the current
-    /// interface's generic parameters.
+    /// Source-trait generic parameters expressed in the current
+    /// trait's generic parameters.
     pub(super) subst: HashMap<Symbol, Type>,
 }
 
 #[derive(Clone)]
-pub(super) struct InterfaceMethod {
+pub(super) struct TraitMethod {
     pub(super) sig: FnSig,
-    pub(super) default: Option<InterfaceDefault>,
+    pub(super) default: Option<TraitDefault>,
     pub(super) ambiguous_default: bool,
 }
 
-pub(super) type InterfaceMethodTable = HashMap<DefId, HashMap<Symbol, InterfaceMethod>>;
+pub(super) type TraitMethodTable = HashMap<DefId, HashMap<Symbol, TraitMethod>>;
 
 pub(super) fn specialize_fn_sig(sig: &FnSig, subst: &HashMap<Symbol, Type>) -> FnSig {
     FnSig {
@@ -145,7 +145,7 @@ pub(super) fn specialize_fn_sig(sig: &FnSig, subst: &HashMap<Symbol, Type>) -> F
                 (
                     name.clone(),
                     bound.as_ref().map(|bound| GenericBound {
-                        interface: bound.interface,
+                        trait_id: bound.trait_id,
                         args: bound
                             .args
                             .iter()
@@ -206,7 +206,7 @@ pub(super) fn owner_generic_params(
 /// The number of type arguments `owner` takes — a declared type's or
 /// enum's own `generics.len()` (`Option`/`Result` included: ordinary
 /// prelude `enum`s, not builtins, so they always have a declaration to
-/// read here), `0` for anything else (a primitive, an interface, ...).
+/// read here), `0` for anything else (a primitive, a trait, ...).
 pub(super) fn owner_arity(owner: DefId, decls: &DeclIndex) -> usize {
     decls
         .type_decls

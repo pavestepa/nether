@@ -47,12 +47,17 @@ impl Parser {
         }
     }
 
+    /// `let a = 3;` (inferred), `let user User = ...;` (explicit ARC/inline
+    /// type — no colon), `let user: User = ...;` (explicit owned type —
+    /// colon; language-spec §7). `parse_type_expr` itself consumes the
+    /// leading colon when present, so this only decides *whether* a type
+    /// was written before the `=`.
     fn parse_let_stmt(&mut self) -> LetStmt {
         let start = self.expect_keyword(Keyword::Let);
         let id = self.next_id();
         let mutable = self.eat_keyword(Keyword::Mut);
         let name = self.expect_ident();
-        let ty = if self.eat_punct(Punct::Colon) {
+        let ty = if self.can_start_type_expr() {
             Some(self.parse_type_expr())
         } else {
             None
@@ -67,6 +72,28 @@ impl Parser {
             ty,
             value,
             span: start.to(end),
+        }
+    }
+
+    /// Parses either a bare expression or, if the next token is `{`, a
+    /// block used as a value — for the specific positions where a block is
+    /// a legitimate expression (closure bodies, match arm bodies) without
+    /// reintroducing arbitrary standalone block expressions everywhere
+    /// (language-spec §2.6: braces are only ever attached to a known
+    /// construct, never a bare primary expression — see
+    /// [`Parser::parse_primary`]).
+    pub(crate) fn parse_expr_or_block(&mut self) -> Expr {
+        if matches!(self.peek(), Token::Punct(Punct::LBrace)) {
+            let block = self.parse_block();
+            let span = block.span;
+            let id = self.next_id();
+            Expr {
+                id,
+                kind: ExprKind::Block(block),
+                span,
+            }
+        } else {
+            self.parse_assign_expr()
         }
     }
 

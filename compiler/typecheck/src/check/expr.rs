@@ -21,17 +21,46 @@ impl Checker<'_> {
 
     pub(super) fn synth_expr(&mut self, expr: &Expr, expected: Option<&Type>) -> Type {
         match &expr.kind {
+            // A bare integer/float literal carries no ownership qualifier
+            // of its own — `:i32`'s only construction syntax is an
+            // ordinary literal in an owned-typed position (language-spec
+            // §3/§4.4's own `let count: i32 = 10;` example), not a
+            // separate `:10` form. So an owned-inline *expected* type
+            // (`Type::Unique(Primitive(_))`) is honored here directly,
+            // the same way an ordinary expected primitive type already
+            // picks the literal's concrete `PrimitiveKind`.
             ExprKind::Literal(Literal::Int(_)) => match expected {
                 Some(Type::Primitive(p)) if p.is_integer() => Type::Primitive(*p),
+                Some(Type::Unique(inner)) if matches!(inner.as_ref(), Type::Primitive(p) if p.is_integer()) => {
+                    Type::Unique(inner.clone())
+                }
                 _ => Type::Primitive(PrimitiveKind::I32),
             },
             ExprKind::Literal(Literal::Float(_)) => match expected {
                 Some(Type::Primitive(p)) if p.is_float() => Type::Primitive(*p),
+                Some(Type::Unique(inner)) if matches!(inner.as_ref(), Type::Primitive(p) if p.is_float()) => {
+                    Type::Unique(inner.clone())
+                }
                 _ => Type::Primitive(PrimitiveKind::F64),
             },
-            ExprKind::Literal(Literal::Bool(_)) => Type::Primitive(PrimitiveKind::Bool),
-            ExprKind::Literal(Literal::Char(_)) => Type::Primitive(PrimitiveKind::Char),
-            ExprKind::Literal(Literal::Str(_)) => Type::String,
+            ExprKind::Literal(Literal::Bool(_)) => match expected {
+                Some(Type::Unique(inner)) if matches!(inner.as_ref(), Type::Primitive(PrimitiveKind::Bool)) => {
+                    Type::Unique(inner.clone())
+                }
+                _ => Type::Primitive(PrimitiveKind::Bool),
+            },
+            ExprKind::Literal(Literal::Char(_)) => match expected {
+                Some(Type::Unique(inner)) if matches!(inner.as_ref(), Type::Primitive(PrimitiveKind::Char)) => {
+                    Type::Unique(inner.clone())
+                }
+                _ => Type::Primitive(PrimitiveKind::Char),
+            },
+            ExprKind::Literal(Literal::Str(_)) => match expected {
+                Some(Type::Unique(inner)) if matches!(inner.as_ref(), Type::String) => {
+                    Type::Unique(inner.clone())
+                }
+                _ => Type::String,
+            },
             ExprKind::Path(path) => self.check_value_path(path, None, expected, None, &[]),
             ExprKind::Tuple(elems) => {
                 let expected_elems = match expected {
@@ -82,6 +111,7 @@ impl Checker<'_> {
                 let generic_args = self.lower_call_generic_args(generic_args);
                 let receiver_ty = self.check_expr(receiver);
                 let receiver_mutable = self.place_root_mutable(receiver);
+                let receiver_local = self.bare_local_of(receiver);
                 self.check_method_call_on(
                     &receiver_ty,
                     method,
@@ -90,6 +120,7 @@ impl Checker<'_> {
                     method.span,
                     Some(expr.id),
                     receiver_mutable,
+                    receiver_local,
                 )
             }
             ExprKind::Field { base, field } => {
@@ -110,7 +141,9 @@ impl Checker<'_> {
                 let cond_ty = self.check_expr(cond);
                 self.require_bool(&cond_ty, cond.span, "`while` condition");
                 self.loop_depth += 1;
-                self.check_block(body);
+                self.check_loop_body_with_fixpoint(|this| {
+                    this.check_block(body);
+                });
                 self.loop_depth -= 1;
                 Type::unit()
             }
@@ -121,7 +154,9 @@ impl Checker<'_> {
             } => self.check_for_in(pattern, iter, body),
             ExprKind::Loop { body } => {
                 self.loop_depth += 1;
-                self.check_block(body);
+                self.check_loop_body_with_fixpoint(|this| {
+                    this.check_block(body);
+                });
                 self.loop_depth -= 1;
                 Type::unit()
             }
@@ -142,7 +177,11 @@ impl Checker<'_> {
             }
             ExprKind::Return(value) => self.check_return(value, expr.span),
             ExprKind::Closure { params, body } => self.check_closure(params, body, expected),
-            ExprKind::StructLit { path, fields } => self.check_struct_lit(path, fields, expected),
+            ExprKind::StructLit {
+                path,
+                fields,
+                owned,
+            } => self.check_struct_lit(path, fields, *owned, expected),
         }
     }
 
@@ -271,6 +310,21 @@ impl Checker<'_> {
             );
         }
         self.check_assign_target_mutable(target);
+        // A fresh value now lives in `target` — a bare-local target's own
+        // prior move (if any) no longer applies (mirrors Rust: overwriting
+        // a moved-from binding makes it live again). Only meaningful for a
+        // bare local, not `dog.field = ...`: fields are never themselves
+        // `Type::Unique` (language-spec §4.2), so `dog` itself was never
+        // marked moved by writing through it in the first place.
+        if let ExprKind::Path(path) = &target.kind {
+            if let Some(res) = self.resolved.path_res.get(&path.id) {
+                if path.segments.len() == 1 {
+                    if let Resolution::Local(id) = res.base {
+                        self.moved.remove(&id);
+                    }
+                }
+            }
+        }
         Type::unit()
     }
 
@@ -344,6 +398,27 @@ impl Checker<'_> {
             };
         }
         current_ty
+    }
+
+    /// `Some(id)` when `expr` is *exactly* a bare single-segment path
+    /// resolving to a local (`dog`, not `dog.name` or `holder.dog`) — the
+    /// only shape a method-call receiver can be for the call to be a move
+    /// candidate at all (see `Checker::check_move`'s docs). Normally
+    /// unreachable from `ExprKind::MethodCall` (the parser folds a bare-
+    /// local-then-call into a multi-segment `Path`, handled directly in
+    /// `check_value_path`), kept here defensively for whichever shapes do
+    /// still reach this node.
+    pub(super) fn bare_local_of(&self, expr: &Expr) -> Option<LocalId> {
+        let ExprKind::Path(path) = &expr.kind else {
+            return None;
+        };
+        if path.segments.len() != 1 {
+            return None;
+        }
+        match self.resolved.path_res.get(&path.id)?.base {
+            Resolution::Local(id) => Some(id),
+            _ => None,
+        }
     }
 
     /// The mutability of `expr`'s root local, or `None` if `expr` isn't a

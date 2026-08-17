@@ -57,7 +57,7 @@ impl PrimitiveKind {
 /// (`docs/architecture/type-system.md`). Deliberately never a string —
 /// every variant here is compared/hashed structurally.
 ///
-/// `Struct`/`TupleStruct`/`Enum`/`Interface` carry a [`DefId`] from
+/// `Struct`/`TupleStruct`/`Enum`/`Trait` carry a [`DefId`] from
 /// `nether_resolver` rather than inventing a separate id space, since one
 /// already exists and identifies the same declarations.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -84,7 +84,7 @@ pub enum Type {
     /// Only ever appears inside a generic bound constraint, never as the
     /// type of a value directly (language-spec §7;
     /// `docs/architecture/type-system.md` §4) — enforced in `check.rs`.
-    Interface(DefId),
+    Trait(DefId),
     /// An unsubstituted generic type parameter, scoped to the item
     /// currently being checked. Monomorphization substitutes a concrete
     /// `Type` for this once a generic item is
@@ -92,6 +92,21 @@ pub enum Type {
     /// call sites (`check.rs`), it does not substitute.
     Generic(Symbol),
     Weak(Box<Type>),
+    /// `:T`/`:t` — the uniquely-owned form of `inner` (language-spec §3).
+    /// Orthogonal to `inner`'s own representation category (heap vs.
+    /// inline, decided by `inner`'s own shape): `Unique(Struct(..))` is
+    /// `:T`, `Unique(Primitive(..))` is `:t`. In Stage 1 this is purely a
+    /// compile-time-checked distinction — [`crate::alloc::alloc_kind`]
+    /// passes straight through to `inner`, so `:T` shares `T`'s ARC
+    /// runtime representation until Stage 2's borrow checker can safely
+    /// skip retain/release once uniqueness is actually enforced.
+    Unique(Box<Type>),
+    /// `:&T` — a shared borrow, always within the unique-ownership domain
+    /// (language-spec §3.1; there is no bare, always-ARC reference form).
+    Ref(Box<Type>),
+    /// `:&mut T` — an exclusive borrow, always within the unique-ownership
+    /// domain (language-spec §3.1).
+    MutRef(Box<Type>),
     /// The type of `return`/`break`/`continue` and other
     /// never-produces-a-value expressions — unifies with any other type
     /// in branch-merging contexts (`if`/`match`), the same technique
@@ -107,6 +122,43 @@ pub enum Type {
 impl Type {
     pub fn unit() -> Type {
         Type::Tuple(Vec::new())
+    }
+
+    /// Strips one layer of `Unique` if present, so field/method resolution
+    /// works uniformly for an owned value (`:Dog`) the same way it already
+    /// does for its ARC counterpart (`Dog`) — language-spec §3 doesn't
+    /// give the owned domain a separate field/member namespace, and Stage
+    /// 1 has no real receiver-domain overload resolution yet (that's a
+    /// later-stage refinement once `: self`/`: &self` overloads need to
+    /// be told apart at a call site). Never recurses — `Type::Unique`
+    /// never wraps another `Unique` (the grammar has no `::T` form).
+    pub fn strip_unique(&self) -> &Type {
+        match self {
+            Type::Unique(inner) => inner,
+            other => other,
+        }
+    }
+
+    /// Like [`Self::strip_unique`], but also peels a single layer of
+    /// `Ref`/`MutRef` — so field/method resolution works the same way
+    /// through a `:&T`/`:&mut T` parameter as it already does through
+    /// `T`/`:T` (Stage 2, slice 2: `:&T`/`:&mut T` share the referent's
+    /// exact runtime representation, a raw pointer with no retain/release,
+    /// same as `:T` already shares `T`'s — see
+    /// `docs/architecture/roadmap.md`).
+    ///
+    /// Peels exactly one layer, not a full chain — `:&&mut T` (`Unique(
+    /// Ref(MutRef(T)))`) needs two calls to fully unwrap. This slice only
+    /// targets `:&T`/`:&mut T` used directly as an ordinary parameter
+    /// type, not arbitrary multi-level reference chains, so one layer is
+    /// what every call site here actually needs; deeper chains remain
+    /// exactly as unsupported for field/method access as before this
+    /// slice.
+    pub fn strip_indirection(&self) -> &Type {
+        match self {
+            Type::Unique(inner) | Type::Ref(inner) | Type::MutRef(inner) => inner,
+            other => other,
+        }
     }
 
     pub fn is_error(&self) -> bool {
@@ -126,7 +178,8 @@ impl Type {
             | Type::TupleStruct(_, args)
             | Type::Tuple(args)
             | Type::Enum(_, args) => args.iter().any(Type::contains_error),
-            Type::Array(inner) | Type::Weak(inner) => inner.contains_error(),
+            Type::Array(inner) | Type::Weak(inner) | Type::Unique(inner) | Type::Ref(inner)
+            | Type::MutRef(inner) => inner.contains_error(),
             Type::Function(params, ret) => {
                 params.iter().any(Type::contains_error) || ret.contains_error()
             }
@@ -143,7 +196,8 @@ impl Type {
             | Type::TupleStruct(_, args)
             | Type::Tuple(args)
             | Type::Enum(_, args) => args.iter().any(Type::contains_generic),
-            Type::Array(inner) | Type::Weak(inner) => inner.contains_generic(),
+            Type::Array(inner) | Type::Weak(inner) | Type::Unique(inner) | Type::Ref(inner)
+            | Type::MutRef(inner) => inner.contains_generic(),
             Type::Function(params, ret) => {
                 params.iter().any(Type::contains_generic) || ret.contains_generic()
             }
@@ -190,6 +244,13 @@ impl Type {
                     && a_params.iter().zip(b_params).all(|(a, b)| a.compatible(b))
                     && a_ret.compatible(b_ret)
             }
+            // No implicit ownership-domain coercion in either direction
+            // (language-spec §9, §23): a `T` value is never `compatible`
+            // with an expected `:T`, and vice versa — only matched shapes
+            // recurse into their inner type.
+            (Type::Unique(a), Type::Unique(b))
+            | (Type::Ref(a), Type::Ref(b))
+            | (Type::MutRef(a), Type::MutRef(b)) => a.compatible(b),
             (_, Type::Weak(inner)) => **inner == *self,
             _ => false,
         }

@@ -7,7 +7,7 @@ fn invalid_program_diagnostics_remain_source_anchored() {
     let entry = dir.join("broken.nr");
     std::fs::write(
         &entry,
-        "fn main() {\n    let value: bool = 1;\n    println(value);\n}\n",
+        "fn main() {\n    let value bool = 1;\n    println(value);\n}\n",
     )
     .unwrap();
     let result = nether_driver::check(&entry).unwrap();
@@ -36,7 +36,7 @@ fn invalid_program_diagnostics_remain_source_anchored() {
 fn compile_options_control_output_optimization_and_linking() {
     let dir = std::env::temp_dir().join(format!("nether_options_test_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let entry = dir.join("main.nt");
+    let entry = dir.join("main.nr");
     let output = dir.join("custom-binary");
     std::fs::write(&entry, "fn main() { println(\"ok\"); }\n").unwrap();
     let options = CompileOptions {
@@ -57,43 +57,36 @@ fn compile_options_control_output_optimization_and_linking() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Stage 1's checked-in examples are deliberately just the one canonical
+/// program (`examples/hello_world/main.nr`, mirroring language-spec.md
+/// §23) rather than the pre-rewrite MVP's larger showcase set
+/// (`shelter`/`metrics`/`adventure`/`some/*`), which used old syntax
+/// throughout and was removed as part of this migration (see
+/// `docs/architecture/roadmap.md`). Restoring a larger example corpus is
+/// future work, not a Stage 1 requirement.
 #[test]
 fn every_checked_in_example_compiles_to_an_object() {
     let examples = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
     let dir = std::env::temp_dir().join(format!("nether_examples_test_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let mut paths = std::fs::read_dir(examples.join("some"))
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "nt"))
-        .collect::<Vec<_>>();
-    paths.extend([
-        examples.join("hello_world/main.nt"),
-        examples.join("shelter/main.nt"),
-        examples.join("metrics/main.nt"),
-        examples.join("adventure/main.nt"),
-    ]);
-    paths.sort();
-    assert_eq!(paths.len(), 8, "expected all checked-in user entry points");
-    for (index, path) in paths.into_iter().enumerate() {
-        let output = dir.join(format!("example_{index}"));
-        let options = CompileOptions {
-            output_path: Some(output),
-            link: false,
-            ..CompileOptions::default()
-        };
-        let result = nether_driver::compile(&path, &options).unwrap();
-        assert!(
-            result
-                .diagnostics
-                .iter()
-                .all(|diagnostic| !diagnostic.is_error()),
-            "{} failed: {:?}",
-            path.display(),
-            result.diagnostics
-        );
-        assert!(result.object_path.is_some());
-    }
+    let path = examples.join("hello_world/main.nr");
+    let output = dir.join("example_0");
+    let options = CompileOptions {
+        output_path: Some(output),
+        link: false,
+        ..CompileOptions::default()
+    };
+    let result = nether_driver::compile(&path, &options).unwrap();
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .all(|diagnostic| !diagnostic.is_error()),
+        "{} failed: {:?}",
+        path.display(),
+        result.diagnostics
+    );
+    assert!(result.object_path.is_some());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -105,45 +98,16 @@ fn larger_example_projects_compile_link_and_run() {
     let dir =
         std::env::temp_dir().join(format!("nether_large_examples_test_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let cases = [
-        (
-            "shelter",
-            concat!(
-                "shelter=North Star\n",
-                "featured=Luna\n",
-                "1. Luna (2)\n",
-                "2. Milo (4)\n",
-                "3. Nova (1)\n",
-                "reserved until Saturday\n",
-                "card: Echo, age 3\n",
-                "no pet selected\n",
-            ),
+    let cases = [(
+        "hello_world",
+        concat!(
+            "Woof, I am Rex!\n",
+            "sum of coordinates: 0\n",
+            "Buddy\n",
+            "count = 3\n",
+            "owned_count checks out\n",
         ),
-        (
-            "metrics",
-            concat!(
-                "count=4, total=20, range=2..8\n",
-                "count=4, total=60, range=6..24\n",
-                "count=3, total=14, range=1..9\n",
-                "counter=11\n",
-                "metrics complete\n",
-                "total=20, max=8\n",
-            ),
-        ),
-        (
-            "adventure",
-            concat!(
-                "hero Arin: hp=20, score=0\n",
-                "active quest: Ancient Gate\n",
-                "A wild shadow approaches Arin\n",
-                "received 6 damage\n",
-                "found treasure worth 12\n",
-                "Arin: hp=14, score=27\n",
-                "quest complete, reward=125\n",
-                "The road continues\n",
-            ),
-        ),
-    ];
+    )];
 
     for (name, expected_stdout) in cases {
         let executable = dir.join(name);
@@ -152,7 +116,7 @@ fn larger_example_projects_compile_link_and_run() {
             link: true,
             ..CompileOptions::default()
         };
-        let result = nether_driver::compile(&examples.join(name).join("main.nt"), &options)
+        let result = nether_driver::compile(&examples.join(name).join("main.nr"), &options)
             .unwrap_or_else(|error| panic!("{name} failed to compile: {error}"));
         assert!(
             result

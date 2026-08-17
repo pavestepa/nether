@@ -66,7 +66,7 @@ use nether_hir::{
     HirCapture, HirExpr, HirExprKind, HirFnId, HirFunction, HirModule, HirParam, HirStmtKind,
 };
 use nether_resolver::DefId;
-use nether_typecheck::Type;
+use nether_typecheck::{ReceiverDomain, Type};
 
 pub use node::{
     MonoCapture, MonoExpr, MonoExprKind, MonoFnId, MonoFunction, MonoMatchArm, MonoModule,

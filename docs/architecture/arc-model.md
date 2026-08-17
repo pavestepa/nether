@@ -64,7 +64,7 @@ Retain(arg_local)
 Call(callee, [arg_local, ...])
 ```
 
-Retain before the call — per spec §13 — and, for a call to another Nether
+Retain before the call — per spec §21 — and, for a call to another Nether
 function, **no matching release after it returns**. This is a correction
 to this document's own original design (caught only by actually running
 generated code against a real allocator, not by inspecting MIR/IR shape:
@@ -100,7 +100,7 @@ and every *other* still-live heap local in the returning scope is released
 as normal (§3.2) before control actually leaves.
 
 **Return Value Optimization (RVO):** if the returned expression is a
-freshly constructed object *directly* in the `return`/tail-expression
+freshly constructed object *directly* in the explicit `return`
 position (a struct literal, a direct call to a function whose own result is
 itself freshly constructed, etc. — i.e., there is no intervening local that
 already holds an independent, retained reference to it), the pass skips the
@@ -154,16 +154,16 @@ storing the replacement.
 ## 4. Worked example
 
 ```
-type Dog { name: String }
+struct Dog { name String }
 
-fn describe(d: Dog): String {
+fn describe(d Dog) String {
     let tag = d.name;   // String is heap-kind
     tag                 // tail expression: returned directly
 }
 
 fn main() {
-    let a = Dog { name: "Rex" };  // fresh construction
-    let msg = describe(a);        // pass a heap value into a call
+    let a = Dog { name = "Rex" };  // fresh construction
+    let msg = describe(a);         // pass a heap value into a call
     println(msg);
 }                                  // scope exit: release `a`, `msg`
 ```

@@ -7,12 +7,32 @@ pub enum AllocKind {
     Stack,
 }
 
-/// Implements language-spec §3.3's heap-vs-stack rule, precisely as
-/// specified in `docs/architecture/type-system.md` §3: PascalCase `type`
-/// declarations (and the built-in `String`/`Array`) are heap/ARC;
-/// camelCase `type` declarations and primitives are stack/value; enums and
-/// tuples are *always* stack/value regardless of name, the one exemption
-/// from the naming rule (kept so `Option`/`Result`/`match` stay zero-cost).
+/// Determines a type's representation category — heap/reference (`T`) vs.
+/// inline/value (`t`), language-spec §3/§4.4.
+///
+/// For a `struct` declaration this is still, as before this rewrite,
+/// determined by the declaration's own casing (PascalCase → heap/ARC,
+/// lowercase → inline) — there is no other signal for a hand-authored
+/// aggregate's representation category, and the language spec's own §25
+/// example (`struct point { x f32, y f32 }`, explicitly inline/`Copy`)
+/// confirms lowercase `struct`s are legal and inline. What Stage 1
+/// actually changes is that this is no longer the *only* thing casing
+/// does: a `type Name = TypeExpr;` alias's casing is instead cross-checked
+/// against its *resolved* target's category rather than determining
+/// anything itself (language-spec §5 — see `crate::casing`), since an
+/// alias could otherwise "lie" about what it names.
+///
+/// Enums and tuples are *always* inline regardless of name, the one
+/// exemption from the naming rule (kept so `Option`/`Result`/`match` stay
+/// zero-cost) — carried forward unchanged from the pre-rewrite compiler
+/// and now also documented as a deliberate carve-out in language-spec §5.
+///
+/// The unique-ownership qualifier (`Type::Unique`) is orthogonal to
+/// representation category and passes straight through to its inner
+/// type's `alloc_kind` — in Stage 1, `:T` shares `T`'s ARC representation
+/// (language-spec §3.2). References (`Type::Ref`/`Type::MutRef`) are
+/// themselves always stack-representable pointers, the same treatment as
+/// `Weak` below.
 pub fn alloc_kind(ty: &Type, defs: &Definitions) -> AllocKind {
     match ty {
         Type::Primitive(_) => AllocKind::Stack,
@@ -31,9 +51,10 @@ pub fn alloc_kind(ty: &Type, defs: &Definitions) -> AllocKind {
         // the same zero-capture representation, keeping first-class calls
         // uniform.
         Type::Function(_, _) => AllocKind::Heap,
-        Type::Weak(_) => AllocKind::Stack,
+        Type::Weak(_) | Type::Ref(_) | Type::MutRef(_) => AllocKind::Stack,
+        Type::Unique(inner) => alloc_kind(inner, defs),
         Type::Generic(_) => AllocKind::Stack, // meaningless before substitution; never queried before monomorphization in practice
-        Type::Interface(_) | Type::Never | Type::Error => AllocKind::Stack,
+        Type::Trait(_) | Type::Never | Type::Error => AllocKind::Stack,
     }
 }
 

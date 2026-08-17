@@ -107,7 +107,11 @@ impl Lowerer<'_> {
                 ty,
             },
             ExprKind::Closure { params, body } => self.lower_closure(params, body, ty),
-            ExprKind::StructLit { path, fields } => self.lower_struct_lit(path, fields, ty),
+            ExprKind::StructLit {
+                path,
+                fields,
+                owned: _,
+            } => self.lower_struct_lit(path, fields, ty),
         }
     }
 

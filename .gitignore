@@ -4,10 +4,4 @@
 *.o
 
 # Native binaries emitted next to the bundled examples.
-/examples/some/enums
-/examples/some/example_2
-/examples/some/first_example
-/examples/some/second_example
-/examples/shelter/main
-/examples/metrics/main
-/examples/adventure/main
+/examples/hello_world/main

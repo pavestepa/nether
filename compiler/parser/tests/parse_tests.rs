@@ -1,11 +1,13 @@
 use nether_ast::{
-    BinaryOp, EnumVariant, Expr, ExprKind, Item, Pattern, SelfParam, Stmt, TypeDeclKind,
+    BinaryOp, EnumVariant, Expr, ExprKind, Item, Pattern, SelfParam, Stmt, StructDeclKind,
 };
 use nether_diagnostics::{Diagnostic, SourceMap};
 use nether_parser::parse_module;
 
 #[path = "parse_tests/expressions.rs"]
 mod expressions;
+#[path = "parse_tests/ownership.rs"]
+mod ownership;
 
 /// Parses `source` and panics (printing every diagnostic) if parsing
 /// produced any — the common case for tests asserting a shape.
@@ -37,7 +39,7 @@ fn render_all(diags: &[Diagnostic], map: &SourceMap) -> String {
 
 #[test]
 fn canonical_spec_example_parses_cleanly() {
-    // language-spec.md §15
+    // language-spec.md §23
     let source = r#"
 use lang.Lang;
 
@@ -47,54 +49,54 @@ fn main() {
     println(a.into_string());
 }
 
-type Lang {
-    name: String
+struct Lang {
+    name String
 }
 
 impl Lang {
-    new(name: String): Lang {
+    new(name String) Lang {
         Lang { name }
     }
 
-    set_name(mut self, new_name: String) {
+    set_name(mut self, new_name String) {
         self.name = new_name;
     }
 }
 
-impl Lang: Into<String> {
-    into_string(self): String {
+impl Lang Into<String> {
+    into_string(self) String {
         `name: ${self.name}`
     }
 }
 
-interface Sound {
-    sound(): String {
+trait Sound {
+    sound() String {
         "..."
     }
 }
 
-impl Lang: Sound {
-    sound(): String {
+impl Lang Sound {
+    sound() String {
         "Woof! Ruff!"
     }
 }
 "#;
     let module = parse_ok(source);
-    // use, fn main, type Lang, impl Lang, impl Lang: Into<String>,
-    // interface Sound, impl Lang: Sound
+    // use, fn main, struct Lang, impl Lang, impl Lang Into<String>,
+    // trait Sound, impl Lang Sound
     assert_eq!(module.items.len(), 7);
     assert!(matches!(module.items[0], Item::Use(_)));
     assert!(matches!(module.items[1], Item::Fn(_)));
-    assert!(matches!(module.items[2], Item::Type(_)));
+    assert!(matches!(module.items[2], Item::Struct(_)));
     assert!(matches!(module.items[3], Item::Impl(_)));
     assert!(matches!(module.items[4], Item::Impl(_)));
-    assert!(matches!(module.items[5], Item::Interface(_)));
+    assert!(matches!(module.items[5], Item::Trait(_)));
     assert!(matches!(module.items[6], Item::Impl(_)));
 
     let Item::Impl(into_string_impl) = &module.items[4] else {
         unreachable!()
     };
-    assert_eq!(into_string_impl.interfaces.len(), 1);
+    assert_eq!(into_string_impl.traits.len(), 1);
 }
 
 #[test]
@@ -140,7 +142,7 @@ fn use_enum_variant_path_parses_with_three_segments() {
 
 #[test]
 fn private_mod_declaration_parses() {
-    // `stdlib/mod.nt` writes its children this way — `private` recorded on
+    // `stdlib/mod.nr` writes its children this way — `private` recorded on
     // `ModDecl` but (like `Field`/`FnDecl` privacy) not yet enforced.
     let module = parse_ok("private mod option;\nmod result;\n");
     let Item::Mod(option) = &module.items[0] else {
@@ -156,33 +158,33 @@ fn private_mod_declaration_parses() {
 
 #[test]
 fn tuple_struct_and_unit_type() {
-    let module = parse_ok("type Point(i32, i32);\ntype EmptyType;\n");
+    let module = parse_ok("struct Point(i32, i32);\nstruct EmptyType;\n");
     assert_eq!(module.items.len(), 2);
-    let Item::Type(point) = &module.items[0] else {
-        panic!("expected TypeDecl")
+    let Item::Struct(point) = &module.items[0] else {
+        panic!("expected StructDecl")
     };
-    assert!(matches!(point.kind, TypeDeclKind::TupleStruct(ref tys) if tys.len() == 2));
-    let Item::Type(empty) = &module.items[1] else {
-        panic!("expected TypeDecl")
+    assert!(matches!(point.kind, StructDeclKind::TupleStruct(ref tys) if tys.len() == 2));
+    let Item::Struct(empty) = &module.items[1] else {
+        panic!("expected StructDecl")
     };
-    assert!(matches!(empty.kind, TypeDeclKind::Unit));
+    assert!(matches!(empty.kind, StructDeclKind::Unit));
 }
 
 #[test]
 fn struct_with_private_field_via_underscore_and_keyword() {
     let module = parse_ok(
         r#"
-type Config {
-    name: String,
-    _secret: String,
-    private token: String
+struct Config {
+    name String,
+    _secret String,
+    private token String
 }
 "#,
     );
-    let Item::Type(decl) = &module.items[0] else {
-        panic!("expected TypeDecl")
+    let Item::Struct(decl) = &module.items[0] else {
+        panic!("expected StructDecl")
     };
-    let TypeDeclKind::Struct(fields) = &decl.kind else {
+    let StructDeclKind::Struct(fields) = &decl.kind else {
         panic!("expected Struct")
     };
     assert!(!fields[0].private);
@@ -221,7 +223,7 @@ enum Result<T, E> {
 
 #[test]
 fn variadic_parameter_parses_as_element_type_with_flag_set() {
-    let module = parse_ok("fn println(args: ...String) {\n}\n");
+    let module = parse_ok("fn println(args ...String) {\n}\n");
     let Item::Fn(f) = &module.items[0] else {
         panic!("expected FnDecl")
     };
@@ -235,7 +237,7 @@ fn variadic_parameter_parses_as_element_type_with_flag_set() {
 
 #[test]
 fn variadic_parameter_must_be_last() {
-    let (_, diags) = parse_with_diagnostics("fn f(args: ...String, x: i32) {}\n");
+    let (_, diags) = parse_with_diagnostics("fn f(args ...String, x i32) {}\n");
     assert!(diags.iter().any(|d| d.message.contains("must be the last")));
 }
 
@@ -251,7 +253,7 @@ fn private_before_a_non_mod_item_reports_a_diagnostic_and_terminates() {
     // same position forever. This test itself hanging (rather than
     // failing) would be exactly that regression.
     let (module, diags) =
-        parse_with_diagnostics("private type printsys: PrintF;\nfn after(): i32 { 1 }\n");
+        parse_with_diagnostics("private struct printsys;\nfn after() i32 { return 1; }\n");
     assert!(diags.iter().any(|d| d.message.contains("Private")));
     // Recovery must still make it to the next real item.
     assert!(module.items.iter().any(|item| matches!(
@@ -262,7 +264,7 @@ fn private_before_a_non_mod_item_reports_a_diagnostic_and_terminates() {
 
 #[test]
 fn generic_bound_on_fn() {
-    let module = parse_ok("fn f<T: Sound>(x: T) {\n    println(x);\n}\n");
+    let module = parse_ok("fn f<T: Sound>(x T) {\n    println(x);\n}\n");
     let Item::Fn(f) = &module.items[0] else {
         panic!("expected FnDecl")
     };
@@ -277,7 +279,7 @@ fn generic_bound_on_fn() {
 #[test]
 fn generic_bound_can_itself_be_generic() {
     // `T: Into<String>` — the bound interface is itself parameterized.
-    let module = parse_ok("fn f<T: Into<String>>(x: T) {\n    println(x);\n}\n");
+    let module = parse_ok("fn f<T: Into<String>>(x T) {\n    println(x);\n}\n");
     let Item::Fn(f) = &module.items[0] else {
         panic!("expected FnDecl")
     };
@@ -298,17 +300,17 @@ fn explicit_generic_impl_block_parses_generics_and_target_args() {
     let module = parse_ok(
         r#"
 impl<T> Option<T> {
-    is_some(self): bool {
+    is_some(self) bool {
         true
     }
 }
 
-type Boxed<T> {
-    value: T
+struct Boxed<T> {
+    value T
 }
 
 impl Boxed {
-    get(self): T {
+    get(self) T {
         self.value
     }
 }
@@ -336,19 +338,19 @@ impl Boxed {
 }
 
 #[test]
-fn interface_default_body_vs_required_method() {
+fn trait_default_body_vs_required_method() {
     let module = parse_ok(
         r#"
-interface Sound {
-    sound(): String {
+trait Sound {
+    sound() String {
         "..."
     }
-    required_method(self): i32;
+    required_method(self) i32;
 }
 "#,
     );
-    let Item::Interface(decl) = &module.items[0] else {
-        panic!("expected InterfaceDecl")
+    let Item::Trait(decl) = &module.items[0] else {
+        panic!("expected TraitDecl")
     };
     assert!(decl.methods[0].body.is_some());
     assert!(decl.methods[1].body.is_none());
@@ -359,7 +361,7 @@ interface Sound {
 fn match_with_dotted_variant_patterns() {
     let module = parse_ok(
         r#"
-fn describe(color: Color) {
+fn describe(color Color) {
     match color {
         Color.Red => println("red"),
         Color.Custom(name) => println(name),
@@ -391,14 +393,14 @@ fn describe(color: Color) {
 fn closure_and_mut_call_argument() {
     let module = parse_ok(
         r#"
-fn increment(mut n: i32) {
+fn increment(n mut i32) {
     n = n + 1;
 }
 
 fn main() {
     let mut x = 4;
     increment(mut x);
-    let add = (a: i32, b: i32) => { a + b };
+    let add = (a i32, b i32) => { a + b };
 }
 "#,
     );

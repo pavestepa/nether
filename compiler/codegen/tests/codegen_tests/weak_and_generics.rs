@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn reading_a_weak_field_calls_weak_upgrade_and_builds_an_option() {
-    // `Option` is an ordinary prelude `enum` now (`stdlib/option.nt`), not
+    // `Option` is an ordinary prelude `enum` now (`stdlib/option.nr`), not
     // a compiler builtin — this crate's `compile` helper resolves a bare
     // parsed `Module` directly (`nether_resolver::resolve`, no driver, no
     // prelude loading), so the test declares its own stand-in with the
@@ -14,17 +14,17 @@ enum Option<T> {
     Some(T),
     None,
 }
-type Child { name: String }
-type Parent { kid: weak Child }
-fn describe(p: Parent): String {
-    match p.kid {
+struct Child { name String }
+struct Parent { kid weak Child }
+fn describe(p Parent) String {
+    return match p.kid {
         Some(c) => c.name,
         None => "none",
-    }
+    };
 }
 fn main() {
-    let c = Child { name: "Rex" };
-    let p = Parent { kid: c };
+    let c = Child { name = "Rex" };
+    let p = Parent { kid = c };
     println(describe(p));
 }
 "#,
@@ -39,11 +39,11 @@ fn main() {
 fn a_heap_structs_own_drop_shim_releases_its_weak_fields_via_weak_release() {
     let (_cg, ir) = compile(
         r#"
-type Child { name: String }
-type Parent { kid: weak Child }
+struct Child { name String }
+struct Parent { kid weak Child }
 fn main() {
-    let c = Child { name: "Rex" };
-    let p = Parent { kid: c };
+    let c = Child { name = "Rex" };
+    let p = Parent { kid = c };
 }
 "#,
     );
@@ -104,15 +104,15 @@ enum Option<T> {
     Some(T),
     None,
 }
-type Child { name: String }
-fn describe(x: Option<Child>): String {
-    match x {
+struct Child { name String }
+fn describe(x Option<Child>) String {
+    return match x {
         Some(c) => c.name,
         None => "none",
-    }
+    };
 }
 fn main() {
-    let c = Child { name: "Rex" };
+    let c = Child { name = "Rex" };
     println(describe(Option.Some(c)));
 }
 "#,
@@ -127,7 +127,7 @@ fn main() {
 fn generic_identity_return_is_concrete_at_codegen() {
     let (_cg, ir) = compile(
         r#"
-fn identity<T>(value: T): T { value }
+fn identity<T>(value T) T { return value; }
 fn main() {
     println(`${identity(42)}`);
     println(`${identity(true)}`);
@@ -144,12 +144,12 @@ fn main() {
 fn custom_into_string_is_used_by_templates_and_variadic_println() {
     let (_cg, ir) = compile(
         r#"
-type Dog { name: String }
-impl Dog: Into<String> {
-    into_string(self): String { self.name }
+struct Dog { name String }
+impl Dog Into<String> {
+    into_string(self) String { return self.name; }
 }
 fn main() {
-    let dog = Dog { name: "Rex" };
+    let dog = Dog { name = "Rex" };
     println("dog: ", dog);
     println(`again: ${dog}`);
 }
@@ -165,8 +165,8 @@ fn main() {
 fn generic_into_string_supports_primitive_and_string_instantiations() {
     let (_cg, ir) = compile(
         r#"
-fn stringify<T: Into<String>>(value: T): String {
-    value.into_string()
+fn stringify<T: Into<String>>(value T) String {
+    return value.into_string();
 }
 fn main() {
     println(stringify(42));
@@ -188,12 +188,12 @@ fn main() {
 fn generic_struct_instantiations_have_concrete_fields_and_layouts() {
     let (_cg, ir) = compile(
         r#"
-type Boxed<T> { value: T }
-type pair<T, U>(T, U);
-fn unbox<T>(value: Boxed<T>): T { value.value }
+struct Boxed<T> { value T }
+struct pair<T, U>(T, U);
+fn unbox<T>(value Boxed<T>) T { return value.value; }
 fn main() {
-    let number = Boxed { value: 42 };
-    let text = Boxed { value: "ready" };
+    let number = Boxed { value = 42 };
+    let text = Boxed { value = "ready" };
     let both = pair(number, text);
     println(unbox(both.0), ": ", unbox(both.1));
 }

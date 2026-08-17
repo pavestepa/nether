@@ -7,7 +7,7 @@ pub(super) struct Lowerer<'a> {
     pub(super) call_generic_args: &'a HashMap<NodeId, Vec<Type>>,
     pub(super) sigs: &'a Signatures,
     pub(super) fn_by_def: &'a HashMap<DefId, HirFnId>,
-    pub(super) methods: &'a HashMap<(DefId, Symbol), MethodFnSet>,
+    pub(super) methods: &'a HashMap<(DefId, Symbol, ReceiverDomain), MethodFnSet>,
     pub(super) locals_map: HashMap<ResolverLocalId, HirLocalId>,
     pub(super) next_local: u32,
     pub(super) generics: HashMap<Symbol, Option<GenericBound>>,
@@ -32,13 +32,57 @@ impl Lowerer<'_> {
         id
     }
 
+    /// `:T`/`t` share `T`'s runtime representation in Stage 1
+    /// (language-spec §3.2) — `Unique` is stripped here, at the boundary
+    /// where HIR reads a `typecheck`-computed `Type` for the first time,
+    /// so it never needs to flow any further: HIR/MIR/codegen's own
+    /// `Type::Struct`/`Type::Primitive`/etc. matches stay exactly as they
+    /// were pre-rewrite, with no `Unique` arm to remember everywhere.
+    /// Only `typecheck` itself needs to see the wrapper, to enforce
+    /// ownership-domain compatibility (assignment/parameter/return
+    /// checking) before this point. `Ref`/`MutRef` are stripped the same
+    /// way as of Stage 2, slice 2 — a `:&T`/`:&mut T` value shares `T`'s
+    /// representation too (a pointer, no retain/release —
+    /// `docs/architecture/roadmap.md`), so `strip_indirection` peels both
+    /// layers `strip_unique` alone would have left one of behind.
     pub(super) fn ty_of(&self, node_id: NodeId) -> Type {
         let ty = self
             .expr_types
             .get(&node_id)
             .cloned()
             .unwrap_or(Type::Error);
-        subst_type(&ty, &self.type_subst)
+        subst_type(ty.strip_indirection(), &self.type_subst)
+    }
+
+    /// A method-call receiver's ownership domain, read directly from
+    /// `expr_types` **without** `ty_of`'s `strip_unique()` — `ty_of` erases
+    /// `Type::Unique` everywhere by design (`:T`/`T` share one runtime
+    /// representation in Stage 1, so nothing downstream needs the
+    /// distinction) except here: which `ReceiverDomain`-keyed method-set
+    /// entry a call resolves to genuinely depends on it, and that
+    /// information doesn't exist anywhere else once a value's type has
+    /// passed through `ty_of`.
+    pub(super) fn receiver_domain_of(&self, node_id: NodeId) -> ReceiverDomain {
+        let ty = self
+            .expr_types
+            .get(&node_id)
+            .cloned()
+            .unwrap_or(Type::Error);
+        ReceiverDomain::of_receiver_ty(&ty)
+    }
+
+    /// [`Self::receiver_domain_of`]'s counterpart for a bare local
+    /// resolved directly as a path's base (`nether_resolver::Resolution::
+    /// Local`, e.g. `owned_dog` in `owned_dog.greet()`) — reads
+    /// `local_types_by_id` directly, bypassing `local_ty`'s stripping,
+    /// for the same reason.
+    pub(super) fn local_domain_of(&self, orig: ResolverLocalId) -> ReceiverDomain {
+        let ty = self
+            .local_types_by_id
+            .get(&orig)
+            .cloned()
+            .unwrap_or(Type::Error);
+        ReceiverDomain::of_receiver_ty(&ty)
     }
 
     pub(super) fn generic_args_for(&self, node_id: NodeId) -> Vec<Type> {
@@ -61,7 +105,7 @@ impl Lowerer<'_> {
             .get(&orig)
             .cloned()
             .unwrap_or(Type::Error);
-        subst_type(&ty, &self.type_subst)
+        subst_type(ty.strip_indirection(), &self.type_subst)
     }
 
     pub(super) fn lower_fn(&mut self, p: &PendingFn, id: HirFnId) -> HirFunction {
@@ -83,10 +127,23 @@ impl Lowerer<'_> {
             // parameter — the callee's own body (and its actual runtime
             // ABI) sees an ordinary `Array<element>` value, matching what
             // `lower_variadic_aware_args` collects at each call site.
+            // `strip_indirection()` here for the same reason as
+            // `Self::ty_of` above: `FnSig.params[].ty` is computed
+            // straight from the AST by `typecheck::lower_type_expr`, a
+            // separate path from `expr_types`/`local_types_by_id` that
+            // `ty_of`/`local_ty` already strip — this is the other place a
+            // raw `Type::Unique`/`Ref`/`MutRef` could otherwise leak into
+            // HIR/MIR/codegen. A `:&T`/`:&mut T` parameter is `Type::Ref`/
+            // `Type::MutRef` directly (never wrapped in an outer `Unique`
+            // — confirmed by the parser: `:&T` parses straight to
+            // `TypeExpr::Ref`, no wrapping `TypeExpr::Unique` node), so
+            // this is the one place a bare (non-`Unique`) `Ref`/`MutRef`
+            // needed stripping that `strip_unique()` alone would have
+            // missed entirely.
             let ty = if param_sig.variadic {
                 Type::Array(Box::new(param_sig.ty.clone()))
             } else {
-                param_sig.ty.clone()
+                param_sig.ty.strip_indirection().clone()
             };
             params.push(HirParam {
                 local,
@@ -105,9 +162,9 @@ impl Lowerer<'_> {
             .map(|orig| self.local_for(*orig));
 
         let body = p.decl.body.as_ref().expect(
-            "standalone fns, impl methods, and inherited interface defaults always have a body",
+            "standalone fns, impl methods, and inherited trait defaults always have a body",
         );
-        let body_hir = self.lower_block_as_expr(body);
+        let body_hir = self.lower_fn_body(body);
 
         HirFunction {
             id,
@@ -129,8 +186,28 @@ impl Lowerer<'_> {
             self_local,
             generics: p.sig.generics.clone(),
             params,
-            ret: p.sig.ret.clone(),
+            ret: p.sig.ret.strip_indirection().clone(),
             body: body_hir,
+        }
+    }
+
+    /// Lowers the outermost function/method block with explicit-return-only
+    /// semantics. Ordinary block expressions keep their tail value; here the
+    /// syntactic tail becomes a discarded expression statement.
+    fn lower_fn_body(&mut self, block: &Block) -> HirExpr {
+        let (mut stmts, tail) = self.lower_block(block);
+        if let Some(tail) = tail {
+            stmts.push(HirStmt {
+                kind: HirStmtKind::Expr(*tail),
+            });
+        }
+        let diverges = stmts.iter().any(|stmt| match &stmt.kind {
+            HirStmtKind::Expr(expr) => matches!(expr.ty, Type::Never),
+            HirStmtKind::Let { value, .. } => matches!(value.ty, Type::Never),
+        });
+        HirExpr {
+            kind: HirExprKind::Block(stmts, None),
+            ty: if diverges { Type::Never } else { Type::unit() },
         }
     }
 

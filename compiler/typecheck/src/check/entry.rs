@@ -13,17 +13,18 @@ pub fn check(module: &Module, resolved: &ResolvedNames) -> (TypedTables, Vec<Dia
     build_type_shapes(&decls, resolved, &mut sigs, &mut diagnostics);
     build_enum_sigs(module, resolved, &decls, &mut sigs, &mut diagnostics);
     build_fn_sigs(module, resolved, &decls, &mut sigs, &mut diagnostics);
-    let interface_methods =
-        build_interface_method_table(&decls, resolved, &mut sigs, &mut diagnostics);
+    let trait_methods =
+        build_trait_method_table(&decls, resolved, &mut sigs, &mut diagnostics);
     build_impl_methods(
         module,
         resolved,
         &decls,
-        &interface_methods,
+        &trait_methods,
         &mut sigs,
         &mut diagnostics,
     );
     validate_finite_value_layouts(resolved, &decls, &sigs, &mut diagnostics);
+    validate_alias_casing(module, resolved, &decls, &mut diagnostics);
 
     let mut expr_types = HashMap::new();
     let mut local_types = HashMap::new();
@@ -61,7 +62,8 @@ pub fn check(module: &Module, resolved: &ResolvedNames) -> (TypedTables, Vec<Dia
                 if let Some(owner) = resolved.definitions.lookup_in(b.span.file, &b.target.name) {
                     let self_ty = owner_as_type(owner, resolved, &decls);
                     for m in &b.methods {
-                        if let Some(sig) = sigs.method(owner, &m.name.name).cloned() {
+                        let domain = ReceiverDomain::of_self_param(m.self_param.as_ref());
+                        if let Some(sig) = sigs.method(owner, &m.name.name, domain).cloned() {
                             let mut checker = Checker::new(
                                 resolved,
                                 &sigs,
@@ -76,19 +78,19 @@ pub fn check(module: &Module, resolved: &ResolvedNames) -> (TypedTables, Vec<Dia
                     }
                 }
             }
-            Item::Interface(i) => {
+            Item::Trait(i) => {
                 if let Some(id) = resolved.definitions.lookup_in(i.span.file, &i.name.name) {
                     for m in &i.methods {
                         if m.body.is_none() {
                             continue;
                         }
-                        if let Some(method) = interface_methods
+                        if let Some(method) = trait_methods
                             .get(&id)
                             .and_then(|ms| ms.get(&m.name.name))
                             .cloned()
                         {
                             let mut checking_sig = method.sig;
-                            let interface_generics = i.generics.iter().map(|generic| {
+                            let trait_generics = i.generics.iter().map(|generic| {
                                 (
                                     generic.name.name.clone(),
                                     generic.bound.as_ref().and_then(|bound| {
@@ -101,7 +103,7 @@ pub fn check(module: &Module, resolved: &ResolvedNames) -> (TypedTables, Vec<Dia
                                     }),
                                 )
                             });
-                            checking_sig.generics.splice(0..0, interface_generics);
+                            checking_sig.generics.splice(0..0, trait_generics);
                             let mut checker = Checker::new(
                                 resolved,
                                 &sigs,
@@ -111,12 +113,13 @@ pub fn check(module: &Module, resolved: &ResolvedNames) -> (TypedTables, Vec<Dia
                                 &mut call_generic_args,
                                 &mut diagnostics,
                             );
-                            checker.check_fn_decl(m, &checking_sig, Some(Type::Interface(id)));
+                            checker.check_fn_decl(m, &checking_sig, Some(Type::Trait(id)));
                         }
                     }
                 }
             }
-            Item::Type(_) | Item::Enum(_) | Item::Use(_) | Item::Mod(_) => {}
+            Item::Struct(_) | Item::Enum(_) | Item::Use(_) | Item::Mod(_) | Item::TypeAlias(_) => {
+            }
         }
     }
 
@@ -178,9 +181,12 @@ pub(super) fn describe_type(ty: &Type, resolved: &ResolvedNames) -> String {
                 .join(", "),
             describe_type(ret, resolved)
         ),
-        Type::Interface(id) => resolved.definitions.get(*id).name.to_string(),
+        Type::Trait(id) => resolved.definitions.get(*id).name.to_string(),
         Type::Generic(name) => name.to_string(),
         Type::Weak(inner) => format!("weak {}", describe_type(inner, resolved)),
+        Type::Unique(inner) => format!(":{}", describe_type(inner, resolved)),
+        Type::Ref(inner) => format!(":&{}", describe_type(inner, resolved)),
+        Type::MutRef(inner) => format!(":&mut {}", describe_type(inner, resolved)),
         Type::Never => "!".to_string(),
         Type::Error => "<error>".to_string(),
     }
@@ -203,6 +209,9 @@ pub(super) fn substitute_generic(ty: &Type, subst: &HashMap<Symbol, Type>) -> Ty
         ),
         Type::Array(inner) => Type::Array(Box::new(substitute_generic(inner, subst))),
         Type::Weak(inner) => Type::Weak(Box::new(substitute_generic(inner, subst))),
+        Type::Unique(inner) => Type::Unique(Box::new(substitute_generic(inner, subst))),
+        Type::Ref(inner) => Type::Ref(Box::new(substitute_generic(inner, subst))),
+        Type::MutRef(inner) => Type::MutRef(Box::new(substitute_generic(inner, subst))),
         Type::Tuple(elems) => {
             Type::Tuple(elems.iter().map(|e| substitute_generic(e, subst)).collect())
         }
@@ -235,7 +244,11 @@ pub(super) fn collect_generic_bindings(
                 subst.insert(name.clone(), actual.clone());
             }
         }
-        (Type::Array(a), Type::Array(b)) | (Type::Weak(a), Type::Weak(b)) => {
+        (Type::Array(a), Type::Array(b))
+        | (Type::Weak(a), Type::Weak(b))
+        | (Type::Unique(a), Type::Unique(b))
+        | (Type::Ref(a), Type::Ref(b))
+        | (Type::MutRef(a), Type::MutRef(b)) => {
             collect_generic_bindings(a, b, subst);
         }
         (Type::Tuple(a), Type::Tuple(b))

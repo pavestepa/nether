@@ -1,12 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
 use nether_ast::{
-    BinaryOp, Block, Expr, ExprKind, FieldAccessor, FnDecl, Ident, InterfaceDecl, Item, Literal,
+    BinaryOp, Block, Expr, ExprKind, FieldAccessor, FnDecl, Ident, TraitDecl, Item, Literal,
     MatchArm, Module, NodeId, Param, Path, Pattern, Stmt, Symbol, TemplatePart,
 };
 use nether_resolver::{DefId, LocalId as ResolverLocalId, Resolution, ResolvedNames};
 use nether_typecheck::{
-    FnSig, GenericBound, PrimitiveKind, Signatures, Type, TypeShape, TypedTables,
+    FnSig, GenericBound, PrimitiveKind, ReceiverDomain, Signatures, Type, TypeShape, TypedTables,
 };
 
 use crate::node::{
@@ -62,12 +62,12 @@ pub fn lower(module: &Module, resolved: &ResolvedNames, tables: TypedTables) -> 
     // thing that ever actually dereferences this.
     let array_owner = resolved.definitions.lookup(&Symbol::new("Array"));
 
-    let interface_decls = index_interfaces(module, resolved);
-    let pending = collect_pending_fns(module, resolved, &signatures, &interface_decls);
+    let trait_decls = index_traits(module, resolved);
+    let pending = collect_pending_fns(module, resolved, &signatures, &trait_decls);
 
     let mut fn_by_name = HashMap::new();
     let mut fn_by_def = HashMap::new();
-    let mut methods: HashMap<(DefId, Symbol), MethodFnSet> = HashMap::new();
+    let mut methods: HashMap<(DefId, Symbol, ReceiverDomain), MethodFnSet> = HashMap::new();
     for (i, p) in pending.iter().enumerate() {
         let id = HirFnId(i as u32);
         match p.owner {
@@ -78,7 +78,8 @@ pub fn lower(module: &Module, resolved: &ResolvedNames, tables: TypedTables) -> 
                 }
             }
             Some(owner) => {
-                let set = methods.entry((owner, p.name.clone())).or_default();
+                let domain = ReceiverDomain::of_self_param(p.sig.self_param.as_ref());
+                let set = methods.entry((owner, p.name.clone(), domain)).or_default();
                 match &p.specialization {
                     None => set.generic = Some(id),
                     Some(args) => set.specializations.push((args.clone(), id)),
@@ -118,13 +119,13 @@ pub fn lower(module: &Module, resolved: &ResolvedNames, tables: TypedTables) -> 
     }
 }
 
-fn index_interfaces<'a>(
+fn index_traits<'a>(
     module: &'a Module,
     resolved: &ResolvedNames,
-) -> HashMap<DefId, &'a InterfaceDecl> {
+) -> HashMap<DefId, &'a TraitDecl> {
     let mut map = HashMap::new();
     for item in &module.items {
-        if let Item::Interface(i) = item {
+        if let Item::Trait(i) = item {
             if let Some(id) = resolved.definitions.lookup_in(i.span.file, &i.name.name) {
                 map.insert(id, i);
             }
@@ -228,8 +229,8 @@ fn subst_type(ty: &Type, subst: &HashMap<Symbol, Type>) -> Type {
 
 /// One function/method still to be lowered, with its already-built
 /// [`FnSig`] and a reference to the AST node supplying its body — which,
-/// for an inherited interface default (not overridden by an `impl`), is
-/// the interface's own [`FnDecl`], not anything in the `impl` block.
+/// for an inherited trait default (not overridden by an `impl`), is
+/// the trait's own [`FnDecl`], not anything in the `impl` block.
 struct PendingFn<'a> {
     name: Symbol,
     def_id: Option<DefId>,
@@ -242,7 +243,7 @@ struct PendingFn<'a> {
     /// `Signatures::impl_specializations`, read once per `impl` block
     /// rather than re-derived, so this crate never re-lowers a
     /// `TypeExpr` itself. Always `None` for a standalone `fn` or an
-    /// inherited interface default (specialization is scoped to plain
+    /// inherited trait default (specialization is scoped to plain
     /// instance methods — see `nether_typecheck::sig::MethodSet`).
     specialization: Option<Vec<Type>>,
 }
@@ -251,7 +252,7 @@ fn collect_pending_fns<'a>(
     module: &'a Module,
     resolved: &ResolvedNames,
     sigs: &Signatures,
-    interface_decls: &HashMap<DefId, &'a InterfaceDecl>,
+    trait_decls: &HashMap<DefId, &'a TraitDecl>,
 ) -> Vec<PendingFn<'a>> {
     let mut pending = Vec::new();
     for item in &module.items {
@@ -278,7 +279,8 @@ fn collect_pending_fns<'a>(
                 };
                 let specialization = sigs.impl_specializations.get(&b.id);
                 for m in &b.methods {
-                    let Some(set) = sigs.methods.get(&(owner, m.name.name.clone())) else {
+                    let domain = ReceiverDomain::of_self_param(m.self_param.as_ref());
+                    let Some(set) = sigs.methods.get(&(owner, m.name.name.clone(), domain)) else {
                         continue;
                     };
                     let sig = match specialization {
@@ -306,17 +308,21 @@ fn collect_pending_fns<'a>(
     }
 
     let mut defaults: Vec<_> = sigs.default_method_sources.iter().collect();
-    defaults.sort_by_key(|((owner, name), _)| {
-        (resolved.definitions.get(*owner).name.clone(), name.clone())
+    defaults.sort_by_key(|((owner, name, domain), _)| {
+        (
+            resolved.definitions.get(*owner).name.clone(),
+            name.clone(),
+            *domain as u8,
+        )
     });
-    for ((owner, name), source) in defaults {
-        let Some(decl) = interface_decls
+    for ((owner, name, domain), source) in defaults {
+        let Some(decl) = trait_decls
             .get(source)
-            .and_then(|interface| interface.methods.iter().find(|m| m.name.name == *name))
+            .and_then(|trait_decl| trait_decl.methods.iter().find(|m| m.name.name == *name))
         else {
             continue;
         };
-        let Some(sig) = sigs.method(*owner, name).cloned() else {
+        let Some(sig) = sigs.method(*owner, name, *domain).cloned() else {
             continue;
         };
         pending.push(PendingFn {
@@ -327,7 +333,7 @@ fn collect_pending_fns<'a>(
             sig,
             type_subst: sigs
                 .default_method_substitutions
-                .get(&(*owner, name.clone()))
+                .get(&(*owner, name.clone(), *domain))
                 .cloned()
                 .unwrap_or_default(),
             specialization: None,

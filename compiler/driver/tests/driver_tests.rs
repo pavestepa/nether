@@ -45,28 +45,28 @@ fn a_full_program_compiles_links_and_runs_with_the_expected_output() {
     std::fs::write(
         &path,
         r#"
-type Dog {
-    name: String
+struct Dog {
+    name String
 }
 
 impl Dog {
-    new(name: String): Dog {
-        Dog { name }
+    new(name String) Dog {
+        return Dog { name };
     }
 
-    set_name(mut self, new_name: String) {
+    set_name(mut self, new_name String) {
         self.name = new_name;
     }
 }
 
-impl Dog: Into<String> {
-    into_string(self): String {
-        `name: ${self.name}`
+impl Dog Into<String> {
+    into_string(self) String {
+        return `name: ${self.name}`;
     }
 }
 
-fn explicit<T>(value: i32): i32 {
-    value
+fn explicit<T>(value i32) i32 {
+    return value;
 }
 
 fn main() {
@@ -122,10 +122,10 @@ fn local_modules_compile_link_and_run() {
     std::fs::write(
         &module_path,
         r#"
-type Lang { name: String }
+struct Lang { name String }
 impl Lang {
-    new(name: String): Lang { Lang { name } }
-    greeting(self): String { `hello ${self.name}` }
+    new(name String) Lang { return Lang { name }; }
+    greeting(self) String { return `hello ${self.name}`; }
 }
 "#,
     )
@@ -171,24 +171,24 @@ fn modules_keep_private_top_level_names_separate() {
     ));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
-        dir.join("alpha.nt"),
+        dir.join("alpha.nr"),
         r#"
-type Item { text: String }
-fn helper(): String { Item { text: "alpha" }.text }
-fn from_alpha(): String { helper() }
+struct Item { text String }
+fn helper() String { return Item { text = "alpha" }.text; }
+fn from_alpha() String { return helper(); }
 "#,
     )
     .unwrap();
     std::fs::write(
-        dir.join("beta.nt"),
+        dir.join("beta.nr"),
         r#"
-type Item { value: String }
-fn helper(): String { Item { value: "beta" }.value }
-fn from_beta(): String { helper() }
+struct Item { value String }
+fn helper() String { return Item { value = "beta" }.value; }
+fn from_beta() String { return helper(); }
 "#,
     )
     .unwrap();
-    let entry = dir.join("main.nt");
+    let entry = dir.join("main.nr");
     std::fs::write(
         &entry,
         r#"
@@ -225,7 +225,7 @@ fn rust_style_mod_files_relative_roots_and_cross_module_impls_run() {
     ensure_runtime_built();
     let dir = std::env::temp_dir().join(format!("nether_rust_modules_test_{}", std::process::id()));
     std::fs::create_dir_all(dir.join("labels")).unwrap();
-    let entry = dir.join("main.nt");
+    let entry = dir.join("main.nr");
     std::fs::write(
         &entry,
         r#"
@@ -233,12 +233,12 @@ mod impl_into_i32;
 mod labels;
 use self.labels.label;
 
-type Cat { name: String }
+struct Cat { name String }
 impl Cat {
-    new(name: String): Cat { Cat { name } }
+    new(name String) Cat { return Cat { name }; }
 }
-impl Cat: Into<String> {
-    into_string(self): String { self.name }
+impl Cat Into<String> {
+    into_string(self) String { return self.name; }
 }
 
 fn main() {
@@ -250,20 +250,20 @@ fn main() {
     )
     .unwrap();
     std::fs::write(
-        dir.join("impl_into_i32.nt"),
+        dir.join("impl_into_i32.nr"),
         r#"
 use super.Cat;
 impl Cat {
-    into_i32(self): i32 { 1 }
+    into_i32(self) i32 { return 1; }
 }
 "#,
     )
     .unwrap();
     std::fs::write(
-        dir.join("labels/mod.nt"),
+        dir.join("labels/mod.nr"),
         r#"
 use crate.Cat;
-fn label(cat: Cat): String { cat.name }
+fn label(cat Cat) String { return cat.name; }
 "#,
     )
     .unwrap();
@@ -289,7 +289,7 @@ fn label(cat: Cat): String { cat.name }
 fn missing_mod_file_is_a_source_anchored_diagnostic() {
     let dir = std::env::temp_dir().join(format!("nether_missing_mod_test_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let entry = dir.join("main.nt");
+    let entry = dir.join("main.nr");
     std::fs::write(&entry, "mod absent;\nfn main() {}\n").unwrap();
     let result = nether_driver::check(&entry).unwrap();
     let diagnostic = result
@@ -312,8 +312,8 @@ fn bundled_option_and_result_stdlib_runs_end_to_end() {
     std::fs::create_dir_all(&dir).unwrap();
     let entry = dir.join("main.nr");
     // `Option.unwrap_or`/`.map` and `Result.unwrap_or`/`.map` both come
-    // from the bundled prelude (`stdlib/mod.nt` always loads
-    // `stdlib/option.nt`/`stdlib/result.nt`, which declare them with the
+    // from the bundled prelude (`stdlib/mod.nr` always loads
+    // `stdlib/option.nr`/`stdlib/result.nr`, which declare them with the
     // explicit `impl<T> Option<T> { ... }`/`impl<T, E> Result<T, E> {
     // ... }` form — the only way to bind a type parameter for a builtin
     // owner with no local declaration) — no `use`/`impl` of their own
@@ -322,10 +322,10 @@ fn bundled_option_and_result_stdlib_runs_end_to_end() {
         &entry,
         r#"
 fn main() {
-    let mapped = Option.Some(4).map((x: i32) => { x + 1 });
+    let mapped = Option.Some(4).map((x i32) => { x + 1 });
     println(`${mapped.unwrap_or(0)}`);
-    let ok: Result<i32, String> = Result.Ok(6);
-    println(`${ok.map((x: i32) => { x + 1 }).unwrap_or(0)}`);
+    let ok Result<i32, String> = Result.Ok(6);
+    println(`${ok.map((x i32) => { x + 1 }).unwrap_or(0)}`);
 }
 "#,
     )
@@ -349,7 +349,7 @@ fn main() {
 
 #[test]
 fn bare_enum_variant_names_from_use_module_enum_variant_run_end_to_end() {
-    // `stdlib/mod.nt` writes `use option.Option.Some;` / `use
+    // `stdlib/mod.nr` writes `use option.Option.Some;` / `use
     // option.Option.None;` / `use result.Result.Ok;` / `use
     // result.Result.Error;` — a 3-segment `use module.Enum.Variant;`
     // path reaching one level into an enum for one of its variants,
@@ -364,20 +364,20 @@ fn bare_enum_variant_names_from_use_module_enum_variant_run_end_to_end() {
     std::fs::write(
         &entry,
         r#"
-fn describe(x: Option<i32>): String {
-    match x {
+fn describe(x Option<i32>) String {
+    return match x {
         Some(v) => `got ${v}`,
         None => "nothing",
-    }
+    };
 }
 
 fn main() {
     let a = Some(4);
-    let b: Option<i32> = None;
+    let b Option<i32> = None;
     println(describe(a));
     println(describe(b));
 
-    let r: Result<i32, String> = Ok(7);
+    let r Result<i32, String> = Ok(7);
     match r {
         Ok(v) => println(`ok ${v}`),
         Error(e) => println(`err ${e}`),
@@ -411,8 +411,8 @@ fn use_enum_variant_path_rejects_an_unknown_module_member() {
     let dir =
         std::env::temp_dir().join(format!("nether_variant_bad_member_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("helper.nt"), "enum Color { Red, Green }\n").unwrap();
-    let entry = dir.join("main.nt");
+    std::fs::write(dir.join("helper.nr"), "enum Color { Red, Green }\n").unwrap();
+    let entry = dir.join("main.nr");
     std::fs::write(
         &entry,
         "mod helper;\nuse self.helper.Bogus.Thing;\nfn main() {}\n",
@@ -435,8 +435,8 @@ fn use_enum_variant_path_rejects_an_unknown_variant() {
     let dir =
         std::env::temp_dir().join(format!("nether_variant_bad_variant_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("helper.nt"), "enum Color { Red, Green }\n").unwrap();
-    let entry = dir.join("main.nt");
+    std::fs::write(dir.join("helper.nr"), "enum Color { Red, Green }\n").unwrap();
+    let entry = dir.join("main.nr");
     std::fs::write(
         &entry,
         "mod helper;\nuse self.helper.Color.Purple;\nfn main() {}\n",
@@ -458,8 +458,8 @@ fn use_enum_variant_path_rejects_an_unknown_variant() {
 fn use_enum_variant_path_rejects_a_non_enum_target() {
     let dir = std::env::temp_dir().join(format!("nether_variant_not_enum_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("helper.nt"), "type Shape;\n").unwrap();
-    let entry = dir.join("main.nt");
+    std::fs::write(dir.join("helper.nr"), "struct Shape;\n").unwrap();
+    let entry = dir.join("main.nr");
     std::fs::write(
         &entry,
         "mod helper;\nuse self.helper.Shape.Thing;\nfn main() {}\n",

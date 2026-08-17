@@ -44,7 +44,7 @@ fn find_fn<'a>(functions: &'a [MirFunction], name: &str) -> &'a MirFunction {
 /// enough for these tests' single-path (no branching) function bodies,
 /// where block order matches execution order.
 fn all_instrs(f: &MirFunction) -> Vec<&Instr> {
-    f.blocks.iter().flat_map(|b| &b.instrs).collect()
+    return f.blocks.iter().flat_map(|b| &b.instrs).collect();
 }
 
 fn retain_release_shape(f: &MirFunction) -> Vec<&'static str> {
@@ -64,9 +64,9 @@ fn retain_release_shape(f: &MirFunction) -> Vec<&'static str> {
 fn every_block_has_exactly_one_terminator() {
     let functions = build(
         r#"
-type Dog { name: String }
+struct Dog { name String }
 fn main() {
-    let d = Dog { name: "Rex" };
+    let d = Dog { name = "Rex" };
     if d.name == "Rex" {
         println("yes");
     } else {
@@ -98,7 +98,7 @@ fn explicit_early_return_with_no_tail_expression_terminates_correctly() {
     // `Return`.
     let functions = build(
         r#"
-fn foo(a: i32): i32 {
+fn foo(a i32) i32 {
     return a;
 }
 fn main() {
@@ -122,6 +122,16 @@ fn main() {
 }
 
 #[test]
+fn unit_function_discards_its_syntactic_tail() {
+    let functions = build("fn main() { 42 }");
+    let main = find_fn(&functions, "main");
+    assert!(main
+        .blocks
+        .iter()
+        .any(|block| matches!(block.terminator, Terminator::Return(Operand::Unit))));
+}
+
+#[test]
 fn struct_field_read_binds_a_new_local_with_a_retain_and_the_parameter_is_released_at_scope_exit() {
     // Mirrors arc-model.md's worked `describe` example exactly: a field
     // read binds a new local (retained once, §3.1); returning that local
@@ -129,13 +139,13 @@ fn struct_field_read_binds_a_new_local_with_a_retain_and_the_parameter_is_releas
     // §3.4); the parameter still gets released at scope exit (§3.2).
     let functions = build(
         r#"
-type Dog { name: String }
-fn describe(d: Dog): String {
+struct Dog { name String }
+fn describe(d Dog) String {
     let tag = d.name;
-    tag
+    return tag;
 }
 fn main() {
-    let a = Dog { name: "Rex" };
+    let a = Dog { name = "Rex" };
     let msg = describe(a);
     println(msg);
 }
@@ -190,10 +200,10 @@ fn call_argument_is_retained_before_the_call_and_released_by_the_callees_own_sco
     // allocator, not by inspecting MIR/IR shape alone).
     let functions = build(
         r#"
-type Dog { name: String }
-fn describe(d: Dog): String { d.name }
+struct Dog { name String }
+fn describe(d Dog) String { return d.name; }
 fn main() {
-    let a = Dog { name: "Rex" };
+    let a = Dog { name = "Rex" };
     let msg = describe(a);
     println(a.name);
     println(msg);
@@ -233,8 +243,8 @@ fn fresh_construction_returned_directly_gets_no_retain_or_release() {
     // with no intermediate `let` at all.
     let functions = build(
         r#"
-type Dog { name: String }
-fn make(): Dog { Dog { name: "Rex" } }
+struct Dog { name String }
+fn make() Dog { return Dog { name = "Rex" }; }
 fn main() {
     let d = make();
 }
@@ -259,10 +269,10 @@ fn fresh_construction_bound_to_a_let_then_returned_also_gets_no_retain_or_releas
     // contradiction of the doc's own precise, testable example).
     let functions = build(
         r#"
-type Dog { name: String }
-fn make(): Dog {
-    let d = Dog { name: "Rex" };
-    d
+struct Dog { name String }
+fn make() Dog {
+    let d = Dog { name = "Rex" };
+    return d;
 }
 fn main() {
     let d = make();
@@ -294,10 +304,10 @@ fn returning_a_parameter_directly_needs_neither_retain_nor_release() {
     // `nether_mir::arc`'s module docs.)
     let functions = build(
         r#"
-type Dog { name: String }
-fn identity(d: Dog): Dog { d }
+struct Dog { name String }
+fn identity(d Dog) Dog { return d; }
 fn main() {
-    let a = Dog { name: "Rex" };
+    let a = Dog { name = "Rex" };
     let b = identity(a);
 }
 "#,
@@ -325,14 +335,14 @@ fn main() {
 fn field_store_retains_the_new_value_and_releases_the_old_one() {
     let functions = build(
         r#"
-type Dog { name: String }
+struct Dog { name String }
 impl Dog {
-    set_name(mut self, new_name: String) {
+    set_name(mut self, new_name String) {
         self.name = new_name;
     }
 }
 fn main() {
-    let mut d = Dog { name: "Rex" };
+    let mut d = Dog { name = "Rex" };
     d.set_name("Buddy");
 }
 "#,
@@ -368,10 +378,10 @@ fn constructing_a_struct_from_an_existing_local_retains_the_field_value() {
     // `lower_expr`, skipping this retain entirely.
     let functions = build(
         r#"
-fn make(name: String): Dog {
-    Dog { name }
+fn make(name String) Dog {
+    return Dog { name };
 }
-type Dog { name: String }
+struct Dog { name String }
 fn main() {
     let d = make("Rex");
     println(d.name);

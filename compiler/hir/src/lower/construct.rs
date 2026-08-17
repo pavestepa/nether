@@ -125,13 +125,16 @@ impl Lowerer<'_> {
                 kind: HirExprKind::ToString(Box::new(expr)),
             },
             Type::Struct(owner, _) | Type::TupleStruct(owner, _) | Type::Enum(owner, _) => {
-                // `into_string` is always `Into<String>`'s interface
-                // method — never specialized (interfaces are rejected on
+                // `into_string` is always `Into<String>`'s trait
+                // method — never specialized (traits are rejected on
                 // a concrete-specialization `impl` block), so `.generic`
                 // alone is authoritative.
+                // `Into<String>` is always an ARC-domain (`self`) method in
+                // every current usage — owned-domain `Into<String>` isn't
+                // part of the language yet.
                 match self
                     .methods
-                    .get(&(*owner, Symbol::new("into_string")))
+                    .get(&(*owner, Symbol::new("into_string"), ReceiverDomain::Arc))
                     .and_then(|set| set.generic)
                 {
                     Some(fn_id) => HirExpr {
@@ -153,9 +156,12 @@ impl Lowerer<'_> {
                     ty: Type::String,
                     kind: HirExprKind::CallGenericMethod {
                         receiver: Box::new(expr),
-                        bound_interface: bound.interface,
+                        bound_trait: bound.trait_id,
                         method_name: Symbol::new("into_string"),
                         is_static: false,
+                        // `Into<String>` is always ARC-domain today, same
+                        // reasoning as the concrete-owner case above.
+                        domain: ReceiverDomain::Arc,
                         generic_args: Vec::new(),
                         args: Vec::new(),
                     },

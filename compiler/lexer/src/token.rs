@@ -10,8 +10,9 @@ pub enum Keyword {
     Let,
     Mut,
     Type,
+    Struct,
     Impl,
-    Interface,
+    Trait,
     Enum,
     Fn,
     SelfLower,
@@ -38,8 +39,9 @@ pub fn keyword_from_str(s: &str) -> Option<Keyword> {
         "let" => Keyword::Let,
         "mut" => Keyword::Mut,
         "type" => Keyword::Type,
+        "struct" => Keyword::Struct,
         "impl" => Keyword::Impl,
-        "interface" => Keyword::Interface,
+        "trait" => Keyword::Trait,
         "enum" => Keyword::Enum,
         "fn" => Keyword::Fn,
         "self" => Keyword::SelfLower,
@@ -90,6 +92,10 @@ pub enum Punct {
     Gt,
     Ge,
     Bang,
+    /// `&` — reference-chain types in the unique-ownership domain
+    /// (`:&T`, `:&mut T`; language-spec §3.1). Always reached after a
+    /// leading `:` — there is no bare, always-ARC reference form.
+    Amp,
     AmpAmp,
     PipePipe,
     /// `=>` — closure bodies (language-spec §11) and match arms (§9).

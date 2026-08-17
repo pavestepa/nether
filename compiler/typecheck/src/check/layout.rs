@@ -28,7 +28,7 @@ pub(super) fn owner_as_type(id: DefId, resolved: &ResolvedNames, decls: &DeclInd
     match resolved.definitions.get(id).kind {
         DefKind::Enum => Type::Enum(id, args),
         _ => match decls.type_decls.get(&id).map(|t| &t.kind) {
-            Some(TypeDeclKind::TupleStruct(_)) => Type::TupleStruct(id, args),
+            Some(StructDeclKind::TupleStruct(_)) => Type::TupleStruct(id, args),
             _ => Type::Struct(id, args),
         },
     }
@@ -38,7 +38,7 @@ pub(super) fn owner_as_type(id: DefId, resolved: &ResolvedNames, decls: &DeclInd
 /// already-resolved owner-generics list instead of re-reading a
 /// declaration. The only way to get a non-empty owner's type for a
 /// declaration-less builtin (`Option`, `Result`) under an explicit
-/// `impl<T> Option<T>: SomeInterface { ... }` block.
+/// `impl<T> Option<T>: SomeTrait { ... }` block.
 pub(super) fn owner_as_type_from_generics(
     id: DefId,
     resolved: &ResolvedNames,
@@ -57,7 +57,7 @@ pub(super) fn owner_as_type_from_generics(
     match resolved.definitions.get(id).kind {
         DefKind::Enum => Type::Enum(id, args),
         _ => match decls.type_decls.get(&id).map(|t| &t.kind) {
-            Some(TypeDeclKind::TupleStruct(_)) => Type::TupleStruct(id, args),
+            Some(StructDeclKind::TupleStruct(_)) => Type::TupleStruct(id, args),
             _ => Type::Struct(id, args),
         },
     }
@@ -147,13 +147,19 @@ pub(super) fn value_layout_reaches_cycle(
         Type::Tuple(items) => items
             .iter()
             .any(|item| value_layout_reaches_cycle(item, resolved, sigs, stack)),
+        // `:T`/`:t` share their inner type's layout (Stage 1, language-spec
+        // §3.2 — no distinct unique-inline representation yet), so a
+        // recursive owned-inline field is exactly as cyclic as a bare one.
+        Type::Unique(inner) => value_layout_reaches_cycle(inner, resolved, sigs, stack),
         // These all provide an indirection or have a fixed scalar layout.
         Type::Array(_)
         | Type::String
         | Type::Function(_, _)
         | Type::Weak(_)
+        | Type::Ref(_)
+        | Type::MutRef(_)
         | Type::Primitive(_)
-        | Type::Interface(_)
+        | Type::Trait(_)
         | Type::Generic(_)
         | Type::Never
         | Type::Error => false,

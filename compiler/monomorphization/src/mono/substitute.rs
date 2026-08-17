@@ -84,6 +84,7 @@ impl Mono<'_> {
                 receiver,
                 method_name,
                 is_static,
+                domain,
                 generic_args,
                 args,
                 ..
@@ -98,6 +99,7 @@ impl Mono<'_> {
                     receiver,
                     method_name,
                     *is_static,
+                    *domain,
                     args,
                     &generic_args,
                     ty.clone(),
@@ -106,6 +108,7 @@ impl Mono<'_> {
             HirExprKind::CallMethod {
                 receiver,
                 method_name,
+                domain,
                 generic_args,
                 args,
             } => {
@@ -119,6 +122,7 @@ impl Mono<'_> {
                     receiver,
                     method_name,
                     false,
+                    *domain,
                     args,
                     &generic_args,
                     ty.clone(),
@@ -305,17 +309,32 @@ impl Mono<'_> {
 
     /// `receiver`/`args` are already substituted; only the target method
     /// still needs resolving now that `receiver.ty` is concrete.
+    ///
+    /// `domain` (meaningless when `is_static`) must come from the caller,
+    /// not be re-derived from `receiver.ty` here: `receiver.ty` traces
+    /// back to the receiver `HirExpr`'s own `.ty`, which `hir::lower`'s
+    /// `ty_of` already stripped `Type::Unique` from by the time this
+    /// crate ever sees it — see `nether_hir::Lowerer::receiver_domain_of`,
+    /// which is where `domain` was actually computed, before that
+    /// stripping happened.
     pub(super) fn resolve_generic_method_call(
         &mut self,
         receiver: MonoExpr,
         method_name: &Symbol,
         is_static: bool,
+        domain: ReceiverDomain,
         args: Vec<MonoExpr>,
         generic_args: &[Type],
         result_ty: Type,
     ) -> MonoExprKind {
+        let receiver_domain = if is_static {
+            ReceiverDomain::Static
+        } else {
+            domain
+        };
+        let receiver_stripped_ty = receiver.ty.strip_unique();
         if !is_static && method_name.as_str() == "into_string" && args.is_empty() {
-            match &receiver.ty {
+            match receiver_stripped_ty {
                 Type::Primitive(_) => return MonoExprKind::ToString(Box::new(receiver)),
                 Type::String => return receiver.kind,
                 _ => {}
@@ -335,7 +354,7 @@ impl Mono<'_> {
         // (`nether_hir::MethodFnSet::for_args`; mirrors `nether_typecheck`
         // picking the same override at typecheck time whenever the
         // receiver was already concrete there too).
-        let receiver_owner_args: &[Type] = match &receiver.ty {
+        let receiver_owner_args: &[Type] = match receiver_stripped_ty {
             Type::Struct(_, args) | Type::TupleStruct(_, args) | Type::Enum(_, args) => args,
             Type::Array(elem) => std::slice::from_ref(elem.as_ref()),
             _ => &[],
@@ -343,7 +362,7 @@ impl Mono<'_> {
         let target_hir_id = self
             .hir
             .methods
-            .get(&(owner, method_name.clone()))
+            .get(&(owner, method_name.clone(), receiver_domain))
             .and_then(|set| set.for_args(receiver_owner_args))
             .unwrap_or_else(|| panic!("monomorphization: no impl of method `{method_name}` found for the substituted receiver type (typecheck should have rejected this earlier)"));
         let mut target_generic_args = receiver_owner_args.to_vec();

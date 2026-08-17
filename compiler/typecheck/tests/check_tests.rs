@@ -1,15 +1,25 @@
 use nether_diagnostics::{Diagnostic, SourceMap};
 use nether_typecheck::check;
 
+#[path = "check_tests/borrows.rs"]
+mod borrows;
+#[path = "check_tests/casing.rs"]
+mod casing;
 #[path = "check_tests/expressions.rs"]
 mod expressions;
 #[path = "check_tests/generics.rs"]
 mod generics;
+#[path = "check_tests/moves.rs"]
+mod moves;
+#[path = "check_tests/self_overloads.rs"]
+mod self_overloads;
+#[path = "check_tests/to_conversion.rs"]
+mod to_conversion;
 #[path = "check_tests/variadics_and_layout.rs"]
 mod variadics_and_layout;
 
 /// `Option`/`Result`/`Array` are ordinary prelude declarations now
-/// (`stdlib/option.nt`/`result.nt`/`array.nt`), not compiler builtins —
+/// (`stdlib/option.nr`/`result.nt`/`array.nt`), not compiler builtins —
 /// `check_source` resolves a bare, self-contained `Module` directly
 /// (`nether_resolver::resolve`, no driver, no prelude loading), so every
 /// test source is prepended with a stand-in declaration to keep every
@@ -26,7 +36,7 @@ enum Result<T, E> {
     Ok(T),
     Error(E),
 }
-type Array<T>;
+struct Array<T>;
 "#;
 
 fn check_source(source: &str) -> Vec<Diagnostic> {
@@ -86,35 +96,35 @@ fn main() {
     println(a.into_string());
 }
 
-type Lang {
-    name: String
+struct Lang {
+    name String
 }
 
 impl Lang {
-    new(name: String): Lang {
-        Lang { name }
+    new(name String) Lang {
+        return Lang { name };
     }
 
-    set_name(mut self, new_name: String) {
+    set_name(mut self, new_name String) {
         self.name = new_name;
     }
 }
 
-impl Lang: Into<String> {
-    into_string(self): String {
-        `name: ${self.name}`
+impl Lang Into<String> {
+    into_string(self) String {
+        return `name: ${self.name}`;
     }
 }
 
-interface Sound {
-    sound(): String {
-        "..."
+trait Sound {
+    sound() String {
+        return "...";
     }
 }
 
-impl Lang: Sound {
-    sound(): String {
-        "Woof! Ruff!"
+impl Lang Sound {
+    sound() String {
+        return "Woof! Ruff!";
     }
 }
 "#,
@@ -123,13 +133,13 @@ impl Lang: Sound {
 
 #[test]
 fn let_infers_type_from_initializer() {
-    assert_ok("fn main() { let x = 5; let y: i32 = x; }");
+    assert_ok("fn main() { let x = 5; let y i32 = x; }");
 }
 
 #[test]
 fn let_annotation_mismatch_reports_diagnostic() {
     assert_err(
-        "fn main() { let x: bool = 5; }",
+        "fn main() { let x bool = 5; }",
         "expected `bool`, found `i32`",
     );
 }
@@ -138,7 +148,7 @@ fn let_annotation_mismatch_reports_diagnostic() {
 fn mut_param_requires_mut_at_call_site() {
     assert_err(
         r#"
-fn inc(mut n: i32) { n = n + 1; }
+fn inc(n mut i32) { n = n + 1; }
 fn main() {
     let x = 4;
     inc(x);
@@ -152,7 +162,7 @@ fn main() {
 fn mut_arg_on_non_mut_param_is_rejected() {
     assert_err(
         r#"
-fn show(n: i32) { println(n); }
+fn show(n i32) { println(n); }
 fn main() {
     let mut x = 4;
     show(mut x);
@@ -166,7 +176,7 @@ fn main() {
 fn mut_call_site_succeeds_with_mut_binding() {
     assert_ok(
         r#"
-fn inc(mut n: i32) { n = n + 1; }
+fn inc(n mut i32) { n = n + 1; }
 fn main() {
     let mut x = 4;
     inc(mut x);
@@ -179,7 +189,7 @@ fn main() {
 fn mut_call_site_rejects_immutable_binding() {
     assert_err(
         r#"
-fn inc(mut n: i32) { n = n + 1; }
+fn inc(n mut i32) { n = n + 1; }
 fn main() {
     let x = 4;
     inc(mut x);
@@ -193,13 +203,13 @@ fn main() {
 fn static_and_instance_method_calls_type_check() {
     assert_ok(
         r#"
-type Dog { name: String }
+struct Dog { name String }
 impl Dog {
-    new(name: String): Dog {
-        Dog { name }
+    new(name String) Dog {
+        return Dog { name };
     }
-    greet(self): String {
-        self.name
+    greet(self) String {
+        return self.name;
     }
 }
 fn main() {
@@ -214,9 +224,9 @@ fn main() {
 fn calling_instance_method_as_static_is_rejected() {
     assert_err(
         r#"
-type Dog { name: String }
+struct Dog { name String }
 impl Dog {
-    greet(self): String { self.name }
+    greet(self) String { return self.name; }
 }
 fn main() {
     let g = Dog.greet();
@@ -230,18 +240,18 @@ fn main() {
 fn struct_literal_checks_missing_and_unknown_fields() {
     assert_err(
         r#"
-type Dog { name: String, age: i32 }
+struct Dog { name String, age i32 }
 fn main() {
-    let d = Dog { name: "Rex" };
+    let d = Dog { name = "Rex" };
 }
 "#,
         "missing field `age`",
     );
     assert_err(
         r#"
-type Dog { name: String }
+struct Dog { name String }
 fn main() {
-    let d = Dog { name: "Rex", nickname: "Rexy" };
+    let d = Dog { name = "Rex", nickname = "Rexy" };
 }
 "#,
         "has no field named `nickname`",
@@ -252,9 +262,9 @@ fn main() {
 fn struct_literal_field_type_mismatch_reported() {
     assert_err(
         r#"
-type Dog { name: String }
+struct Dog { name String }
 fn main() {
-    let d = Dog { name: 5 };
+    let d = Dog { name = 5 };
 }
 "#,
         "found `i32`",
@@ -263,13 +273,13 @@ fn main() {
 
 #[test]
 fn tuple_struct_construction_checks_arity_and_types() {
-    assert_ok("type Point(i32, i32);\nfn main() { let p = Point(1, 2); }");
+    assert_ok("struct Point(i32, i32);\nfn main() { let p = Point(1, 2); }");
     assert_err(
-        "type Point(i32, i32);\nfn main() { let p = Point(1); }",
+        "struct Point(i32, i32);\nfn main() { let p = Point(1); }",
         "expected 2 argument(s), found 1",
     );
     assert_err(
-        "type Point(i32, i32);\nfn main() { let p = Point(1, \"x\"); }",
+        "struct Point(i32, i32);\nfn main() { let p = Point(1, \"x\"); }",
         "found `String`",
     );
 }
@@ -279,7 +289,7 @@ fn enum_match_exhaustiveness_is_checked() {
     assert_err(
         r#"
 enum Color { Red, Green, Blue }
-fn f(c: Color) {
+fn f(c Color) {
     match c {
         Color.Red => 1,
         Color.Green => 2,
@@ -291,7 +301,7 @@ fn f(c: Color) {
     assert_ok(
         r#"
 enum Color { Red, Green, Blue }
-fn f(c: Color) {
+fn f(c Color) {
     match c {
         Color.Red => 1,
         Color.Green => 2,
@@ -303,7 +313,7 @@ fn f(c: Color) {
     assert_ok(
         r#"
 enum Color { Red, Green, Blue }
-fn f(c: Color) {
+fn f(c Color) {
     match c {
         Color.Red => 1,
         _ => 0,
@@ -314,7 +324,7 @@ fn f(c: Color) {
     assert_err(
         r#"
 enum Maybe { Some(i32), None }
-fn f(value: Maybe): i32 {
+fn f(value Maybe) i32 {
     match value {
         Maybe.Some(x) => x,
     }
@@ -349,7 +359,7 @@ fn f() {
 fn invalid_patterns_are_rejected_before_mir_lowering() {
     assert_err(
         r#"
-fn f(value: bool): i32 {
+fn f(value bool) i32 {
     match value {
         1 => 1,
         _ => 0,
@@ -360,7 +370,7 @@ fn f(value: bool): i32 {
     );
     assert_err(
         r#"
-fn f(value: i32): i32 {
+fn f(value i32) i32 {
     match value {
         (x, y) => x,
         _ => 0,
@@ -371,7 +381,7 @@ fn f(value: i32): i32 {
     );
     assert_err(
         r#"
-fn f(value: (i32, bool)): i32 {
+fn f(value (i32, bool)) i32 {
     match value {
         (x,) => x,
         _ => 0,
@@ -384,7 +394,7 @@ fn f(value: (i32, bool)): i32 {
         r#"
 enum Left { Item(i32) }
 enum Right { Item2(i32) }
-fn f(value: Left): i32 {
+fn f(value Left) i32 {
     match value {
         Right.Item2(x) => x,
         _ => 0,
@@ -396,7 +406,7 @@ fn f(value: Left): i32 {
     assert_err(
         r#"
 enum Maybe { Some(i32), None }
-fn f(value: Maybe): i32 {
+fn f(value Maybe) i32 {
     match value {
         Maybe.Some => 1,
         _ => 0,
@@ -411,27 +421,27 @@ fn f(value: Maybe): i32 {
 fn generic_bound_satisfied_and_unsatisfied() {
     assert_ok(
         r#"
-interface Sound { sound(): String { "..." } }
-type Dog { name: String }
-impl Dog: Sound { sound(): String { "Woof" } }
-fn make_noise<T: Sound>(x: T): String {
-    x.sound()
+trait Sound { sound() String { return "..."; } }
+struct Dog { name String }
+impl Dog Sound { sound() String { return "Woof"; } }
+fn make_noise<T: Sound>(x T) String {
+    return x.sound();
 }
 fn main() {
-    let d = Dog { name: "Rex" };
+    let d = Dog { name = "Rex" };
     make_noise(d);
 }
 "#,
     );
     assert_err(
         r#"
-interface Sound { sound(): String { "..." } }
-type Rock { weight: i32 }
-fn make_noise<T: Sound>(x: T): String {
-    x.sound()
+trait Sound { sound() String { return "..."; } }
+struct Rock { weight i32 }
+fn make_noise<T: Sound>(x T) String {
+    return x.sound();
 }
 fn main() {
-    let r = Rock { weight: 1 };
+    let r = Rock { weight = 1 };
     make_noise(r);
 }
 "#,
@@ -443,11 +453,11 @@ fn main() {
 fn option_unit_variant_uses_context_and_never_leaks_an_unknown_type() {
     assert_ok(
         r#"
-fn none(): Option<i32> {
-    Option.None
+fn none() Option<i32> {
+    return Option.None;
 }
 fn main() {
-    let direct: Option<i32> = Option.None;
+    let direct Option<i32> = Option.None;
     let conditional = if true { Option.None } else { Option.Some(1) };
 }
 "#,
@@ -462,14 +472,14 @@ fn main() {
 fn generic_calls_require_every_parameter_to_be_inferred() {
     assert_err(
         r#"
-fn opaque<T>(value: i32): i32 { value }
+fn opaque<T>(value i32) i32 { return value; }
 fn main() { opaque(1); }
 "#,
         "cannot infer generic parameter `T`",
     );
     assert_err(
         r#"
-fn identity<T>(value: T): T { value }
+fn identity<T>(value T) T { return value; }
 fn main() { let f = identity; }
 "#,
         "generic function `identity` cannot be used as a value",

@@ -68,6 +68,7 @@ fn find_expr<'a>(expr: &'a MonoExpr, pred: &dyn Fn(&MonoExprKind) -> bool) -> Op
         MonoExprKind::Assign { target, value } => {
             find_expr(target, pred).or_else(|| find_expr(value, pred))
         }
+        MonoExprKind::Return(value) => value.as_ref().and_then(|value| find_expr(value, pred)),
         _ => None,
     }
 }
@@ -126,6 +127,11 @@ fn all_calls(module: &MonoModule, from: MonoFnId, out: &mut Vec<MonoFnId>) {
                 walk(lhs, out);
                 walk(rhs, out);
             }
+            MonoExprKind::Return(value) => {
+                if let Some(value) = value {
+                    walk(value, out);
+                }
+            }
             _ => {}
         }
     }
@@ -144,23 +150,23 @@ fn main() {
     println(a.into_string());
 }
 
-type Lang {
-    name: String
+struct Lang {
+    name String
 }
 
 impl Lang {
-    new(name: String): Lang {
-        Lang { name }
+    new(name String) Lang {
+        return Lang { name };
     }
 
-    set_name(mut self, new_name: String) {
+    set_name(mut self, new_name String) {
         self.name = new_name;
     }
 }
 
-impl Lang: Into<String> {
-    into_string(self): String {
-        `name: ${self.name}`
+impl Lang Into<String> {
+    into_string(self) String {
+        return `name: ${self.name}`;
     }
 }
 "#,
@@ -179,8 +185,8 @@ impl Lang: Into<String> {
 fn unreachable_function_is_excluded_from_mono_module() {
     let mono = mono_source(
         r#"
-fn used(): i32 { 1 }
-fn unused(): i32 { 2 }
+fn used() i32 { return 1; }
+fn unused() i32 { return 2; }
 fn main() { let x = used(); }
 "#,
     );
@@ -195,7 +201,7 @@ fn main() { let x = used(); }
 fn shared_non_generic_call_is_instantiated_only_once() {
     let mono = mono_source(
         r#"
-fn helper(): i32 { 1 }
+fn helper() i32 { return 1; }
 fn main() {
     let a = helper();
     let b = helper();
@@ -217,7 +223,7 @@ fn main() {
 fn generic_function_gets_a_distinct_instantiation_per_concrete_type() {
     let mono = mono_source(
         r#"
-fn identity<T>(x: T): T { x }
+fn identity<T>(x T) T { return x; }
 fn main() {
     let a = identity(1);
     let b = identity(true);
@@ -239,7 +245,7 @@ fn main() {
 fn generic_function_called_twice_with_same_type_is_instantiated_once() {
     let mono = mono_source(
         r#"
-fn identity<T>(x: T): T { x }
+fn identity<T>(x T) T { return x; }
 fn main() {
     let a = identity(1);
     let b = identity(2);
@@ -261,7 +267,7 @@ fn main() {
 fn no_generic_types_remain_after_monomorphization() {
     let mono = mono_source(
         r#"
-fn identity<T>(x: T): T { x }
+fn identity<T>(x T) T { return x; }
 fn main() {
     let a = identity(1);
 }
@@ -285,22 +291,22 @@ fn main() {
 fn generic_method_call_resolves_to_the_concrete_impls_call_static() {
     let mono = mono_source(
         r#"
-interface Sound {
-    sound(self): String {
-        "..."
+trait Sound {
+    sound(self) String {
+        return "...";
     }
 }
-type Dog { name: String }
-type Cat: Sound { name: String }
-impl Dog: Sound {
-    sound(self): String { "Woof" }
+struct Dog { name String }
+struct Cat Sound { name String }
+impl Dog Sound {
+    sound(self) String { return "Woof"; }
 }
-fn make_noise<T: Sound>(x: T): String {
-    x.sound()
+fn make_noise<T: Sound>(x T) String {
+    return x.sound();
 }
 fn main() {
-    let d = Dog { name: "Rex" };
-    let c = Cat { name: "Tom" };
+    let d = Dog { name = "Rex" };
+    let c = Cat { name = "Tom" };
     let a = make_noise(d);
     let b = make_noise(c);
 }
@@ -362,13 +368,13 @@ fn main() {
 fn generic_static_method_call_does_not_pass_the_receiver() {
     let mono = mono_source(
         r#"
-interface Static { value(): String; }
-type Animal;
-impl Animal: Static {
-    value(): String { "A" }
+trait Static { value() String; }
+struct Animal;
+impl Animal Static {
+    value() String { return "A"; }
 }
-fn read<T: Static>(animal: T): String {
-    animal.value()
+fn read<T: Static>(animal T) String {
+    return animal.value();
 }
 fn main() {
     let value = read(Animal);
@@ -394,7 +400,7 @@ fn main() {
 fn explicit_arguments_create_distinct_uninferable_instantiations() {
     let mono = mono_source(
         r#"
-fn opaque<T>(value: i32): i32 { value }
+fn opaque<T>(value i32) i32 { return value; }
 fn main() {
     let first = opaque<u32>(1);
     let second = opaque<String>(2);
@@ -413,18 +419,18 @@ fn main() {
 fn explicit_method_arguments_survive_generic_receiver_dispatch() {
     let mono = mono_source(
         r#"
-interface Transform {
-    transform<U>(self, value: U): U;
+trait Transform {
+    transform<U>(self, value U) U;
 }
-type Boxed<T> { value: T }
-impl Boxed: Transform {
-    transform<U>(self, value: U): U { value }
+struct Boxed<T> { value T }
+impl Boxed Transform {
+    transform<U>(self, value U) U { return value; }
 }
-fn apply<T: Transform>(value: T): String {
-    value.transform<String>("ready")
+fn apply<T: Transform>(value T) String {
+    return value.transform<String>("ready");
 }
 fn main() {
-    let result = apply(Boxed { value: 1 });
+    let result = apply(Boxed { value = 1 });
 }
 "#,
     );

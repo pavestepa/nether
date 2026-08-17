@@ -101,6 +101,6 @@ fn main() -> ExitCode {
 
 fn print_usage() {
     eprintln!(
-        "usage: nether <check|build|ast> <file.nt> [--target <triple>] [-O0|-O1|-O2|-O3] [-o <path>] [--emit-object]"
+        "usage: nether <check|build|ast> <file.nr> [--target <triple>] [-O0|-O1|-O2|-O3] [-o <path>] [--emit-object]"
     );
 }

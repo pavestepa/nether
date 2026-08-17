@@ -4,9 +4,9 @@ use super::*;
 fn assigning_into_a_weak_field_does_not_desugar_the_target() {
     let hir = lower_source(
         r#"
-type Child { name: String }
-type Parent { kid: weak Child }
-fn set_kid(mut p: Parent, c: Child) {
+struct Child { name String }
+struct Parent { kid weak Child }
+fn set_kid(p mut Parent, c Child) {
     p.kid = c;
 }
 fn main() {}
@@ -76,23 +76,23 @@ fn main() {
 }
 
 #[test]
-fn inherited_interface_default_gets_a_distinct_hir_fn_per_owner() {
+fn inherited_trait_default_gets_a_distinct_hir_fn_per_owner() {
     let hir = lower_source(
         r#"
-interface Sound {
-    sound(): String {
-        "..."
+trait Sound {
+    sound() String {
+        return "...";
     }
 }
-type Dog: Sound { name: String }
-type Cat: Sound { name: String }
+struct Dog Sound { name String }
+struct Cat Sound { name String }
 "#,
     );
     // Confirm two distinct HirFnIds exist for `sound`, one per owner.
     let sound_ids: Vec<_> = hir
         .methods
         .iter()
-        .filter(|((_, name), _)| name.as_str() == "sound")
+        .filter(|((_, name, _), _)| name.as_str() == "sound")
         .map(|(_, set)| set.generic.unwrap())
         .collect();
     assert_eq!(
@@ -107,12 +107,12 @@ type Cat: Sound { name: String }
 fn generic_bound_method_call_becomes_call_generic_method() {
     let hir = lower_source(
         r#"
-interface Sound {
-    sound(): String {
-        "..."
+trait Sound {
+    sound() String {
+        return "...";
     }
 }
-fn make_noise<T: Sound>(x: T) {
+fn make_noise<T: Sound>(x T) {
     println(x.sound());
 }
 "#,
@@ -132,10 +132,10 @@ fn make_noise<T: Sound>(x: T) {
 fn static_method_called_through_value_does_not_receive_self() {
     let hir = lower_source(
         r#"
-type Animal { name: String }
+struct Animal { name String }
 impl Animal {
-    new(name: String): Animal { Animal { name } }
-    static_method(): String { "A" }
+    new(name String) Animal { return Animal { name }; }
+    static_method() String { return "A"; }
 }
 fn main() {
     let animal = Animal.new("Cat");
@@ -146,7 +146,7 @@ fn main() {
     let static_id = hir
         .methods
         .iter()
-        .find(|((_, name), _)| name.as_str() == "static_method")
+        .find(|((_, name, _), _)| name.as_str() == "static_method")
         .and_then(|(_, set)| set.generic)
         .unwrap();
     let call = find_expr(
@@ -157,21 +157,23 @@ fn main() {
 }
 
 #[test]
-fn inherited_parent_default_is_lowered_for_declared_interface() {
+fn inherited_parent_default_is_lowered_for_declared_trait() {
     let hir = lower_source(
         r#"
-interface Parent {
-    sound(self): String { "parent" }
+trait Parent {
+    sound(self) String { return "parent"; }
 }
-interface Child: Parent {}
-type Animal: Child { name: String }
+trait Child Parent {}
+struct Animal Child { name String }
 fn main() {
-    Animal { name: "Cat" }.sound();
+    Animal { name = "Cat" }.sound();
 }
 "#,
     );
     assert!(
-        hir.methods.keys().any(|(_, name)| name.as_str() == "sound"),
+        hir.methods
+            .keys()
+            .any(|(_, name, _)| name.as_str() == "sound"),
         "the parent default should be copied to Animal"
     );
 }

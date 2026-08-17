@@ -1,90 +1,232 @@
-# The Nether Language — Reference (MVP)
+# The Nether Language — Canonical Reference
 
-Status: **resolved draft** — this document is the single source of truth for
-the language. It supersedes any earlier scratch notes or example files
-(including anything under a `.nr`/`.nt` file predating this document, and any
-notes from outside this repository). Where an example elsewhere in the repo
-disagrees with this document, this document wins.
+Status: **canonical spec** — this document is the single source of truth for
+the Nether language as a whole. It supersedes every earlier specification,
+memory model, syntax experiment, ownership design, and example file that
+predates it, including anything under a stray `.nt` file. Where an example
+elsewhere in the repo disagrees with this document, this document wins.
+
+This document describes the **full target language**, not only what is
+implemented today. Every section below is marked with its implementation
+status:
+
+- **[Stage 1]** — implemented now.
+- **[not yet implemented — Stage N]** — syntax/semantics are specified here
+  so the whole language is coherent on paper, but the compiler does not
+  implement this yet; `N` names the stage in
+  [`../architecture/roadmap.md`](../architecture/roadmap.md) expected to add
+  it.
+- **[current behavior, unchanged by Stage 1]** — this area of the language
+  keeps its pre-rewrite MVP syntax/semantics for now; it is not part of the
+  new ownership model and has not been touched by this rewrite. It will be
+  revisited in a later stage.
 
 This is not a tutorial. It is written the way a language reference is
 written: one section per concept, precise enough that the parser, resolver,
-and type checker can each be implemented directly from it without guessing.
+and type checker can each be implemented directly from it.
 
 ---
 
 ## 1. Design summary
 
-Nether looks like Rust at a distance, but makes different foundational
-choices:
+Nether combines Rust-like static typing and traits with Swift-like ARC
+reference semantics and Rust-like unique ownership, in one coherent type
+system — not one or the other.
 
-| Concern | Rust | Nether |
-|---|---|---|
-| Memory management | ownership + borrow checker | ARC (automatic reference counting) |
-| Polymorphism | traits + optional dynamic dispatch | interfaces, static dispatch only |
-| Generics | monomorphization | monomorphization |
-| Concurrency | threads + async | none (single-threaded, synchronous) |
-| Unsafe code | `unsafe` blocks, raw pointers | none — no raw pointers, no unsafe |
+| Concern | Nether |
+|---|---|
+| Memory management | **both** ARC (for `T`) and unique ownership + borrow checking (for `:T`) — the programmer chooses per type/binding, not the language globally. Move checking (use-after-move/double-move) is enforced as of Stage 2; the rest of borrow checking (`:&T`/`:&mut T` exclusivity, references escaping via return position) is not yet |
+| Polymorphism | traits, static dispatch by default; existential (`any Trait`) and opaque (`some Trait`) types for the rest |
+| Generics | monomorphized in release builds; witness-table/dictionary dispatch in development builds *(dev-mode witness tables: not yet implemented — Stage 3+; Stage 1 stays always-monomorphized)* |
+| Concurrency | async/await over a Tokio-backed runtime, plus raw OS threads *(not yet implemented — Stage 4)* |
+| Unsafe code | explicit `unsafe`, raw pointers, C ABI FFI *(not yet implemented — Stage 5)* |
+| Lifetimes | no explicit lifetime syntax; internally inferred origins power borrow checking *(region/origin inference not yet implemented — Stage 2, remainder; move checking itself needs none of this — see §3)* |
 
-Everything below assumes: no ownership system, no borrow checker, no async,
-no multithreading, no macros, no reflection, no garbage collector. These are
-permanent MVP constraints, not omissions to fill in later.
+Everything below assumes these are the only permanent design constraints:
+no explicit lifetime syntax, no `dyn` keyword, no `::` path separator.
+Rust-style implicit tail-expression function returns are rejected (§8.3),
+so non-unit functions require an explicit `return`. Everything
+else in the "not yet implemented" column above is a staging decision, not
+a design decision — see the roadmap.
 
 ---
 
 ## 2. Lexical structure
 
-### 2.1 Comments
+### 2.1 File extension **[Stage 1]**
+
+Nether source files use exactly the `.nr` extension. The legacy `.nt`
+extension used during early development is rejected with a diagnostic
+explaining how to migrate (rename the file). The package manifest is
+`Nether.toml` — a TOML file, not a `.nr` source file *(package manifest
+itself: not yet implemented — Stage 6)*.
+
+### 2.2 Comments **[current behavior, unchanged by Stage 1]**
 
 ```
 // line comment
 /// doc comment (attaches to the following item)
 ```
 
-Block comments are not part of the MVP grammar (only line comments and doc
-comments — kept intentionally minimal; block comments are a possible future
-extension, see §14).
+Block comments (`/* ... */`) remain a documented future extension, not yet
+part of the grammar.
 
-### 2.2 Identifiers and casing
+### 2.3 Identifiers and casing **[Stage 1 changes the mechanism, not the convention]**
 
-Identifiers are ASCII `[A-Za-z_][A-Za-z0-9_]*`. Casing is not merely a style
-convention in Nether — it is **load-bearing grammar** that the type checker
-reads to decide allocation strategy (see §3.3). This is a deliberate
-divergence from Rust, where casing is only a lint.
+Identifiers are ASCII `[A-Za-z_][A-Za-z0-9_]*`. Casing is still
+load-bearing, but its role has changed from the pre-rewrite MVP:
 
-### 2.3 Literals
+- **Before this rewrite:** a type declaration's casing directly *determined*
+  whether it was heap/ARC or stack/inline — casing was the allocation
+  mechanism itself.
+- **As of Stage 1:** allocation category is determined by how a type is
+  actually defined (a `struct`/heap type vs. a primitive/inline type) and by
+  the explicit ownership sigil (§4) at each use site. Casing becomes a
+  **validated naming convention**, checked against a type's *resolved*
+  representation category — see §8.
 
-- Integers: `123`, `0`. Suffixes are inferred from context (expected type),
-  not written (no `123i32` suffix syntax in the MVP).
+### 2.4 Literals **[current behavior, unchanged by Stage 1]**
+
+- Integers: `123`, `0`.
 - Floats: `1.0`, `0.5`.
 - Booleans: `true`, `false`.
-- Char: `'a'` — a single Unicode scalar value.
-- Plain string: `"text"` — no interpolation is scanned inside a plain
-  string. `\n`, `\t`, `\\`, `\"` escapes are recognized.
-- Template string: `` `text ${expr} text` `` — the lexer scans for `${` and
-  emits an interpolation segment; everything else is literal text, with the
-  same escapes as a plain string. **These are two distinct token kinds at
-  the lexer level**, not one string kind with optional interpolation. This
-  was chosen over a single always-interpolating `"..."` form so that:
-  - the common case (a plain string) never pays for interpolation scanning,
-  - interpolation is visually explicit at the call site,
-  - it matches the existing example corpus (`first_example.nr`).
-- Arrays: `[]` (empty), `[1, 2, 3]` (literal elements).
+- Char: `'a'`.
+- Plain string: `"text"`.
+- Template string: `` `text ${expr} text` `` — interpolation via `${...}`,
+  multiline supported, the `${...}` body is parsed as an ordinary Nether
+  expression.
+- Arrays: `[]` (empty), `[1, 2, 3]` (literal elements). *Distinguishing
+  growable-vector literals from fixed-size inline-array literals (`{T, N}`)
+  per the full target grammar is not yet implemented — Stage 3; today `[]`
+  continues to mean the bundled `Array<T>` heap type.*
 
-### 2.4 Semicolons and tail expressions
+### 2.5 Semicolons **[current behavior, unchanged by Stage 1]**
 
-Nether follows Rust's rule exactly: a block is a sequence of
-semicolon-terminated statements followed optionally by one final expression
-*without* a trailing semicolon, which becomes the block's value. A
-statement-position expression followed by more statements **must** have a
-`;`. (An earlier scratch example omitted a `;` on a non-tail statement; that
-was a bug in the example, not a language rule — see the corrected version in
-§6.)
+Semicolons are still required statement terminators today; newline-aware
+optional semicolons are specified for the language but not yet implemented
+(unstaged — tracked in the roadmap's syntax-cleanup bucket).
+
+### 2.6 No arbitrary block expressions **[Stage 1]**
+
+A bare `{ ... }` is **not** an expression in Nether. Braces are only ever
+attached to a known construct — `fn` bodies, `if`/`match`/`while`/`for`/
+`loop` bodies, `impl`/`trait` bodies, `unsafe` blocks. This also
+simplifies disambiguation with future inline-array literals (§2.4).
+
+```
+let x = {
+    let y = 1;
+    y
+};   // compile error — bare blocks are not expressions
+```
 
 ---
 
-## 3. Types
+## 3. The four fundamental value forms **[Stage 1 grammar; move checking Stage 2]**
 
-### 3.1 Primitives
+This is the central, distinguishing concept of Nether's type system. Every
+type belongs to one of two **representation categories** — heap/reference or
+inline/value — and every *use* of a type carries one of two **ownership
+qualifiers** — ordinary (ARC/copy) or uniquely owned. The two axes are
+orthogonal:
+
+| | Ordinary | Uniquely owned |
+|---|---|---|
+| **Heap/reference category** (`T`, e.g. `User`) | `T` — atomic ARC reference. Assignment copies the reference (aliasing); mutation needs `mut` permission but not exclusivity. | `:T` — uniquely owned heap value. Move semantics; use-after-move is a compile error *(enforced — Stage 2's move checker)*. Rust-like borrowing (`:&T`, `:&mut T`) itself — exclusivity while a borrow is live, references escaping via return position — remains *(not yet implemented — Stage 2, remainder)*. |
+| **Inline/value category** (`t`, e.g. `i32`, `color`) | `t` — ordinary inline value. Implicitly copyable, normal value semantics. | `:t` — uniquely owned inline value. Same machine representation as `t`; move-only *semantically* — use-after-move is a compile error *(enforced — Stage 2's move checker, as above)*. |
+
+The representation category comes from **how the type is defined**:
+primitives (`i32`, `bool`, `f64`, ...), tuples, and enums are always
+inline; `struct` declarations and other heap types (`String`, closures) are
+always heap/reference. The ownership qualifier — the leading `:` — is
+chosen **at each use site** (a `let` binding, a function parameter, a return
+type, a receiver), independent of how the type itself is declared.
+
+The leading `:` is part of the type/value syntax — not generic punctuation.
+It appears wherever a type or `self` receiver is described: type
+annotations, struct literals, function parameters, receivers, return types,
+and reference chains. **Normal expressions never gain special syntax merely
+because a value is owned** — `destroy(value)` stays `destroy(value)`, never
+`destroy(:value)`. The compiler infers move/consume behavior from the
+*declared type* at the use site, not from marking the expression.
+
+```
+let a i32 = 10;
+let b = a;
+println(a);   // ok — i32 is ordinary inline, copied
+println(b);   // ok
+
+let c: i32 = 10;
+let d = c;
+println(d);   // ok
+println(c);   // compile error as of Stage 2 — "use of a value after it was moved"
+```
+
+### 3.1 Reference chains **[parameters: Stage 2; deeper chains/return position/inline types: partial or not yet — see below]**
+
+References only exist inside the unique/owned domain — there is no bare
+`&T` without a leading `:`. `:&T` (shared borrow) and `:&mut T` (exclusive
+borrow) are represented **structurally** in the AST and type system (nested
+wrapper nodes), never as strings, so deeper chains (`:&&T`, `:&&mut T`)
+compose structurally, though only a single layer is peeled where field/
+method access is resolved through one today (Stage 2, slice 2) — a doubly-
+nested chain type-checks but isn't yet usable for member access.
+
+**There is still no `&expr` operator anywhere in the grammar.** A
+reference is never *formed* by the caller writing anything at an
+expression's use site — a `:&T`/`:&mut T` **parameter** is satisfied by
+passing an already-owned (`:T`) local by its bare name, the same
+implicit-by-declared-type mechanism an ordinary ARC parameter already
+uses (§8.1 — no extra caller-side marker, unlike `mut`). Only a bare local
+qualifies (there's no other way to name a place to borrow); `:&mut T`
+additionally requires the binding be `mut`. Within one call's argument
+list, the same local can't be borrowed `:&mut` twice, or `:&` and `:&mut`
+together — call-scoped exclusivity, enforced without any lifetime/region
+machinery, since nothing yet lets a `:&T`/`:&mut T` value outlive the one
+call expression that produced it.
+
+Reference codegen is for **heap-category types only** (`:&String`,
+`:&User`) — a reference to a heap type reuses the same pointer
+representation Nether already passes for ARC values, with no retain
+(`Type::Ref`/`Type::MutRef` were already `AllocKind::Stack` and already
+excluded from `has_managed_content` before this landed, so no MIR/codegen
+change was actually needed to make this true — see
+`docs/architecture/roadmap.md`). References to inline-category types still
+need real address-of-local codegen that does not exist yet.
+
+**Calling a method through a `:&T`/`:&mut T` receiver works** (Stage 2,
+slice 3), not just reading a field: a borrowing self-form
+(`: &self`/`: &mut self`) resolves the same way it would on a bare owned
+value, since a reference and an owned value both resolve into the same
+`Owned`-domain method set (`ReceiverDomain::of_receiver_ty`). A `: self`
+(consuming) method is specifically rejected when found through a
+reference receiver — a dedicated diagnostic, not a resolution-time
+distinction, since consuming a value through a mere borrow would be
+unsound. `: &mut self` additionally requires the receiver be exclusive
+(`:&mut T`, or a `mut`-bound owned local), the same mutability check a
+`mut self` ARC method already used.
+
+**Still not yet implemented:** borrows escaping via return position or
+being stored anywhere (needs real lifetime/origin inference —
+`fn get_name(user: &User): &String { ... }` still only type-checks
+structurally, not soundly), and the call-scoped exclusivity this stage
+enforces (§8.1) staying only call-scoped rather than lifetime-scoped until
+that same inference lands.
+
+### 3.2 Runtime representation of `:T` in Stage 1
+
+`:T` (unique heap) uses **the exact same ARC-refcounted runtime
+representation as `T`** in Stage 1 — it is purely a compile-time-checked
+concept until Stage 2's real borrow checker can safely skip retain/release
+once uniqueness is actually enforced. `:t` (unique inline) needs no runtime
+change at all — it is the same machine representation as `t`, restricted
+only at the type-checker level.
+
+---
+
+## 4. Types
+
+### 4.1 Primitives **[current behavior, unchanged by Stage 1]**
 
 ```
 bool char
@@ -94,91 +236,77 @@ usize isize
 f32 f64
 ```
 
-All primitives are stack/value types (see §3.3): copied on assignment, no
-identity, no ARC involvement.
+All primitives are inline/value types (§3): copied on ordinary assignment
+(`t`), move-only when explicitly owned (`:t`).
 
-### 3.2 Named types: `type`
+### 4.2 Struct declarations: `struct` **[Stage 1]**
 
-`type` declares a struct, tuple-struct, or unit-like type. `struct` is not a
-keyword in Nether.
+`struct` declares a heap/reference-category type — a struct, tuple-struct,
+or unit-like type. This is a change from the pre-rewrite MVP, which
+overloaded the `type` keyword for this; `type` is now reserved exclusively
+for alias declarations (§4.3), so a struct/alias ambiguity never arises.
 
 ```
-type Dog {
-    name: String
+struct Dog {
+    name String
 }
 
-type Point(i32, i32);   // tuple-struct
-type EmptyType;         // unit-like type — no braces, no parens, one semicolon
+struct Point(i32, i32);   // tuple-struct
+struct EmptyType;         // unit-like — no braces, no parens, one semicolon
 ```
 
-### 3.3 Heap vs. stack: the naming rule
+Field declarations no longer use a colon between name and type (`name
+String`, not `name: String`) — this mirrors the same colon-means-ownership
+rule used everywhere else in the grammar (§3): a bare field type is
+ordinary/ARC, and there is currently no syntax for an owned field (owned
+values do not yet have a place in struct layout beyond what §3 already
+covers at binding/parameter granularity).
 
-This is the central, distinguishing rule of Nether's memory model, and it is
-about **type declaration casing**, not variable casing:
+### 4.3 Type aliases: `type` **[Stage 1, alias declarations only]**
 
-- A `type` declared with a **PascalCase** name (`String`, `Array`, `Dog`,
-  `User`, `Point`) is **heap-allocated and ARC-managed**. Assigning a value
-  of this type shares the same underlying object (retain), it does not
-  copy.
-- A `type` declared with a **camelCase** name (`point`, `vector3`) is a
-  **stack/value type**. Assigning a value of this type clones it.
-- Primitives (`i32`, `bool`, `usize`, ...) are always stack/value types.
+`type Name = TypeExpr;` declares a type alias. This is a genuinely new
+construct — the pre-rewrite compiler had no alias mechanism at all.
 
-**Enums and tuples are exempt from this rule.** An `enum` — regardless of
-its name's casing — and an anonymous tuple type `(A, B, ...)` are *always*
-stack/value types: a tag plus an inline payload, copied on assignment, with
-no independent heap allocation for the enum/tuple value itself. This
-exemption exists because enum type names are conventionally PascalCase
-(`Color`, `Option`, `Result`) and the built-in `Option`/`Result` types are
-used pervasively — applying the naming rule literally to enums would ARC-heap
--allocate every `Option`/`Err` in the program, which contradicts this same
-spec's statement that enum representation is "tag + union, similar to Rust"
-(i.e., a zero-cost value representation). If a variant holds a field of a
-heap type (e.g. `Custom(String)`), that field is independently ARC-managed
-through its own type's rule — only the enum's own tag+payload shell is
-exempt.
+```
+type color = (u32, u32, u32);
+```
 
-So, precisely:
+An alias must not lie about the representation category of its target — see
+§8's casing validation.
 
-| Kind | Allocation |
+An **ownership-qualified alias declaration**, `type: Name = :TypeExpr;`, is
+specified for the full language but not yet implemented in Stage 1; using
+this form today produces a clear "not yet supported" diagnostic rather than
+being silently mis-parsed.
+
+### 4.4 Heap vs. inline representation category **[Stage 1]**
+
+The representation category comes from how a type is actually defined, not
+from casing:
+
+| Kind | Category |
 |---|---|
-| `type` with PascalCase name | heap, ARC |
-| `type` with camelCase name | stack, clone |
-| primitive (`i32`, `bool`, ...) | stack, clone |
-| `enum` (any name) | stack, clone (tag + inline payload); heap fields inside a payload follow their own type's rule |
-| tuple `(A, B, ...)` | stack, clone; each element follows its own type's rule |
-| tuple-struct (PascalCase) | heap, ARC — this is a `type`, not a bare tuple |
-| tuple-struct (camelCase) | stack, clone |
+| `struct` (any name) | heap, ARC (as `T`) / unique-owned (as `:T`) |
+| primitive (`i32`, `bool`, ...) | inline (as `t`) / unique-owned inline (as `:t`) |
+| `enum` (any name) | inline — tag + flat payload, always, regardless of name casing (§8's exemption) |
+| tuple `(A, B, ...)` | inline — each element follows its own type's category |
+| `String`, `Array<T>` | heap, ARC |
 
-### 3.4 Weak references
+### 4.5 Weak references **[current behavior, unchanged by Stage 1]**
 
-`weak T` is only meaningful where `T` is a heap/ARC type. `weak` on a
-stack/value type or an enum is a compile error (there is no reference count
-to weakly reference). A `weak T` does not keep its referent alive; there is
-no cycle collector — cycles are the programmer's responsibility to break
-explicitly, exactly as in Swift.
+`weak T` is only meaningful where `T` is a heap/ARC type. A `weak T` does
+not keep its referent alive; there is no cycle collector.
 
-### 3.5 Built-in heap types
+### 4.6 Built-in heap types **[current behavior, unchanged by Stage 1]**
 
-`String` (UTF-8) and `Array` (contiguous, growable) are heap-allocated,
-ARC-managed types. The compiler knows only their semantic shape (a `String`
-is a UTF-8 byte sequence, an `Array<T>` is a sequence of `T`); the actual
-storage layout is a runtime concern.
+`String` and `Array<T>` are heap-allocated, ARC-managed, declared in the
+bundled prelude (`stdlib/`). `Array<T>`'s core operations (`push`, `pop`,
+`len`, indexing) live in the runtime; everything else is an ordinary
+`impl<T> Array<T> { ... }` extension. Distinguishing a growable-`Vector`-style
+literal from the fixed-size inline-array literal `{T, N}` of the full target
+grammar is not yet implemented (Stage 3).
 
-`Array<T>`'s core operations — `push`, `pop`, `len`, and indexing (`a[i]`) —
-are implemented in the runtime (§9), not in Nether source, for performance.
-Beyond that core, `Array<T>` is an ordinary generic type declared in the
-bundled prelude (`stdlib/array.nt`): user code can add further methods with
-`impl<T> Array<T> { ... }` the same way it extends `Option<T>`/`Result<T, E>`
-(§8), and those methods see an ordinary `self: Array<T>` receiver — indexing
-and the runtime methods above are all usable from inside them. `String`
-stays fully closed — it has no generic parameter and does not support user
-`impl` blocks.
-
-### 3.6 Tuples
-
-Tuples support literal construction, `.0`/`.1`/... field access, and
-destructuring, matching Rust semantics:
+### 4.7 Tuples **[current behavior, unchanged by Stage 1]**
 
 ```
 let pair = (1, "a");
@@ -186,587 +314,461 @@ let (x, y) = pair;
 println(pair.0);
 ```
 
-Tuple-structs (`type Point(i32, i32);`) use the same `.0`/`.1` access and
-also support destructuring via their constructor pattern.
+---
+
+## 5. Naming/representation validation **[Stage 1]**
+
+PascalCase names normally indicate heap/reference-category types
+(`struct User`); lowercase names normally indicate inline-category types
+(primitives, and any future lowercase-named inline aliases). This is now a
+**validation rule checked against a type's resolved representation
+category**, not the mechanism that determines it (§3, §4.4).
+
+**A type alias must not lie about its target's representation category.**
+After resolving `type color = SomeType;`, if `SomeType` resolves to a
+heap/reference-category type but `color` is lowercase (or vice versa), that
+is a compile error. Struct/enum declarations are not separately checked
+against this rule — their own casing *is* definitionally where their
+category comes from (checking them against themselves would be a
+tautology); only aliases can "lie."
+
+**Enums and tuples are exempt.** Regardless of name casing, an `enum` and an
+anonymous tuple type are always inline-category (§4.4) — this is carried
+forward unchanged from the pre-rewrite compiler specifically so that
+`Option`/`Result` (PascalCase, structurally inline) do not fail validation.
+Without this carve-out, the entire bundled stdlib would be rejected on day
+one.
+
+`#[allow_pascal_case]` is a narrow escape hatch for exceptional
+compiler/library types whose physical representation doesn't match the
+naming convention (e.g. a future multi-word `Vector` handle) — **[not yet
+implemented — Stage 3]**. It disables only the naming diagnostic; it does
+not change ARC behavior, ownership, Copy behavior, ABI, allocation, thread
+safety, or borrow semantics.
 
 ---
 
-## 4. Visibility
+## 6. Visibility **[current behavior, unchanged by Stage 1]**
 
-Everything (fields, methods, modules) is public by default. A name is
-private if it starts with `_`, or if declared with the `private` keyword —
-both spellings are equivalent and interchangeable:
-
-```
-private field
-_field
-```
-
-There is no third, intermediate visibility level (e.g. no `pub(crate)`) in
-the MVP.
+Everything is public by default. A name is private if it starts with `_` or
+is declared with `private` — both are equivalent. `private` is recorded in
+the AST but not yet enforced by the resolver.
 
 ---
 
-## 5. Variables and bindings
+## 7. Variables and bindings **[Stage 1]**
 
 ```
-let a = 4;        // immutable binding
-let mut a = 4;     // mutable binding
+let a = 3;                        // inferred, ordinary inline
+let mut a = 3;                    // mutable binding
+
+let user User = User.new(...);    // explicit ARC type — space, no colon
+let user: User = :User { ... };   // explicit owned type — colon, owned literal
+
+let count i32 = 10;                // explicit inline type — space, no colon
+let count: i32 = 10;               // explicit owned inline type
 ```
 
-- Assigning a stack/value type clones it.
-- Assigning a heap/ARC type shares the same object (retain).
+`mut` before the binding name (`let mut a = ...`) grants mutation
+permission on the binding itself, for both ARC and owned/inline forms —
+this placement is unchanged from before the rewrite.
 
-### 5.1 Mutation requires `mut`
-
-A binding must be declared `mut` to mutate through it — directly
-(`x = ...`), through a field at any depth (`x.a.b = ...`), or by calling a
-`mut self` method anywhere along that chain — for **both stack and heap
-types**, with no exemption for either:
+### 7.1 ARC mutability is not exclusivity **[current behavior, unchanged by Stage 1]**
 
 ```
-type Dog { name: String }
-
-impl Dog {
-    set_name(mut self, new_name: String) {
-        self.name = new_name;
-    }
-}
-
-fn main() {
-    let dog = Dog { name: "Rex" };
-    dog.name = "Buddy";      // error: `dog` is not `mut`
-    dog.set_name("Buddy");   // error: `set_name` needs a `mut self` receiver
-}
+let mut a User = ...;
+let b = a;
+a.name = "Bob";
+// b now also observes "Bob" — a and b alias the same object.
 ```
 
-```
-type Dog { name: String }
-
-impl Dog {
-    set_name(mut self, new_name: String) {
-        self.name = new_name;
-    }
-}
-
-fn main() {
-    let mut dog = Dog { name: "Rex" };
-    dog.name = "Buddy";      // ok
-    dog.set_name("Buddy");   // ok
-}
-```
-
-Ordinary function/method parameters are pass-by-value for stack types (the
-callee gets a clone) and pass-by-shared-reference for heap types (ARC
-retain/release around the call, per §8). To let a callee mutate through a
-parameter in the caller's own storage — a stack type's own value, or a
-field/`mut self` method reached through a heap type's shared reference —
-the parameter is declared `mut`, mirroring `mut self`:
-
-```
-fn increment(mut n: i32) {
-    n = n + 1;   // mutates the caller's variable, not a clone
-}
-
-fn rename(mut d: Dog, new_name: String) {
-    d.set_name(new_name);   // mutates the caller's shared Dog, not a copy
-}
-
-fn main() {
-    let mut x = 4;
-    increment(mut x);   // caller must also mark the argument `mut`
-    println(x);         // prints 5
-
-    let mut dog = Dog { name: "Rex" };
-    rename(mut dog, "Buddy");
-    println(dog.name);  // prints "Buddy"
-}
-```
-
-The parameter is a genuine mutable alias to the caller's storage, not a
-copy. Unlike Rust's `&mut`, there is **no borrow-checker enforcement** — no
-exclusivity/aliasing rules are checked, so multiple `mut` aliases to the
-same heap object can coexist and each mutate through it; this is a bare
-capability to mutate through an alias, consistent with Nether having no
-borrow checker at all. The caller must write `mut` at the call site as well
-as the callee declaring `mut` on the parameter, so that mutation is visible
-at both ends without requiring alias analysis to prove it.
-
-### 5.2 Variadic parameters
-
-A function or method's **last** parameter may be declared variadic —
-`...ElementType` instead of a plain type — to accept zero or more
-trailing arguments:
-
-```
-fn sum(items: ...i32): i32 {
-    let mut total = 0;
-    for item in items {
-        total = total + item;
-    }
-    total
-}
-
-fn main() {
-    println(`${sum()}`);         // 0
-    println(`${sum(1)}`);        // 1
-    println(`${sum(1, 2, 3)}`);  // 6
-}
-```
-
-This is sugar over `Array<ElementType>`, not a distinct calling
-convention: the callee's own body sees an ordinary `Array<ElementType>`
-value (`items.len()`, `for item in items`, ... all work exactly as they
-would on any other array), and a call site's trailing arguments —
-whatever is left over after the fixed parameters — are collected into an
-`Array<ElementType>` literal automatically. Only one variadic parameter is
-allowed, and it must be the last one declared.
-
-A variadic parameter whose element type is `String` additionally accepts
-any `Into<String>` value at each trailing position, not just literal
-`String`s — the same conversion string-template interpolation (§2.3) and
-`println`/`print` (§12) already apply:
-
-```
-fn show(args: ...String) {}
-
-fn main() {
-    show(1, true, "text");   // each argument converted through Into<String>
-}
-```
+`mut` on an ARC binding means "this binding may mutate," not "this binding
+is the only reference." This is intentionally different from `:&mut T`,
+where exclusivity *is* enforced — call-scoped, as of Stage 2's second
+slice (§3.1); the full lifetime-scoped version (exclusivity for a borrow
+that outlives one call) awaits the region/origin inference §3.1 still
+lists as not yet implemented.
 
 ---
 
-## 6. Types, `impl`, methods
+## 8. Functions, parameters, receivers **[Stage 1 grammar; `d`/`e` callable as of Stage 2]**
+
+### 8.1 Parameter forms
 
 ```
-type Dog {
-    name: String
+fn foo(
+    a Animal,        // ordinary ARC parameter
+    b mut Animal,     // ARC parameter with mutation permission — note: `mut` comes AFTER the name here
+    c: Animal,        // uniquely owned, moved into the function
+    d: &Animal,        // borrow from an owned value — see §3.1 for exactly what "callable" means here
+    e: &mut Animal      // exclusive mutable borrow from an owned value
+) {
 }
+```
 
-impl Dog {
-    new(name: String): Dog {
-        Dog { name }
+The `mut` placement is deliberately asymmetric with `let mut`: `let mut a`
+puts `mut` *before* the name (mutating the binding), while `b mut Animal`
+puts `mut` *between* the name and type (an ARC parameter with mutation
+permission). This is intentional, not an inconsistency to "fix."
+
+An ordinary ARC parameter (`a Animal`) semantically owns a strong ARC
+reference during the call — a straightforward implementation performs
+retain/release, but the optimizer may eliminate redundant pairs when the
+reference is only temporarily borrowed. This must never be observable.
+
+### 8.2 Return types
+
+```
+fn create_user() User { ... }        // ARC return — no colon
+fn create_user(): User { ... }       // owned return — colon
+fn count() i32 { return 10; }        // inline return
+fn count(): i32 { return 10; }       // owned inline return
+fn get_name(user: &User): &String { return &user.name; }   // borrowed return
+```
+
+### 8.3 No implicit tail-expression return **[implemented — Stage 1]**
+
+The function/method body's own tail expression is not implicitly returned.
+It is checked and evaluated as a discarded expression; a non-unit function
+must reach an explicit `return`. Ordinary block expressions, `if` branches,
+`match` arms, and closure bodies keep their value-producing tails.
+
+```
+fn foo() i32 {
+    return 10;
+}
+```
+
+There is no `return:` operator — an owned return naturally still contains a
+colon because the *value* is an owned construction:
+
+```
+return :User { ... };   // parses as return (:User { ... }), not a distinct `return:` form
+```
+
+### 8.4 Self receivers **[Stage 1 grammar; overload resolution Stage 2]**
+
+```
+fn get_name(self) String { ... }              // ARC receiver
+fn set_name(mut self, name String) { ... }    // mutable ARC receiver
+fn destroy(: self) { ... }                    // owned, consuming receiver
+fn get_name(: &self): &String { ... }         // borrowed unique receiver
+fn set_name(: &mut self, name String) { ... } // mutable borrowed unique receiver
+```
+
+Receiver ownership mode is part of method overload resolution — a trait or
+impl may declare both an ARC-domain and an owned-domain variant of the same
+method name (`get_name(self) String` alongside
+`get_name(: &self): &String`), resolved at each call site by the receiver's
+actual domain (with a `Static` fallback so a static method stays callable
+through a value). One is never synthesized from the other via an implicit
+conversion (§9). A trait requirement itself still names exactly one domain
+per method (an implementing type's overload set can be wider than what any
+one trait requires, but a single trait method isn't yet dual-domain-
+overloadable on its own) — dual-domain trait *requirements*, and generic-
+bound (`<T: Sound>`) dispatch across both domains, remain unstaged.
+
+### 8.5 Static methods **[current behavior, unchanged by Stage 1]**
+
+A method with no `self`/receiver parameter is static, called through the
+type (`User.new(...)`), not through an instance.
+
+### 8.6 Basic ownership-domain type checking **[Stage 1]**
+
+Independent of move tracking, the type checker enforces ordinary type
+compatibility across the ownership dimension: passing an ARC-typed (`T`)
+value where an owned parameter (`:T`) is declared, or vice versa, is a type
+mismatch and rejected — this is normal type-checking, not borrow-checking.
+
+### 8.6.1 Move checking **[Stage 2]**
+
+A `Type::Unique(_)`-typed local binding — `:T` or `:t` — may be read as a
+whole value at most once between the point it's live and the point it's
+moved. Flow-sensitive, tracked per local binding, no lifetime/region
+inference required (see the move-checking module's own docs,
+`compiler/typecheck/src/check/checker.rs`, for exactly what counts as a
+move vs. a read-through):
+
+- A bare local reference used as an rvalue (`let`/assignment RHS, a call
+  argument, a `return` operand, a `: self`-consuming method receiver)
+  moves it.
+- Reading a field/element through it (`dog.name`), or calling a
+  `: &self`/`: &mut self` (borrowing) method on it, requires it to still be
+  live but does **not** consume it — struct/tuple fields are always
+  ordinary-typed (§4.2), never themselves `Type::Unique`.
+- Reassigning a `mut` binding resets its move-state (a fresh value now
+  lives there).
+- `if`/`match`: each arm is checked independently from the same pre-branch
+  state; a value moved on any one live-reaching (non-diverging) arm counts
+  as moved after the merge — a "possibly moved" use is still rejected, not
+  only a "definitely moved" one.
+- `while`/`for`/`loop`: a value moved unconditionally inside the body is
+  rejected even if the *textual* reuse appears to come first, since the
+  loop may run more than once — a `let` declared *inside* the loop body is
+  unaffected (each pass gets a fresh binding).
+- A closure literal moves any free `Type::Unique` variable it references,
+  at the closure's own position — matching a `move` closure's semantics
+  (captured at creation, regardless of whether/when the closure is later
+  called) — independent of whether the closure is ever invoked.
+
+Diagnostics carry two labels: where the value was moved, and where it was
+used again. Not yet implemented: borrow-exclusivity for `:&T`/`:&mut T`
+(a live borrow blocking a move of its referent), region/origin inference,
+and the resulting ambiguous-returned-reference diagnostics — all deferred
+to Stage 2's remainder (see the roadmap).
+
+### 8.7 Variadic parameters **[Stage 1]**
+
+A trailing `name ...Type` parameter (no colon) accepts zero or more
+trailing call arguments of `Type`, collected into an `Array<Type>` visible
+under `name` inside the function body:
+
+```
+fn show(args ...String) {
+    for arg in args {
+        println(arg);
     }
-
-    set_name(mut self, new_name: String) {
-        self.name = new_name;
-    }
 }
 ```
 
-- `impl` blocks contain methods. There is no `fn` keyword inside `impl` —
-  the method name starts the declaration directly.
-- A method with `self` or `mut self` as its first parameter is an instance
-  method; a method with no `self` parameter is a static method, called as
-  `Dog.new(...)`. A static method may also be selected through a value
-  (`dog.new(...)`); the receiver expression is evaluated for its side
-  effects but is not passed to the method.
-- **There is no `Self` type.** A constructor or method that needs to refer
-  to the enclosing type names it explicitly:
-
-```
-type Lang {
-    name: String
-}
-
-impl Lang {
-    new(name: String): Lang {
-        Lang { name }
-    }
-
-    set_name(mut self, new_name: String) {
-        self._check();
-        self.name = new_name;
-        println(self.name);
-    }
-
-    // a name starting with '_' is private
-    _check(self) {
-        print("changed from: ", self.name, " to: ");
-    }
-}
-```
-
-(This corrects a bug in the original scratch file, where `self.new_name;`
-appeared as a no-op statement instead of `self.name = new_name;`.)
-
-Tuple-struct and unit-like `impl`s follow the same rules:
-
-```
-type Point(i32, i32);
-impl Point {
-    new(x: i32, y: i32): Point {
-        Point(x, y)
-    }
-}
-
-type EmptyType;
-impl EmptyType {
-    // static-only methods are legal here
-}
-```
-
-(This corrects a second scratch bug, where a tuple-struct constructor
-returned `SomeType(String)` — the type name — instead of the constructor's
-own parameter.)
-
-### 6.1 Standalone functions
-
-Functions outside any `impl` block use `fn`:
-
-```
-fn main() {
-    let a = 4;
-    foo(a);
-}
-
-fn foo(a: i32) {
-    println(a);
-}
-```
-
-Nether has **no nested functions** — only top-level `fn` declarations and
-closures (§11).
+Only one variadic parameter is allowed per function, and it must be the
+last parameter. This is sugar over `Array<Type>` in Stage 1; lowering it
+instead to a fixed-size, compile-time-sized collection is unstaged
+follow-up work (roadmap §3).
 
 ---
 
-## 7. Interfaces
+## 9. Universal `to(value)` conversion **[3 of 4 transitions: Stage 2; `T -> :T` and `to<T>(...)`: not yet]**
 
-`interface` replaces `trait`. Dispatch is always static (monomorphized);
-there are no vtables and no dynamic dispatch.
+The full language specifies a universal, explicit domain-conversion
+operation (`to(value)`, or `to<T>(value)` with an explicit target) covering
+all four `:T -> T`, `T -> :T`, `:t -> t`, `t -> :t` transitions. No implicit
+ownership-domain adaptation ever happens at a call site — the programmer
+must call `to()` explicitly when crossing domains.
 
-```
-interface Sound {
-    // A declaration such as `type Dog: Sound` opts into this default.
-    sound(): String {
-        "..."
-    }
-}
+`:T -> T`, `:t -> t`, and `t -> :t` are implemented (Stage 2) as a
+compiler builtin (`println`/`print`'s own mechanism — no user-overridable
+declaration exists to shadow it) with the target type inferred from
+surrounding context (`let arc_dog Dog = to(owned_dog);`); there is no
+runtime cost, since each of these three is pure type-system relabeling —
+`:T`/`T` already share identical runtime representation (§3.2), and an
+inline value promoted to `:t` is an independent bit-copy already, aliasing
+nothing. `to(owned_dog)` also moves `owned_dog` the same way passing it to
+any other function would (§8.6.1); `to(n)` for an ordinary inline `n`
+does not, since inline values are always freely copyable.
 
-impl Dog: Sound {
-    sound(): String {
-        "Woof! Ruff!"
-    }
-}
-```
+**`T -> :T` stays rejected**, with a dedicated diagnostic rather than
+silent unsoundness: the source may have other live ARC aliases, so
+relabeling it `:T` without an actual deep copy would produce a "uniquely
+owned" value that isn't. This direction needs `Clone` (§10), not yet
+implemented — Stage 3.
 
-An interface listed on a declaration opts into its default implementations:
-
-```
-type Dog: Sound, Clone {
-    name: String
-}
-
-enum State: Sound {
-    Ready,
-    Waiting
-}
-```
-
-By contrast, `impl Type: Interface { ... }` is an explicit implementation:
-every interface method must have a user-written implementation, including
-methods for which the interface declares a default. Several interfaces may
-be named in one block (`impl Dog: Sound, Clone { ... }`).
-
-Methods and interface declarations may be freely split and mixed across
-multiple blocks. All methods written for one owner are collected before
-interface conformance is checked, so a method in `impl Dog { ... }` may
-satisfy an interface named by another `impl Dog: Sound { ... }` block.
-
-Interfaces support multiple inheritance:
-
-```
-interface Pet: Sound, Named {
-    play(self);
-}
-```
-
-Implementing `Pet` also satisfies `Sound` and `Named` and requires their
-methods transitively. A child declaration overrides a same-named parent
-method. Incompatible inherited signatures are an error; conflicting
-default bodies require the concrete type to provide an explicit method.
-Inheritance cycles are rejected.
-
-Because dispatch is always resolved at compile time, an interface name may appear
-**only as a generic bound** (`fn f<T: Sound>(x: T)`) — it can never be used
-as a standalone value type (no `dyn Interface`, no heterogeneous
-`Array<Sound>` holding mixed concrete types). This is a direct consequence
-of "static dispatch only, no vtables," not an extra restriction.
-
-### 7.1 The `Into<T>` convention
-
-`Into<T>` is the conversion interface used by `println`/`print` and other
-stdlib functions that accept "anything convertible to `T`". Its required
-method is named `into_<t>` in snake_case — for `Into<String>`, the method is
-`into_string`:
-
-```
-impl Dog: Into<String> {
-    into_string(self): String {
-        `name: ${self.name}`
-    }
-}
-```
+**`to<T>(value)`'s explicit-target form is not yet implemented** — only
+target-inferred-from-context calls work today; an explicit generic
+argument is diagnosed rather than silently accepted.
 
 ---
 
-## 8. Generics
+## 10. Copy and Clone **[not yet implemented — Stage 3]**
 
-Generic types, interfaces, and functions are supported and implemented via
-Rust-style monomorphization: one specialized copy of the code is generated
-per concrete instantiation between HIR and MIR. There is no generic code
-left in the final binary — every call site resolves to a concrete,
-non-generic function.
-
-Generic parameters are supported on functions, methods, named types, tuple
-structs, enums, and interfaces:
-
-```nether
-fn identity<T>(value: T): T { value }
-type Boxed<T> { value: T }
-type Pair<T, U>(T, U);
-enum Maybe<T> { Some(T), None }
-interface Read<T> { read(self): T; }
-```
-
-The parameters declared by a type or enum are implicitly in scope in all
-of its `impl` blocks. Methods may declare additional parameters of their
-own. Function and method type arguments are inferred locally from the
-receiver, ordinary arguments, and expected return type, or written
-explicitly in declaration order:
-
-```nether
-let number = identity<u32>(1);
-let text = box.replace<String>("ready");
-```
-
-The explicit list is written directly after the callable name. Rust's
-`identity::<u32>(1)` syntax is not part of the grammar. For an instance
-method, owner parameters are fixed by the receiver and the list supplies
-all remaining method parameters. For a standalone function it supplies
-the complete declared parameter list; partial explicit lists are rejected.
-Explicit types do not bypass ordinary argument compatibility or bounds.
-
-Each generic parameter may declare one inline interface bound, including a
-generic interface application:
-
-```nether
-fn make_noise<T: Sound>(value: T): String { value.sound() }
-fn read_text<T: Read<String>>(value: T): String { value.read() }
-type SpeakerBox<T: Sound> { value: T }
-```
-
-Multiple effective requirements are expressed by inheriting several
-interfaces and using the child as the single inline bound. Interface
-inheritance and generic arguments are checked transitively.
-
-Every generic parameter must be explicit or inferable at a call site. A
-payload-free variant such as `Option.None` likewise needs a type annotation
-or other context when its arguments cannot be inferred.
-
-The current implementation deliberately has no partial explicit argument
-lists, Rust-style turbofish, `where` clauses, multiple inline bounds,
-associated types, specialization, blanket/conditional implementations,
-const generics, higher-kinded types, or first-class unspecialized generic
-functions.
-
-See [`../generics.md`](../generics.md) for the complete example-driven
-guide and the supported/unsupported feature matrix.
-
-Heap-vs-stack classification (§3.3) is resolved **after** substitution:
-`Array<i32>` and `Array<Dog>` are both heap/ARC (because `Array` itself is
-PascalCase), independent of whether their type argument is heap or stack.
+`Copy` is reserved for inline-category values; heap/reference-category
+types may implement `Clone` but must not implement `Copy` (assignment of an
+ordinary heap type already means "copy the ARC reference," not "deep-copy
+the object" — conflating the two would be a silent correctness hazard).
+Derivable traits are written directly before a declaration (`Clone + Eq +
+Hash`, not Rust's `#[derive(...)]`). Not yet implemented — Stage 1 has no
+derive mechanism at all yet.
 
 ---
 
-## 9. Enums and match
+## 11. Struct literals **[Stage 1]**
+
+Struct literal fields use `=`, not `:`:
+
+```
+User {
+    id = Uuid.generate(),
+    name = name,
+    age,       // shorthand when the variable name equals the field name
+}
+```
+
+The owned form prefixes the type name with `:`:
+
+```
+let user: User = :User {
+    id = Uuid.generate(),
+    name,
+    age,
+};
+```
+
+A bare `{ ... }` is never interpreted as a struct literal — the type must
+appear immediately before the literal (§2.6).
+
+---
+
+## 12. Traits **[Stage 1 core syntax; extensions deferred]**
+
+Dispatch is static (monomorphized in Stage 1);
+there are no vtables in Stage 1.
+
+```
+trait Sound {
+    sound() String {
+        return "...";
+    }
+}
+
+impl Dog Sound {
+    sound() String {
+        return "Woof! Ruff!";
+    }
+}
+```
+
+Not yet implemented: associated types/constants, const generics, multiple
+inline bounds (`T A + B`), `where` clauses, specialization, existential
+(`any Trait`) and opaque (`some Trait`) types, blanket/conditional impls —
+all **Stage 3**. A trait name still cannot be used as a bare value
+type today; it may only appear as a generic bound. Multiple traits on one
+`impl` are comma-separated (`impl Dog Sound, Clone { ... }`), and generic
+bounds (`<T: Sound>`, §13) still use the pre-existing colon form for
+now — unifying that with the trait-list's no-colon convention is tracked
+as unstaged follow-up work, not yet done.
+
+---
+
+## 13. Generics **[current behavior, unchanged by Stage 1]**
+
+Generic functions/methods/types/traits are monomorphized between HIR
+and MIR — no generic code remains in the final binary. See
+[`../generics.md`](../generics.md) for the full example-driven guide.
+Development-mode witness-table/dictionary dispatch (so `nether build`
+doesn't have to monomorphize every generic body) is specified for the full
+language but **not yet implemented — Stage 3**; both modes are required to
+produce identical *behavior*, never identical *codegen strategy*, once that
+lands.
+
+---
+
+## 14. Enums and match **[current behavior, unchanged by Stage 1]**
 
 ```
 enum Color {
-    Red,
-    Green,
-    Blue,
-    White,
-    Black,
+    Red, Green, Blue, White, Black,
     Custom(String),
 }
-
-enum Outcome<T, E> {
-    Ok(T),
-    Error(E),
-}
 ```
 
-Variant payloads use tuple-call syntax, `Ok(T)` / `Error(E)` — not a colon
-form. (An older scratch file used `Ok: O`; that syntax is retired in favor
-of the form actually specified here.) Internally, an enum is represented as
-a tag plus flat payload storage sized for all variant fields (§3.3);
-construction never allocates independently of what its payload types
-themselves require. `Option<T>` and `Result<T, E>` are bundled generic
-enums available without redeclaration.
-
-`match` is Rust-like, MVP scope only: no guards in the initial version.
-
-```
-fn describe(color: Color) {
-    match color {
-        Color.Red => println("is red!"),
-        Color.Green => println("is green!"),
-        Color.Blue => println("is blue!"),
-        Color.White => println("is white!"),
-        Color.Black => println("is black!"),
-        Color.Custom(name) => println(name),
-    }
-}
-```
-
-Variant access uses `.`, consistent with the rest of the language never
-using `::`.
+`match` has no guards yet. Variant access uses `.`, never `::`.
 
 ---
 
-## 10. Modules
-
-The file-module model follows Rust. A `mod` item declares a child and
-`use` imports one declaration from a module:
+## 15. Modules **[current behavior, unchanged by Stage 1 except file extension]**
 
 ```
 mod user;
 use self.user.User;
-
-fn main() {
-    let u = User.new("Ada");
-}
 ```
 
-For `mod user;`, the driver looks for `user.nt`/`user.nr` or
-`user/mod.nt`/`user/mod.nr` relative to the declaring file. A child of
-`user.nt` is normally stored below `user/`. Missing declared module files
-are source-anchored compilation errors.
-
-Relative roots are:
-
-- `self` — the current file module;
-- `super` — its declaring parent;
-- `crate` — the entry file/module.
-
-For example, a child can extend a type from its parent:
-
-```
-// main.nt
-mod cat_conversions;
-type Cat { name: String }
-
-// cat_conversions.nt
-use super.Cat;
-impl Cat {
-    into_i32(self): i32 { 1 }
-}
-```
-
-Nether uses `.` where Rust uses `::`. Module paths occur in `mod`/`use`;
-after import, source code refers to the imported final declaration by its
-name. Each file retains a separate namespace. `stdlib.*` is an external
-bundled root and does not require `mod stdlib;`.
-
-The MVP does not support inline module bodies, aliases, glob imports or
-re-exports. For compatibility, a direct `use user.User;` may still load a
-nearby module, but new code should declare local children with `mod`.
+For `mod user;`, the driver looks for `user.nr` or `user/mod.nr` relative to
+the declaring file (§2.1 — `.nt` is rejected). `self`, `super`, `crate` are
+the relative roots. `stdlib.*`/`std.*` resolve from the bundled prelude
+root without a `mod stdlib;` declaration. The package manifest
+(`Nether.toml`) and a real package graph are **not yet implemented — Stage
+6**; today there is only a single entry file and its local module tree.
 
 ---
 
-## 11. Closures
+## 16. Closures **[current behavior, unchanged by Stage 1]**
 
 ```
-let add = (a: i32, b: i32) => {
-    a + b
+let add = (a i32, b i32) => {
+    return a + b;
 };
 ```
 
-Closures are the only anonymous/local callable construct — Nether has no
-nested named functions. A closure captures each referenced outer variable
-following the same rule as ordinary assignment: a stack/value type is
-captured by clone (the closure gets its own independent copy — mutating it
-inside the closure does not affect the outer variable), a heap/ARC type is
-captured by shared reference (retain). There is no `mut`-capture / `FnMut`
--style mutable-by-reference capture in the MVP; see §14 for this as a future
-extension point.
+`move () => { ... }` explicit-move-capture closures for owned values are
+specified for the full language but not yet implemented (folds into Stage
+2, alongside the rest of move semantics).
 
 ---
 
-## 12. Built-in symbols
+## 17. Unsafe, raw pointers, FFI **[not yet implemented — Stage 5]**
 
-Available without any `use`:
-
-```
-println print
-Option Some None
-Result Ok Error
-Into
-```
-
-Everything else in the standard library requires an explicit `use`.
+`unsafe { ... }` blocks, `unsafe fn`, `*mut T`/`*const T` raw pointers (and
+their owned forms `:*mut T`/`:*const T`), and `extern "C"` FFI declarations
+are specified for the full language but do not exist in the compiler yet.
 
 ---
 
-## 13. Memory model summary
+## 18. Async/await, threads **[not yet implemented — Stage 4]**
+
+`async fn`, prefix `await expr`, `task.spawn(...)` (Tokio-backed) and
+`thread.spawn(...)` (raw OS threads) are specified for the full language
+but do not exist in the compiler yet. `Send`/`Sync` compiler-understood
+thread-safety traits and atomic ARC are bundled with this stage in the
+roadmap (Stage 6) since a safe async/thread story depends on both.
+
+---
+
+## 19. Error handling **[current behavior, unchanged by Stage 1]**
+
+`Result<T, E>` is a bundled prelude enum; `?` propagation exists. There is
+no implicit `String -> Err(String)` coercion on `return`.
+
+---
+
+## 20. Built-in symbols **[current behavior, unchanged by Stage 1]**
+
+Available without `use`: `println`, `print`, `Option`/`Some`/`None`,
+`Result`/`Ok`/`Error`, `Into`.
+
+---
+
+## 21. Memory model summary
+
+- Ordinary heap assignment (`T`) retains; scope exit releases.
+- `:T` uses the same ARC representation as `T` in Stage 1 (§3.2) — purely
+  compile-time-checked until Stage 2.
+- `weak T` never affects its referent's retain count.
+- Atomic ARC (thread-safe refcounting) is specified for the full language
+  but not yet implemented — the runtime remains single-threaded until
+  Stage 6.
 
 Full retain/release insertion rules live in
-[`../architecture/arc-model.md`](../architecture/arc-model.md); the
-language-level contract is:
-
-- Heap assignment retains; scope exit releases.
-- Passing a heap value into a Nether function retains it before the call;
-  the callee's own scope exit (or, if it hands that same value straight
-  back out as its return value, the return itself) is what releases it —
-  never both (`arc-model.md` §3.3 has the precise rule and the real bug an
-  earlier version of it had).
-- Returning a freshly constructed heap value directly from a function skips
-  the redundant retain/release pair (Return Value Optimization) — the
-  caller receives the object that was already constructed, at +1, without
-  an intermediate retain/release round-trip.
-- `weak T` never affects the retain count of its referent.
-- Mutable-reference parameters (§5.1) never retain/release — they alias a
-  stack slot directly; no refcount is involved because they only ever apply
-  to stack/value types.
+[`../architecture/arc-model.md`](../architecture/arc-model.md).
 
 ---
 
-## 14. Explicitly out of scope for the MVP (and why they're listed here)
+## 22. Implementation status at a glance
 
-These are permanent-for-now constraints repeated here because they interact
-with rules above and a reader should not need to cross-reference the
-project brief to know they're intentional:
+| Area | Status |
+|---|---|
+| Four value forms (`T`/`:T`/`t`/`:t`) — grammar & type-checking | Stage 1 |
+| Self-receiver domain overload resolution (§8.4) | **Stage 2 — done** |
+| Move/use-after-move checking (§8.6.1) | **Stage 2 — done** |
+| Callable `:&T`/`:&mut T` parameters, call-scoped exclusivity (§3.1, §8.1) | **Stage 2 — done** |
+| Calling a *method* (not just field access) through a `:&T`/`:&mut T` receiver (§3.1) | **Stage 2 — done** |
+| `to(value)` domain conversion, target-inferred form, 3 of 4 transitions (§9) | **Stage 2 — done** |
+| `to<T>(value)`'s explicit-target form; `T -> :T` (needs `Clone`, §10) | Stage 2/3 — remaining |
+| Region/origin inference, borrows escaping via return position/storage, ambiguous-returned-reference diagnostics, `move () => {}` closures, `:T`'s unrefcounted runtime representation | Stage 2 — remaining |
+| Reference-to-inline-value codegen | Stage 2 — remaining |
+| Associated types, const generics, specialization, `any`/`some`, multi-bound generics, derivable traits, `#[allow_pascal_case]` | Stage 3 |
+| Development-mode witness-table generics dispatch | Stage 3 |
+| async/await, Tokio runtime bridge | Stage 4 |
+| unsafe, raw pointers, C ABI FFI | Stage 5 |
+| Atomic ARC, `Send`/`Sync`, `Nether.toml` package manifest, CLI `run`/`test`/`--release`/`--emit-*` | Stage 6 |
+| Optional/newline-aware semicolons, block comments, inline-array vs. vector literal distinction, variadics-as-fixed-array, mutable closure captures | unstaged syntax cleanup — see roadmap |
 
-- No async, no `await`, no multithreading, no `go`/goroutine-style
-  concurrency. (An earlier, unrelated scratch note explored an
-  async/ownership/concurrency design; it predates this spec and is
-  superseded by it in full.)
-- No ownership system, no borrow checker, no lifetimes, no raw pointers, no
-  `unsafe` blocks.
-- No dynamic dispatch, no vtables, no reflection.
-- No macros, no `derive`, no proc macros, no const generics.
-- No garbage collector, no cycle collector for ARC — cycles are broken
-  manually with `weak`.
-- No package manager — only local modules.
-
-Documented future extension points (not MVP, but designed to not be
-foreclosed by MVP decisions):
-
-- Mutable closure captures (`FnMut`-style capture-by-reference).
-- FFI marshaling of heap types (`String`, `Array`) across `extern "C"`
-  boundaries — MVP FFI covers primitive types only.
-- Block comments (`/* ... */`).
-- A cycle-assistance tool (e.g. a lint that flags likely retain cycles)
-  without introducing a runtime collector.
+See [`../architecture/roadmap.md`](../architecture/roadmap.md) for the full
+staged plan and the keep/refactor/rewrite/delete classification of existing
+compiler components.
 
 ---
 
-## 15. Canonical example
-
-A single example exercising most of the surface above, with the bugs from
-the original scratch files corrected:
+## 23. Canonical example **[Stage 1 syntax]**
 
 ```
 mod lang;
@@ -776,37 +778,42 @@ fn main() {
     let mut a = Lang.new("Bobby");
     a.set_name("Husky");
     println(a.into_string());
+
+    let count i32 = 3;
+    let owned_count: i32 = 3;
+    let dog: Lang = :Lang { name = "Rex" };
+    println(dog.name);
 }
 
-type Lang {
-    name: String
+struct Lang {
+    name String
 }
 
 impl Lang {
-    new(name: String): Lang {
-        Lang { name }
+    new(name String) Lang {
+        return Lang { name = name };
     }
 
-    set_name(mut self, new_name: String) {
+    set_name(mut self, new_name String) {
         self.name = new_name;
     }
 }
 
-impl Lang: Into<String> {
-    into_string(self): String {
-        `name: ${self.name}`
+impl Lang Into<String> {
+    into_string(self) String {
+        return `name: ${self.name}`;
     }
 }
 
-interface Sound {
-    sound(): String {
-        "..."
+trait Sound {
+    sound() String {
+        return "...";
     }
 }
 
-impl Lang: Sound {
-    sound(): String {
-        "Woof! Ruff!"
+impl Lang Sound {
+    sound() String {
+        return "Woof! Ruff!";
     }
 }
 ```

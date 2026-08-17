@@ -102,10 +102,15 @@ pub enum ExprKind {
     /// construction written in call syntax (`Point(x, y)`), which the
     /// parser instead represents as an ordinary [`ExprKind::Call`] whose
     /// callee is a [`ExprKind::Path`]; `StructLit` is reserved for the
-    /// brace-field form only.
+    /// brace-field form only. Fields use `=` (language-spec §11), not `:`.
+    /// `owned` is `true` for `:Dog { ... }`, the unique-ownership-domain
+    /// form — the leading `:` sits directly on the literal itself, one of
+    /// the few expression-position places the ownership sigil appears
+    /// (language-spec §3).
     StructLit {
         path: Path,
         fields: Vec<(Ident, Expr)>,
+        owned: bool,
     },
 }
 

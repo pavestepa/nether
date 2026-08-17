@@ -45,15 +45,9 @@ impl Parser {
             }
             Token::Punct(Punct::LParen) => self.parse_paren_or_closure(start),
             Token::Punct(Punct::LBracket) => self.parse_array_expr(start),
-            Token::Punct(Punct::LBrace) => {
-                let block = self.parse_block();
-                let span = block.span;
-                let id = self.next_id();
-                Expr {
-                    id,
-                    kind: ExprKind::Block(block),
-                    span,
-                }
+            Token::Punct(Punct::Colon) => {
+                self.bump();
+                self.parse_owned_struct_lit(start)
             }
             Token::Keyword(Keyword::If) => self.parse_if_expr(),
             Token::Keyword(Keyword::Match) => self.parse_match_expr(),
@@ -145,7 +139,7 @@ impl Parser {
         };
 
         if self.struct_lit_allowed && matches!(self.peek(), Token::Punct(Punct::LBrace)) {
-            self.parse_struct_lit(path, path_span)
+            self.parse_struct_lit(path, path_span, false)
         } else {
             let id = self.next_id();
             Expr {
@@ -156,19 +150,25 @@ impl Parser {
         }
     }
 
+    /// `Dog { name = "Rex" }` / shorthand `Dog { name }` (language-spec
+    /// §11). `owned` marks the `:Dog { ... }` form — the caller has
+    /// already consumed the leading `:` and is passing its span folded
+    /// into `path_span`'s start where relevant (see
+    /// [`Parser::parse_owned_struct_lit`]).
     pub(super) fn parse_struct_lit(
         &mut self,
         path: Path,
         path_span: nether_diagnostics::Span,
+        owned: bool,
     ) -> Expr {
         self.bump(); // '{'
         let mut fields = Vec::new();
         while !matches!(self.peek(), Token::Punct(Punct::RBrace)) && !self.is_eof() {
             let name = self.expect_ident();
-            let value = if self.eat_punct(Punct::Colon) {
+            let value = if self.eat_punct(Punct::Eq) {
                 self.parse_assign_expr()
             } else {
-                // shorthand `Dog { name }` = `Dog { name: name }`
+                // shorthand `Dog { name }` = `Dog { name = name }`
                 let path_id = self.next_id();
                 let expr_id = self.next_id();
                 Expr {
@@ -186,8 +186,60 @@ impl Parser {
         let id = self.next_id();
         Expr {
             id,
-            kind: ExprKind::StructLit { path, fields },
+            kind: ExprKind::StructLit {
+                path,
+                fields,
+                owned,
+            },
             span: path_span.to(end),
+        }
+    }
+
+    /// `:Dog { ... }` — an owned struct literal (language-spec §3, §11).
+    /// The leading `:` has already been consumed by the caller; this is
+    /// the only expression-position construct where the ownership sigil
+    /// appears directly, since it qualifies the literal itself rather than
+    /// a use site elsewhere (a `let`/parameter/return type is what
+    /// ordinarily carries it — language-spec §3).
+    pub(super) fn parse_owned_struct_lit(&mut self, colon_span: nether_diagnostics::Span) -> Expr {
+        let first = self.expect_ident();
+        let mut segments = vec![first];
+        while matches!(self.peek(), Token::Punct(Punct::Dot))
+            && matches!(self.peek_at(1), Token::Ident(_))
+        {
+            self.bump();
+            segments.push(self.expect_ident());
+        }
+        let path_span = segments[0].span.to(segments.last().unwrap().span);
+        let path_id = self.next_id();
+        let path = Path {
+            id: path_id,
+            segments,
+            span: path_span,
+        };
+        if matches!(self.peek(), Token::Punct(Punct::LBrace)) {
+            let mut lit = self.parse_struct_lit(path, path_span, true);
+            lit.span = colon_span.to(lit.span);
+            lit
+        } else {
+            let span = self.peek_span();
+            self.error(
+                span,
+                format!(
+                    "expected `{{` to start an owned struct literal, found {:?}",
+                    self.peek()
+                ),
+            );
+            let id = self.next_id();
+            Expr {
+                id,
+                kind: ExprKind::StructLit {
+                    path,
+                    fields: Vec::new(),
+                    owned: true,
+                },
+                span: colon_span.to(path_span),
+            }
         }
     }
 
@@ -264,7 +316,7 @@ impl Parser {
         }
         self.expect_punct(Punct::RParen, "to close a closure's parameters");
         self.expect_punct(Punct::FatArrow, "after a closure's parameters");
-        let body = self.parse_assign_expr();
+        let body = self.parse_expr_or_block();
         let span = start.to(body.span);
         let id = self.next_id();
         Expr {

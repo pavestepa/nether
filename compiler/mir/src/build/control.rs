@@ -55,6 +55,7 @@ impl FnBuilder<'_> {
         tail: Option<&MonoExpr>,
     ) -> Operand {
         self.scopes.push(Vec::new());
+        let mut diverges = false;
         for stmt in stmts {
             match &stmt.kind {
                 MonoStmtKind::Let { local, ty, value } => {
@@ -69,10 +70,12 @@ impl FnBuilder<'_> {
                     if self.sigs.has_managed_content(&value_ty, self.defs) {
                         self.scopes.last_mut().unwrap().push(mir_local);
                     }
+                    diverges |= matches!(value.ty, Type::Never);
                 }
                 MonoStmtKind::Expr(e) => {
                     let operand = self.lower_expr(e);
                     self.release_temporary_value(e, &operand);
+                    diverges |= matches!(e.ty, Type::Never);
                 }
             }
         }
@@ -81,7 +84,13 @@ impl FnBuilder<'_> {
             None => Operand::Unit,
         };
         let depth = self.scopes.len() - 1;
-        self.release_scopes(depth, escaping_local(&result));
+        // A `return`/`break`/`continue` already released every scope it
+        // exits before terminating its live block. The builder's fresh
+        // post-terminator block is unreachable bookkeeping and must not
+        // receive a second set of releases.
+        if !diverges {
+            self.release_scopes(depth, escaping_local(&result));
+        }
         self.scopes.pop();
         result
     }

@@ -24,7 +24,7 @@
 //!   finish that disambiguation.
 //! - Give every function/method a stable [`node::HirFnId`] — including
 //!   one freshly lowered per concrete type that inherits (rather than
-//!   overrides) an interface default method, since `self`'s meaning
+//!   overrides) a trait default method, since `self`'s meaning
 //!   differs per owner even though the source `fn` body is shared.
 //! - Carry a [`nether_typecheck::Type`] on every [`node::HirExpr`]
 //!   directly (read from [`nether_typecheck::TypedTables`] at lowering
@@ -58,7 +58,7 @@
 //! applies):
 //! - A method call on a value of still-generic type only supports the
 //!   single-bound case, matching `nether_typecheck`'s own limit —
-//!   [`node::HirExprKind::CallGenericMethod`] carries one bound interface,
+//!   [`node::HirExprKind::CallGenericMethod`] carries one bound trait,
 //!   not a general constraint set.
 //! - Closures carry explicit capture lists; monomorphization lifts their
 //!   bodies and codegen constructs the ARC-managed environments.

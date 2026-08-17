@@ -86,6 +86,13 @@ impl Checker<'_> {
                     .get(&id)
                     .map(|(t, _)| t.clone())
                     .unwrap_or(Type::Error);
+                // Whole-value read (nothing left in the path after this
+                // local) vs. read-through (a field/method segment
+                // follows) — see `Checker::check_move`'s docs. A trailing
+                // *consuming* method call overrides the read-through
+                // verdict separately, below, once the chosen overload's
+                // `self_param` is known.
+                self.check_move(id, &ty, path.span, res.consumed == total);
                 if res.consumed == total {
                     if let Some(args) = call_args {
                         if !generic_args.is_empty() {
@@ -136,6 +143,17 @@ impl Checker<'_> {
                         Resolution::Local(id) => self.locals.get(&id).map(|(_, m)| *m),
                         _ => None,
                     };
+                    // Only a bare local *directly* followed by this one
+                    // trailing call segment is a move candidate — e.g.
+                    // `dog.greet()`, not `holder.dog.greet()` (there,
+                    // `holder.dog`'s field read already went through the
+                    // read-through check above, and its own type is
+                    // never `Type::Unique` per language-spec §4.2, so
+                    // there's nothing further to consume here).
+                    let receiver_local = match res.base {
+                        Resolution::Local(id) if total - res.consumed == 1 => Some(id),
+                        _ => None,
+                    };
                     return self.check_method_call_on(
                         &current_ty,
                         seg,
@@ -144,6 +162,7 @@ impl Checker<'_> {
                         seg.span,
                         call_id,
                         receiver_mutable,
+                        receiver_local,
                     );
                 }
             }
@@ -164,14 +183,14 @@ impl Checker<'_> {
         let def = self.resolved.definitions.get(id);
         let name = def.name.clone();
         match def.kind {
-            DefKind::Primitive => {
+            DefKind::Primitive | DefKind::TypeAlias => {
                 self.err(span, format!("`{name}` is a type, not a value"));
                 Type::Error
             }
-            DefKind::Interface => {
+            DefKind::Trait => {
                 self.err(
                     span,
-                    format!("`{name}` is an interface and has no value form"),
+                    format!("`{name}` is a trait and has no value form"),
                 );
                 Type::Error
             }
@@ -227,6 +246,9 @@ impl Checker<'_> {
                 }
             };
         }
+        if name.as_str() == "to" {
+            return self.check_to_conversion(span, call_args, expected, generic_args);
+        }
         match self.sigs.fns.get(&id).cloned() {
             Some(sig) => match call_args {
                 Some(args) => {
@@ -257,5 +279,96 @@ impl Checker<'_> {
             },
             None => Type::Error,
         }
+    }
+
+    /// `to(value)` — the universal ownership-domain conversion
+    /// (language-spec §9). Only the target-inferred-from-context form is
+    /// implemented (Stage 2, slice 4); `to<T>(value)`'s explicit form is a
+    /// smaller, deferred follow-up.
+    ///
+    /// Three of the four transitions (`:T -> T`, `:t -> t`, `t -> :t`) are
+    /// pure type-system relabeling — `:T`/`T` already share identical
+    /// runtime representation (§3.2), and an inline value is an
+    /// independent bit-copy already, so promoting it to `:t` aliases
+    /// nothing. `T -> :T` is different: the source may have other live
+    /// ARC aliases, so relabeling it `:T` without an actual deep copy
+    /// would produce a "uniquely owned" value that isn't — that direction
+    /// stays rejected until `Clone` exists (spec §10, Stage 3).
+    fn check_to_conversion(
+        &mut self,
+        span: Span,
+        call_args: Option<&[Expr]>,
+        expected: Option<&Type>,
+        generic_args: &[Type],
+    ) -> Type {
+        if !generic_args.is_empty() {
+            self.err(
+                span,
+                "`to<T>(value)`'s explicit target form is not yet implemented — write `to(value)` and let the target be inferred from context",
+            );
+        }
+        let Some(args) = call_args else {
+            self.err(span, "`to` must be called");
+            return Type::Error;
+        };
+        if args.len() != 1 {
+            self.err(
+                span,
+                format!("`to` takes exactly 1 argument, found {}", args.len()),
+            );
+            for a in args {
+                self.check_expr(a);
+            }
+            return Type::Error;
+        }
+        let Some(target) = expected.cloned() else {
+            self.err(
+                span,
+                "cannot infer the target type of `to(value)`; add a type annotation",
+            );
+            self.check_expr(&args[0]);
+            return Type::Error;
+        };
+        let arg_ty = self.check_expr_with_expected(&args[0], Some(&target));
+        match (&arg_ty, &target) {
+            (Type::Unique(source_inner), _) if !matches!(target, Type::Unique(_)) => {
+                if !source_inner.compatible(&target) {
+                    let expected_s = self.describe(&target);
+                    let found_s = self.describe(source_inner);
+                    self.err(
+                        args[0].span,
+                        format!("expected `{expected_s}`, found `{found_s}`"),
+                    );
+                }
+            }
+            (_, Type::Unique(target_inner)) if !matches!(arg_ty, Type::Unique(_)) => {
+                if !arg_ty.compatible(target_inner) {
+                    let expected_s = self.describe(target_inner);
+                    let found_s = self.describe(&arg_ty);
+                    self.err(
+                        args[0].span,
+                        format!("expected `{expected_s}`, found `{found_s}`"),
+                    );
+                } else if crate::alloc::alloc_kind(&arg_ty, &self.resolved.definitions)
+                    == crate::alloc::AllocKind::Heap
+                {
+                    self.err(
+                        args[0].span,
+                        format!(
+                            "`to()` cannot convert `{}` to its owned form yet — this direction requires `Clone`, not yet implemented (language-spec §10, Stage 3)",
+                            self.describe(&arg_ty)
+                        ),
+                    );
+                }
+            }
+            _ if arg_ty.is_error() || target.is_error() => {}
+            _ => {
+                self.err(
+                    args[0].span,
+                    "`to(value)` must convert between the owned and ordinary form of the same type — one side must be `:T`/`:t` and the other its plain counterpart",
+                );
+            }
+        }
+        target
     }
 }

@@ -39,6 +39,10 @@ impl Checker<'_> {
     /// must not: the new value needs checking against the real `weak T`
     /// storage type, not the `Option<T>` reading it back out would give).
     pub(super) fn field_type_named(&mut self, base_ty: &Type, ident: &Ident) -> Type {
+        // `strip_indirection` (not just `strip_unique`) so a field is
+        // reachable through a `:&T`/`:&mut T` parameter the same way it
+        // already is through `T`/`:T` (Stage 2, slice 2).
+        let base_ty = base_ty.strip_indirection();
         if let Type::Struct(_, _) = base_ty {
             if let Some(fields) = self.sigs.named_type_fields(base_ty) {
                 if let Some((_, ty)) = fields.into_iter().find(|(n, _)| n == &ident.name) {
@@ -101,11 +105,21 @@ impl Checker<'_> {
     ) -> Type {
         let cond_ty = self.check_expr(cond);
         self.require_bool(&cond_ty, cond.span, "`if` condition");
-        let then_ty = self.check_block_with_expected(then_branch, expected);
+        // `then`/`else` are mutually exclusive at runtime, so each is
+        // move-checked from the *same* pre-branch state
+        // (`Checker::moved_snapshot`), then merged back
+        // (`Checker::merge_branches`) — a value moved on only one live-
+        // reaching arm counts as moved after the `if`.
+        let (then_ty, then_moved) =
+            self.moved_snapshot(|this| this.check_block_with_expected(then_branch, expected));
+        let then_diverges = matches!(then_ty, Type::Never);
         match else_branch {
             Some(e) => {
                 let else_expected = expected.or(Some(&then_ty));
-                let else_ty = self.check_expr_with_expected(e, else_expected);
+                let (else_ty, else_moved) =
+                    self.moved_snapshot(|this| this.check_expr_with_expected(e, else_expected));
+                let else_diverges = matches!(else_ty, Type::Never);
+                self.merge_branches(vec![(then_diverges, then_moved), (else_diverges, else_moved)]);
                 if !then_ty.compatible(&else_ty) {
                     let then_s = self.describe(&then_ty);
                     let else_s = self.describe(&else_ty);
@@ -127,7 +141,12 @@ impl Checker<'_> {
                 }
                 result
             }
-            None => Type::unit(),
+            None => {
+                // A missing `else` is exactly "the condition was false" —
+                // an implicit branch that moves nothing.
+                self.merge_branches(vec![(then_diverges, then_moved)]);
+                Type::unit()
+            }
         }
     }
 
@@ -142,15 +161,17 @@ impl Checker<'_> {
         let mut result_ty: Option<Type> = None;
         let mut covered: HashSet<u32> = HashSet::new();
         let mut has_catch_all = false;
+        // Every arm is move-checked from the same pre-`match` state and
+        // merged back after the loop — mutually exclusive at runtime, same
+        // reasoning as `check_if`'s `then`/`else`.
+        let mut arm_moves = Vec::with_capacity(arms.len());
         for arm in arms {
-            self.check_pattern(
-                &arm.pattern,
-                &scrutinee_ty,
-                &mut covered,
-                &mut has_catch_all,
-            );
-            let arm_expected = expected.or(result_ty.as_ref());
-            let body_ty = self.check_expr_with_expected(&arm.body, arm_expected);
+            let (body_ty, moved) = self.moved_snapshot(|this| {
+                this.check_pattern(&arm.pattern, &scrutinee_ty, &mut covered, &mut has_catch_all);
+                let arm_expected = expected.or(result_ty.as_ref());
+                this.check_expr_with_expected(&arm.body, arm_expected)
+            });
+            arm_moves.push((matches!(body_ty, Type::Never), moved));
             result_ty = Some(match result_ty {
                 None => body_ty,
                 Some(prev) => {
@@ -172,6 +193,7 @@ impl Checker<'_> {
                 }
             });
         }
+        self.merge_branches(arm_moves);
         if let Type::Enum(enum_id, _) = &scrutinee_ty {
             if !has_catch_all {
                 if let Some(enum_sig) = self.sigs.enum_sigs.get(enum_id) {
@@ -403,7 +425,9 @@ impl Checker<'_> {
         let mut has_catch_all = false;
         self.check_pattern(pattern, &elem_ty, &mut covered, &mut has_catch_all);
         self.loop_depth += 1;
-        self.check_block(body);
+        self.check_loop_body_with_fixpoint(|this| {
+            this.check_block(body);
+        });
         self.loop_depth -= 1;
         Type::unit()
     }

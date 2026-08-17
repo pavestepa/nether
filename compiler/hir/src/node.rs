@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use nether_ast::{BinaryOp, Literal, SelfParam, Symbol, UnaryOp};
 use nether_resolver::DefId;
-use nether_typecheck::{GenericBound, Signatures, Type};
+use nether_typecheck::{GenericBound, ReceiverDomain, Signatures, Type};
 
 /// Identifies one function or method for the lifetime of one lowered
 /// [`HirModule`] — minted fresh here rather than reusing
@@ -40,12 +40,12 @@ pub struct HirModule {
     pub fn_by_name: HashMap<Symbol, HirFnId>,
     /// Standalone functions by their module-qualified resolver identity.
     pub fn_by_def: HashMap<DefId, HirFnId>,
-    /// `impl`/`interface` methods (including inherited interface
+    /// `impl`/`trait` methods (including inherited trait
     /// defaults), by `(owner type/enum DefId, method name)` — mirrors
     /// `Signatures::methods`' key shape and, like it, one owner/name pair
     /// can hold both a generic body and concrete-specialization overrides
     /// (see [`MethodFnSet`]).
-    pub methods: HashMap<(DefId, Symbol), MethodFnSet>,
+    pub methods: HashMap<(DefId, Symbol, ReceiverDomain), MethodFnSet>,
     /// `Array`'s own `DefId`, if this module was compiled with the bundled
     /// prelude (`None` for a prelude-less test fixture, which can still
     /// use array *literals* — those need no declaration at all). Unlike
@@ -218,13 +218,19 @@ pub enum HirExprKind {
     /// generic parameter — resolvable only once `monomorphization`
     /// substitutes a concrete type for it. Kept
     /// distinct from [`HirExprKind::CallStatic`] since there is no single
-    /// `HirFnId` to call until then; `bound_interface` names which
-    /// interface declares `method_name`.
+    /// `HirFnId` to call until then; `bound_trait` names which
+    /// trait declares `method_name`.
     CallGenericMethod {
         receiver: Box<HirExpr>,
-        bound_interface: DefId,
+        bound_trait: DefId,
         method_name: Symbol,
         is_static: bool,
+        /// The receiver's ownership domain, computed from its *pre-
+        /// lowering* AST type (`Lowerer::receiver_domain_of`) — `ty_of`
+        /// strips `Type::Unique` from every `HirExpr::ty` by design, so
+        /// `receiver.ty` alone can't answer this once lowering has run.
+        /// Meaningless (never read) when `is_static` is `true`.
+        domain: ReceiverDomain,
         generic_args: Vec<Type>,
         args: Vec<HirExpr>,
     },
@@ -250,6 +256,11 @@ pub enum HirExprKind {
     CallMethod {
         receiver: Box<HirExpr>,
         method_name: Symbol,
+        /// See [`HirExprKind::CallGenericMethod`]'s identical field — same
+        /// reason, always meaningfully `Arc`/`Owned` here since a static
+        /// method never reaches `CallMethod` at all (resolved directly to
+        /// [`HirExprKind::CallStatic`] instead).
+        domain: ReceiverDomain,
         generic_args: Vec<Type>,
         args: Vec<HirExpr>,
     },

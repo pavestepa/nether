@@ -1,9 +1,10 @@
 use nether_ast::Symbol;
 use nether_diagnostics::SourceMap;
 use nether_hir::{lower, HirExprKind, HirModule, HirStmtKind};
+use nether_typecheck::ReceiverDomain;
 
-#[path = "lower_tests/weak_and_interfaces.rs"]
-mod weak_and_interfaces;
+#[path = "lower_tests/weak_and_traits.rs"]
+mod weak_and_traits;
 
 fn lower_source(source: &str) -> HirModule {
     let mut map = SourceMap::new();
@@ -81,6 +82,7 @@ fn find_expr<'a>(
         HirExprKind::Assign { target, value } => {
             find_expr(target, pred).or_else(|| find_expr(value, pred))
         }
+        HirExprKind::Return(value) => value.as_ref().and_then(|value| find_expr(value, pred)),
         _ => None,
     }
 }
@@ -99,35 +101,35 @@ fn main() {
     println(a.into_string());
 }
 
-type Lang {
-    name: String
+struct Lang {
+    name String
 }
 
 impl Lang {
-    new(name: String): Lang {
-        Lang { name }
+    new(name String) Lang {
+        return Lang { name };
     }
 
-    set_name(mut self, new_name: String) {
+    set_name(mut self, new_name String) {
         self.name = new_name;
     }
 }
 
-impl Lang: Into<String> {
-    into_string(self): String {
-        `name: ${self.name}`
+impl Lang Into<String> {
+    into_string(self) String {
+        return `name: ${self.name}`;
     }
 }
 
-interface Sound {
-    sound(): String {
-        "..."
+trait Sound {
+    sound() String {
+        return "...";
     }
 }
 
-impl Lang: Sound {
-    sound(): String {
-        "Woof! Ruff!"
+impl Lang Sound {
+    sound() String {
+        return "Woof! Ruff!";
     }
 }
 "#,
@@ -138,7 +140,7 @@ impl Lang: Sound {
 
 #[test]
 fn standalone_function_call_becomes_call_static() {
-    let hir = lower_source("fn helper(x: i32): i32 { x }\nfn main() { let y = helper(1); }");
+    let hir = lower_source("fn helper(x i32) i32 { return x; }\nfn main() { let y = helper(1); }");
     let helper_id = *hir.fn_by_name.get(&Symbol::new("helper")).unwrap();
     let main_body = fn_body(&hir, "main");
     let found = find_expr(
@@ -152,7 +154,7 @@ fn standalone_function_call_becomes_call_static() {
 fn explicit_generic_arguments_are_kept_on_hir_calls() {
     let hir = lower_source(
         r#"
-fn opaque<T>(value: i32): i32 { value }
+fn opaque<T>(value i32) i32 { return value; }
 fn main() {
     opaque<String>(2);
 }
@@ -176,9 +178,9 @@ fn main() {
 fn static_method_call_becomes_call_static_with_no_receiver() {
     let hir = lower_source(
         r#"
-type Dog { name: String }
+struct Dog { name String }
 impl Dog {
-    new(name: String): Dog { Dog { name } }
+    new(name String) Dog { return Dog { name }; }
 }
 fn main() {
     let d = Dog.new("Rex");
@@ -188,7 +190,7 @@ fn main() {
     let dog_id = hir.signatures.type_shapes.keys().next().copied().unwrap();
     let new_id = hir
         .methods
-        .get(&(dog_id, Symbol::new("new")))
+        .get(&(dog_id, Symbol::new("new"), ReceiverDomain::Static))
         .unwrap()
         .generic
         .unwrap();
@@ -211,18 +213,20 @@ fn instance_method_call_becomes_call_method_with_receiver_kept_separate() {
     // receiver stays its own field rather than being prepended to `args`.
     let hir = lower_source(
         r#"
-type Dog { name: String }
+struct Dog { name String }
 impl Dog {
-    greet(self, other: String): String { self.name }
+    greet(self, other String) String { return self.name; }
 }
 fn main() {
-    let d = Dog { name: "Rex" };
+    let d = Dog { name = "Rex" };
     let g = d.greet("hi");
 }
 "#,
     );
     let dog_id = hir.signatures.type_shapes.keys().next().copied().unwrap();
-    assert!(hir.methods.contains_key(&(dog_id, Symbol::new("greet"))));
+    assert!(hir
+        .methods
+        .contains_key(&(dog_id, Symbol::new("greet"), ReceiverDomain::Arc)));
     let main_body = fn_body(&hir, "main");
     let found = find_expr(
         main_body,
@@ -243,9 +247,9 @@ fn user_defined_array_method_becomes_call_method_but_builtins_stay_call_array_me
     // `len`/`push`/`pop` keep the dedicated `CallArrayMethod` fast path.
     let hir = lower_source(
         r#"
-type Array<T>;
+struct Array<T>;
 impl<T> Array<T> {
-    first(self): T { self[0] }
+    first(self) T { return self[0]; }
 }
 fn main() {
     let a = [1, 2, 3];
@@ -257,7 +261,9 @@ fn main() {
     let array_id = hir
         .array_owner
         .expect("Array is declared in this test's own source");
-    assert!(hir.methods.contains_key(&(array_id, Symbol::new("first"))));
+    assert!(hir
+        .methods
+        .contains_key(&(array_id, Symbol::new("first"), ReceiverDomain::Arc)));
     let main_body = fn_body(&hir, "main");
     let found_call_method = find_expr(
         main_body,
@@ -281,10 +287,10 @@ fn main() {
 fn struct_literal_and_tuple_struct_construction_unify_to_construct() {
     let hir = lower_source(
         r#"
-type Dog { name: String, age: i32 }
-type Point(i32, i32);
+struct Dog { name String, age i32 }
+struct Point(i32, i32);
 fn main() {
-    let d = Dog { age: 3, name: "Rex" };
+    let d = Dog { age = 3, name = "Rex" };
     let p = Point(1, 2);
 }
 "#,
@@ -345,7 +351,7 @@ fn main() {
 
 #[test]
 fn reading_a_weak_field_desugars_to_a_weak_upgrade_builtin_call() {
-    // `Option` is an ordinary prelude `enum` now (`stdlib/option.nt`), not
+    // `Option` is an ordinary prelude `enum` now (`stdlib/option.nr`), not
     // a compiler builtin — `lower_source` resolves a bare parsed `Module`
     // directly, no driver, no prelude loading, so this declares its own
     // stand-in with the same shape (`nether_hir` only ever sees a
@@ -357,13 +363,13 @@ enum Option<T> {
     Some(T),
     None,
 }
-type Child { name: String }
-type Parent { kid: weak Child }
-fn describe(p: Parent): String {
-    match p.kid {
+struct Child { name String }
+struct Parent { kid weak Child }
+fn describe(p Parent) String {
+    return match p.kid {
         Some(c) => c.name,
         None => "none",
-    }
+    };
 }
 fn main() {}
 "#,

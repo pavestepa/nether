@@ -194,16 +194,16 @@ fn main() {
 fn weak_and_array_type_annotations() {
     let module = parse_ok(
         r#"
-type Node {
-    parent: weak Node,
-    children: [Node]
+struct Node {
+    parent weak Node,
+    children [Node]
 }
 "#,
     );
-    let Item::Type(decl) = &module.items[0] else {
-        panic!("expected TypeDecl")
+    let Item::Struct(decl) = &module.items[0] else {
+        panic!("expected StructDecl")
     };
-    let TypeDeclKind::Struct(fields) = &decl.kind else {
+    let StructDeclKind::Struct(fields) = &decl.kind else {
         panic!("expected Struct")
     };
     assert!(matches!(fields[0].ty, nether_ast::TypeExpr::Weak(_, _)));
@@ -212,12 +212,12 @@ type Node {
 
 #[test]
 fn malformed_item_reports_diagnostic_and_recovers() {
-    let source = "type;\ntype Dog { name: String }\n";
+    let source = "struct;\nstruct Dog { name String }\n";
     let (module, diags) = parse_with_diagnostics(source);
     assert!(!diags.is_empty());
-    // recovery should still find the second, well-formed type declaration
+    // recovery should still find the second, well-formed struct declaration
     assert!(module
         .items
         .iter()
-        .any(|item| matches!(item, Item::Type(t) if t.name.name.as_str() == "Dog")));
+        .any(|item| matches!(item, Item::Struct(t) if t.name.name.as_str() == "Dog")));
 }

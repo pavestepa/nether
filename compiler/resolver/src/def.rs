@@ -10,7 +10,7 @@ mod collect;
 pub use collect::collect;
 
 /// Identifies one top-level definition (a primitive, a `type`, an `enum`,
-/// an `interface`, or a `fn`) for the lifetime of one [`resolve`](crate::resolve)
+/// an `trait`, or a `fn`) for the lifetime of one [`resolve`](crate::resolve)
 /// call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DefId(pub(crate) u32);
@@ -22,13 +22,18 @@ pub enum DefKind {
     /// instead, the first point in the pipeline that needs to know they
     /// exist).
     Primitive,
-    /// A struct, tuple-struct, or unit `type` declaration, or a built-in
-    /// heap type (`String`, `Array`).
+    /// A struct, tuple-struct, or unit `struct` declaration, or a
+    /// built-in heap type (`String`, `Array`).
     Type,
+    /// A `type Name = TypeExpr;` alias declaration (language-spec §4.3).
+    /// Transparent at the type level — `typecheck` substitutes through to
+    /// the alias's underlying [`TypeExpr`] rather than this ever becoming
+    /// its own `Type` variant.
+    TypeAlias,
     /// An `enum` declaration — including `Option`/`Result`, ordinary
     /// generic enums declared in the bundled prelude, not builtins.
     Enum,
-    Interface,
+    Trait,
     /// A standalone `fn`, or a built-in function (`println`, `print`).
     Fn,
     /// Compatibility placeholder used only when `resolver` is invoked on
@@ -50,7 +55,7 @@ pub struct Def {
 }
 
 /// The top-level namespace for one resolved module: every primitive,
-/// built-in, and user-declared `type`/`enum`/`interface`/`fn`, keyed by
+/// built-in, and user-declared `type`/`enum`/`trait`/`fn`, keyed by
 /// name.
 #[derive(Default)]
 pub struct Definitions {
@@ -59,7 +64,7 @@ pub struct Definitions {
     builtins: HashMap<Symbol, DefId>,
     by_file_name: HashMap<(FileId, Symbol), DefId>,
     imports: HashMap<(FileId, Symbol), DefId>,
-    /// Names re-exported by the bundled prelude file (`stdlib/mod.nt`'s
+    /// Names re-exported by the bundled prelude file (`stdlib/mod.nr`'s
     /// own top-level `use` declarations) — visible from every file with no
     /// `use` of their own, like `builtins`, but with lower priority: a
     /// local declaration of the same name is a legal shadow, not a

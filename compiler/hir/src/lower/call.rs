@@ -42,11 +42,16 @@ impl Lowerer<'_> {
         result_ty: Type,
     ) -> HirExpr {
         let generic_args = self.generic_args_for(call_id);
+        // Computed from the receiver AST node's *raw* (un-stripped) type —
+        // see `receiver_domain_of`'s own docs — before lowering the
+        // receiver itself erases the owned/ARC distinction.
+        let receiver_domain = self.receiver_domain_of(receiver.id);
         let receiver_hir = self.lower_expr(receiver);
         let receiver_ty = receiver_hir.ty.clone();
         self.lower_method_call_on(
             receiver_hir,
             &receiver_ty,
+            receiver_domain,
             method,
             args,
             &generic_args,
@@ -160,6 +165,7 @@ impl Lowerer<'_> {
         base_ty: &Type,
         ident: &Ident,
     ) -> (HirExpr, Type) {
+        let base_ty = base_ty.strip_unique();
         if let Type::Struct(_, _) = base_ty {
             if let Some(fields) = self.sigs.named_type_fields(base_ty) {
                 if let Some(idx) = fields.iter().position(|(n, _)| n == &ident.name) {

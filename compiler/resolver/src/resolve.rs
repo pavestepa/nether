@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use nether_ast::{
     Block, EnumDecl, Expr, ExprKind, FnDecl, GenericParam, ImplBlock, Item, Module, NodeId, Param,
-    Path, Pattern, Stmt, Symbol, TypeDecl, TypeExpr, UseDecl,
+    Path, Pattern, Stmt, Symbol, StructDecl, TypeExpr, UseDecl,
 };
 use nether_diagnostics::Diagnostic;
 
@@ -24,7 +24,7 @@ pub enum Resolution {
     /// pattern binding.
     Local(LocalId),
     /// The whole path names this definition directly, with no trailing
-    /// member segment (a bare type/enum/interface/fn/primitive name).
+    /// member segment (a bare type/enum/trait/fn/primitive name).
     Def(DefId),
     /// `Color.Red`, `Option.Some` — the enum and the variant's index
     /// within [`def::Def::variants`].
@@ -82,7 +82,7 @@ pub fn resolve(module: &Module) -> (ResolvedNames, Vec<Diagnostic>) {
 }
 
 /// Like [`resolve`], but additionally re-exports every top-level `use` in
-/// `prelude_file` (the driver's `stdlib/mod.nt`, when it loaded one) to
+/// `prelude_file` (the driver's `stdlib/mod.nr`, when it loaded one) to
 /// every other file with no `use` of their own — see
 /// [`def::Definitions::promote_to_prelude`]. `resolve` itself is `None`'s
 /// case, kept as the ordinary entry point for every caller that isn't the
@@ -97,7 +97,7 @@ pub fn resolve_with_prelude(
         .items
         .iter()
         .filter_map(|item| match item {
-            Item::Type(decl) => Some((
+            Item::Struct(decl) => Some((
                 (decl.span.file, decl.name.name.clone()),
                 decl.generics.clone(),
             )),
@@ -188,9 +188,9 @@ impl Resolver<'_> {
 
     fn resolve_item(&mut self, item: &Item) {
         match item {
-            Item::Type(t) => self.resolve_type_decl(t),
+            Item::Struct(t) => self.resolve_struct_decl(t),
             Item::Enum(e) => self.resolve_enum_decl(e),
-            Item::Interface(i) => {
+            Item::Trait(i) => {
                 self.push_generics(&i.generics);
                 for generic in &i.generics {
                     if let Some(bound) = &generic.bound {
@@ -210,31 +210,32 @@ impl Resolver<'_> {
             Item::Impl(b) => self.resolve_impl_block(b),
             Item::Use(u) => self.resolve_use_decl(u),
             Item::Mod(_) => {}
+            Item::TypeAlias(alias) => self.resolve_type_expr(&alias.ty),
         }
     }
 
-    fn resolve_type_decl(&mut self, t: &TypeDecl) {
+    fn resolve_struct_decl(&mut self, t: &StructDecl) {
         self.push_generics(&t.generics);
         for g in &t.generics {
             if let Some(bound) = &g.bound {
                 self.resolve_type_expr(bound);
             }
         }
-        for interface in &t.interfaces {
-            self.resolve_type_expr(interface);
+        for trait_ref in &t.traits {
+            self.resolve_type_expr(trait_ref);
         }
         match &t.kind {
-            nether_ast::TypeDeclKind::Struct(fields) => {
+            nether_ast::StructDeclKind::Struct(fields) => {
                 for field in fields {
                     self.resolve_type_expr(&field.ty);
                 }
             }
-            nether_ast::TypeDeclKind::TupleStruct(tys) => {
+            nether_ast::StructDeclKind::TupleStruct(tys) => {
                 for ty in tys {
                     self.resolve_type_expr(ty);
                 }
             }
-            nether_ast::TypeDeclKind::Unit => {}
+            nether_ast::StructDeclKind::Unit => {}
         }
         self.pop_generics();
     }
@@ -246,8 +247,8 @@ impl Resolver<'_> {
                 self.resolve_type_expr(bound);
             }
         }
-        for interface in &e.interfaces {
-            self.resolve_type_expr(interface);
+        for trait_ref in &e.traits {
+            self.resolve_type_expr(trait_ref);
         }
         for variant in &e.variants {
             for ty in &variant.payload {
@@ -274,8 +275,8 @@ impl Resolver<'_> {
             for arg in &b.target_args {
                 self.resolve_type_expr(arg);
             }
-            for interface in &b.interfaces {
-                self.resolve_type_expr(interface);
+            for trait_ref in &b.traits {
+                self.resolve_type_expr(trait_ref);
             }
             for method in &b.methods {
                 self.resolve_fn_decl(method);
@@ -289,8 +290,8 @@ impl Resolver<'_> {
             .cloned()
             .unwrap_or_default();
         self.push_generics(&owner_generics);
-        for interface in &b.interfaces {
-            self.resolve_type_expr(interface);
+        for trait_ref in &b.traits {
+            self.resolve_type_expr(trait_ref);
         }
         for method in &b.methods {
             self.resolve_fn_decl(method);
@@ -349,7 +350,11 @@ impl Resolver<'_> {
                     self.resolve_type_expr(e);
                 }
             }
-            TypeExpr::Array(inner, _) | TypeExpr::Weak(inner, _) => self.resolve_type_expr(inner),
+            TypeExpr::Array(inner, _)
+            | TypeExpr::Weak(inner, _)
+            | TypeExpr::Unique(inner, _)
+            | TypeExpr::Ref(inner, _)
+            | TypeExpr::MutRef(inner, _) => self.resolve_type_expr(inner),
             TypeExpr::Function { params, ret, .. } => {
                 for p in params {
                     self.resolve_type_expr(p);

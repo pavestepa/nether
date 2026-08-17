@@ -49,7 +49,7 @@ impl Parser {
         while !matches!(self.peek(), Token::Punct(Punct::RBrace)) && !self.is_eof() {
             let pattern = self.parse_pattern();
             self.expect_punct(Punct::FatArrow, "after a match pattern");
-            let body = self.parse_assign_expr();
+            let body = self.parse_expr_or_block();
             let arm_span = pattern.span().to(body.span);
             arms.push(MatchArm {
                 pattern,

@@ -8,11 +8,11 @@ fn constructing_a_weak_field_from_a_heap_value_uses_weak_retain_not_retain() {
     // `weak`-typed copy (`nether_mir::build::FnBuilder::prepare_weak_binding`).
     let functions = build(
         r#"
-type Child { name: String }
-type Parent { kid: weak Child }
+struct Child { name String }
+struct Parent { kid weak Child }
 fn main() {
-    let c = Child { name: "Rex" };
-    let p = Parent { kid: c };
+    let c = Child { name = "Rex" };
+    let p = Parent { kid = c };
 }
 "#,
     );
@@ -31,14 +31,14 @@ fn main() {
 fn assigning_into_a_weak_field_uses_weak_release_and_weak_retain() {
     let functions = build(
         r#"
-type Child { name: String }
-type Parent { kid: weak Child }
-fn set_kid(mut p: Parent, c: Child) {
+struct Child { name String }
+struct Parent { kid weak Child }
+fn set_kid(p mut Parent, c Child) {
     p.kid = c;
 }
 fn main() {
-    let mut p = Parent { kid: Child { name: "Rex" } };
-    let c = Child { name: "Buddy" };
+    let mut p = Parent { kid = Child { name = "Rex" } };
+    let c = Child { name = "Buddy" };
     set_kid(mut p, c);
 }
 "#,
@@ -82,16 +82,16 @@ fn main() {
 fn match_on_enum_with_heap_payload_binds_via_variant_field_retain() {
     let functions = build(
         r#"
-type Dog { name: String }
+struct Dog { name String }
 enum Wrapper { Boxed(Dog), Empty }
-fn unwrap(w: Wrapper): String {
-    match w {
+fn unwrap(w Wrapper) String {
+    return match w {
         Boxed(d) => d.name,
         Empty => "none",
-    }
+    };
 }
 fn main() {
-    let w = Wrapper.Boxed(Dog { name: "Rex" });
+    let w = Wrapper.Boxed(Dog { name = "Rex" });
     let s = unwrap(w);
     println(s);
 }
@@ -127,11 +127,11 @@ fn main() {
 fn while_loop_body_release_is_inside_the_loop_not_after_it() {
     let functions = build(
         r#"
-type Dog { name: String }
+struct Dog { name String }
 fn main() {
     let mut i = 0;
     while i < 3 {
-        let d = Dog { name: "Rex" };
+        let d = Dog { name = "Rex" };
         println(d.name);
         i = i + 1;
     }
@@ -157,7 +157,7 @@ fn main() {
 fn mut_parameter_of_stack_type_gets_no_retain_or_release() {
     let functions = build(
         r#"
-fn bump(mut x: i32) {
+fn bump(x mut i32) {
     x = x + 1;
 }
 fn main() {
@@ -177,10 +177,10 @@ fn main() {
 fn reassigning_an_existing_heap_variable_releases_the_old_value() {
     let functions = build(
         r#"
-type Dog { name: String }
+struct Dog { name String }
 fn main() {
-    let mut d = Dog { name: "Rex" };
-    d = Dog { name: "Buddy" };
+    let mut d = Dog { name = "Rex" };
+    d = Dog { name = "Buddy" };
 }
 "#,
     );

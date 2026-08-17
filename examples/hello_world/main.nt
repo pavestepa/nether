@@ -1,7 +1,0 @@
-fn main() {
-    println(`${foo(2)}`);
-}
-
-fn foo(a: i32): i32 {
-    return a;
-}

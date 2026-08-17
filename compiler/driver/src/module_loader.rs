@@ -13,42 +13,85 @@ fn bundled_stdlib_root() -> PathBuf {
 }
 
 /// Loads the entry file and its module graph. `mod user;` declares a
-/// child at `user.nt`/`user.nr` or `user/mod.nt`/`user/mod.nr`; `use`
-/// imports a declaration from a loaded relative module. `self`, `super`
-/// and `crate` may start a use path. Legacy direct `use user.User`
-/// loading remains accepted, and `stdlib.*`/`std.*` resolve from the
-/// workspace root — `mod std;` is the same external root under an
-/// alternate name (`resolve_use_module`/`load_module_recursive`'s `mod`
-/// loop both special-case it).
+/// child at `user.nr` or `user/mod.nr`; `use` imports a declaration from
+/// a loaded relative module. `self`, `super` and `crate` may start a use
+/// path. Legacy direct `use user.User` loading remains accepted, and
+/// `stdlib.*`/`std.*` resolve from the workspace root — `mod std;` is the
+/// same external root under an alternate name
+/// (`resolve_use_module`/`load_module_recursive`'s `mod` loop both
+/// special-case it).
 ///
-/// `stdlib/mod.nt` (the bundled prelude) is additionally always loaded,
+/// `stdlib/mod.nr` (the bundled prelude) is additionally always loaded,
 /// independent of whether the entry module graph references it, so that
 /// hand-written `impl` blocks on builtin owners such as `Option`
-/// (`stdlib/option.nt`) always register regardless of whether any file
+/// (`stdlib/option.nr`) always register regardless of whether any file
 /// `use`s them. Its own `FileId` is returned so `resolve_with_prelude`
 /// can re-export its top-level `use` names everywhere with no `use` of
 /// their own (`nether_resolver::Definitions::promote_to_prelude`).
-/// Absent — no bundled `stdlib/mod.nt` on disk — is not an error, just no
+/// Absent — no bundled `stdlib/mod.nr` on disk — is not an error, just no
 /// prelude.
 ///
 /// Loaded module items share one code-generation unit, while resolver
 /// namespaces remain separated by `FileId`. NodeIds are unique across the
 /// graph and every Span keeps its source file for precise diagnostics.
+///
+/// Nether source files use exactly the `.nr` extension; the legacy `.nt`
+/// extension is rejected with a useful diagnostic rather than silently
+/// accepted, both for the entry file (checked here) and for child/`use`
+/// modules (checked in [`ModuleLoader::load`] and [`resolve_use_module`]).
 pub(super) fn load_module_graph(
     path: &Path,
     source_map: &mut SourceMap,
 ) -> std::io::Result<(Module, Vec<Diagnostic>, Option<nether_diagnostics::FileId>)> {
     let entry_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let mut loader = ModuleLoader::new(source_map);
+
+    if let Some(diagnostic) = reject_legacy_extension(&entry_path) {
+        return Ok((
+            Module {
+                file: source_map.add_file(entry_path, String::new()),
+                items: Vec::new(),
+                imports: HashMap::new(),
+                variant_imports: HashMap::new(),
+            },
+            vec![diagnostic],
+            None,
+        ));
+    }
+
     let entry_file = loader.load(&entry_path, None, None)?;
 
     let prelude_file = bundled_stdlib_root()
-        .join("mod.nt")
+        .join("mod.nr")
         .canonicalize()
         .ok()
         .and_then(|prelude_path| loader.load(&prelude_path, None, None).ok());
 
     Ok(loader.finish(entry_file, prelude_file))
+}
+
+/// Nether source files must use exactly the `.nr` extension. Returns a
+/// diagnostic naming the legacy `.nt` extension explicitly when that is
+/// what was given, since that is the migration a user is most likely to
+/// still be mid-way through.
+fn reject_legacy_extension(path: &Path) -> Option<Diagnostic> {
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some("nr") => None,
+        Some("nt") => Some(
+            Diagnostic::error(format!(
+                "`.nt` is no longer a supported Nether source extension: `{}`",
+                path.display()
+            ))
+            .with_hint("rename this file's extension from `.nt` to `.nr`"),
+        ),
+        _ => Some(
+            Diagnostic::error(format!(
+                "Nether source files must use the `.nr` extension: `{}`",
+                path.display()
+            ))
+            .with_hint("rename this file to end in `.nr`"),
+        ),
+    }
 }
 
 type FileId = nether_diagnostics::FileId;
@@ -126,7 +169,7 @@ impl<'a> ModuleLoader<'a> {
             };
             // `mod std;` mounts the bundled standard-library root.
             if mod_decl.name.name.as_str() == "std" {
-                let candidate = bundled_stdlib_root().join("mod.nt");
+                let candidate = bundled_stdlib_root().join("mod.nr");
                 if candidate.is_file() {
                     self.load(&candidate, None, None)?;
                     continue;
@@ -140,17 +183,10 @@ impl<'a> ModuleLoader<'a> {
                         Some(crate_root.clone()),
                     )?;
                 }
-                None => self.diagnostics.push(
-                    Diagnostic::error(format!("cannot find child module `{}`", mod_decl.name.name))
-                        .with_label(
-                            mod_decl.name.span,
-                            "expected a sibling module file or module directory",
-                        )
-                        .with_hint(format!(
-                            "create `{}.nt` or `{}/mod.nt` next to this module",
-                            mod_decl.name.name, mod_decl.name.name
-                        )),
-                ),
+                None => self.diagnostics.push(legacy_extension_or_missing_child_diagnostic(
+                    &normalized,
+                    &mod_decl.name,
+                )),
             }
         }
 
@@ -333,7 +369,12 @@ fn resolve_child_module_file(declaring_module: &Path, name: &nether_ast::Ident) 
     resolve_module_file(declaring_module, segment)
 }
 
-fn resolve_module_file(importer: &Path, segments: &[nether_ast::Ident]) -> Option<PathBuf> {
+/// The roots a module path is tried against, in order: a directory named
+/// after the importer's own file stem (so `user.nr`'s children live under
+/// `user/`), then the importer's parent directory directly. Shared between
+/// the real `.nr` lookup and the legacy-`.nt`-sibling check used only to
+/// improve the "module not found" diagnostic.
+fn module_search_roots(importer: &Path) -> Option<Vec<PathBuf>> {
     let parent = importer.parent()?;
     let stem = importer.file_stem().and_then(|stem| stem.to_str())?;
     let mut roots = Vec::new();
@@ -341,7 +382,11 @@ fn resolve_module_file(importer: &Path, segments: &[nether_ast::Ident]) -> Optio
         roots.push(parent.join(stem));
     }
     roots.push(parent.to_path_buf());
-    for root in roots {
+    Some(roots)
+}
+
+fn resolve_module_file(importer: &Path, segments: &[nether_ast::Ident]) -> Option<PathBuf> {
+    for root in module_search_roots(importer)? {
         if let Some(path) = resolve_module_file_from_root(&root, segments) {
             return Some(path);
         }
@@ -350,28 +395,67 @@ fn resolve_module_file(importer: &Path, segments: &[nether_ast::Ident]) -> Optio
 }
 
 fn resolve_module_file_from_root(root: &Path, segments: &[nether_ast::Ident]) -> Option<PathBuf> {
-    let mut extensions = Vec::new();
-    // Prefer the source extension used by the path's surrounding tree,
-    // then accept both Nether extensions.
-    if let Some(ext) = root.extension().and_then(|ext| ext.to_str()) {
-        extensions.push(ext);
+    find_file_with_extension(root, segments, "nr")
+}
+
+/// Looks for a `.nt` file where a `.nr` module was expected, purely to
+/// produce a more specific "rename this" diagnostic than a generic
+/// "module not found" — never used to actually load a module.
+fn resolve_legacy_nt_sibling(importer: &Path, segments: &[nether_ast::Ident]) -> Option<PathBuf> {
+    for root in module_search_roots(importer)? {
+        if let Some(path) = find_file_with_extension(&root, segments, "nt") {
+            return Some(path);
+        }
     }
-    extensions.extend(["nt", "nr"]);
-    extensions.sort();
-    extensions.dedup();
+    None
+}
+
+fn find_file_with_extension(
+    root: &Path,
+    segments: &[nether_ast::Ident],
+    extension: &str,
+) -> Option<PathBuf> {
     let mut base = root.to_path_buf();
     for segment in segments {
         base.push(segment.name.as_str());
     }
-    for extension in &extensions {
-        let flat = base.with_extension(extension);
-        if flat.is_file() {
-            return Some(flat);
-        }
-        let nested = base.join(format!("mod.{extension}"));
-        if nested.is_file() {
-            return Some(nested);
-        }
+    let flat = base.with_extension(extension);
+    if flat.is_file() {
+        return Some(flat);
+    }
+    let nested = base.join(format!("mod.{extension}"));
+    if nested.is_file() {
+        return Some(nested);
     }
     None
+}
+
+/// Builds the diagnostic for a `mod name;` declaration whose child file
+/// couldn't be found, special-casing the common case of an un-migrated
+/// `.nt` sibling still sitting on disk.
+fn legacy_extension_or_missing_child_diagnostic(
+    declaring_module: &Path,
+    name: &nether_ast::Ident,
+) -> Diagnostic {
+    let segment = std::slice::from_ref(name);
+    if let Some(legacy_path) = resolve_legacy_nt_sibling(declaring_module, segment) {
+        return Diagnostic::error(format!(
+            "`.nt` is no longer a supported Nether source extension: `{}`",
+            legacy_path.display()
+        ))
+        .with_label(name.span, "found only a `.nt` file for this module")
+        .with_hint(format!(
+            "rename `{}` to end in `.nr`",
+            legacy_path.display()
+        ));
+    }
+    Diagnostic::error(format!("cannot find child module `{}`", name.name))
+        .with_label(
+            name.span,
+            "expected a sibling module file or module directory",
+        )
+        .with_hint(format!(
+            "create `{}.nr` or `{}/mod.nr` next to this module",
+            name.name, name.name
+        ))
 }

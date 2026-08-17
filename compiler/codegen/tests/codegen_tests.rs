@@ -62,23 +62,23 @@ fn main() {
     println(a.into_string());
 }
 
-type Lang {
-    name: String
+struct Lang {
+    name String
 }
 
 impl Lang {
-    new(name: String): Lang {
-        Lang { name }
+    new(name String) Lang {
+        return Lang { name };
     }
 
-    set_name(mut self, new_name: String) {
+    set_name(mut self, new_name String) {
         self.name = new_name;
     }
 }
 
-impl Lang: Into<String> {
-    into_string(self): String {
-        `name: ${self.name}`
+impl Lang Into<String> {
+    into_string(self) String {
+        return `name: ${self.name}`;
     }
 }
 "#,
@@ -113,11 +113,11 @@ impl Lang: Into<String> {
 fn arithmetic_and_control_flow_compiles() {
     let (_cg, ir) = compile(
         r#"
-fn abs(x: i32): i32 {
+fn abs(x i32) i32 {
     if x < 0 {
-        0 - x
+        return 0 - x;
     } else {
-        x
+        return x;
     }
 }
 fn main() {
@@ -142,7 +142,7 @@ fn closure_with_stack_and_heap_captures_compiles_to_an_indirect_call() {
 fn main() {
     let base = 10;
     let prefix = "answer: ";
-    let format = (x: i32) => {
+    let format = (x i32) => {
         `${prefix}${base + x}`
     };
     println(format(5));
@@ -167,7 +167,7 @@ fn main() {
 fn named_function_value_uses_the_same_closure_call_abi() {
     let (_cg, ir) = compile(
         r#"
-fn add_one(x: i32): i32 { x + 1 }
+fn add_one(x i32) i32 { return x + 1; }
 fn main() {
     let f = add_one;
     println(`${f(4)}`);
@@ -188,16 +188,16 @@ fn main() {
 fn match_on_enum_with_heap_payload_compiles() {
     let (_cg, ir) = compile(
         r#"
-type Dog { name: String }
+struct Dog { name String }
 enum Wrapper { Boxed(Dog), Empty }
-fn unwrap(w: Wrapper): String {
-    match w {
+fn unwrap(w Wrapper) String {
+    return match w {
         Boxed(d) => d.name,
         Empty => "none",
-    }
+    };
 }
 fn main() {
-    let w = Wrapper.Boxed(Dog { name: "Rex" });
+    let w = Wrapper.Boxed(Dog { name = "Rex" });
     let s = unwrap(w);
     println(s);
 }
@@ -223,9 +223,9 @@ fn emits_a_c_abi_main_calling_nether_main() {
 fn constructing_a_heap_struct_with_a_heap_field_generates_a_drop_shim() {
     let (_cg, ir) = compile(
         r#"
-type Dog { name: String }
+struct Dog { name String }
 fn main() {
-    let d = Dog { name: "Rex" };
+    let d = Dog { name = "Rex" };
     println(d.name);
 }
 "#,
@@ -244,9 +244,9 @@ fn main() {
 fn constructing_a_heap_struct_with_no_heap_fields_passes_a_null_drop_fn() {
     let (_cg, ir) = compile(
         r#"
-type Point { x: i64, y: i64 }
+struct Point { x i64, y i64 }
 fn main() {
-    let p = Point { x: 1, y: 2 };
+    let p = Point { x = 1, y = 2 };
     println(`${p.x}`);
 }
 "#,
@@ -265,9 +265,9 @@ fn main() {
 fn array_of_heap_elements_passes_retain_and_release_as_elem_callbacks() {
     let (_cg, ir) = compile(
         r#"
-type Dog { name: String }
+struct Dog { name String }
 fn main() {
-    let dogs = [Dog { name: "Rex" }];
+    let dogs = [Dog { name = "Rex" }];
     println(`${dogs.len()}`);
 }
 "#,
@@ -300,11 +300,11 @@ fn main() {
 fn constructing_a_weak_field_calls_weak_retain_not_retain() {
     let (_cg, ir) = compile(
         r#"
-type Child { name: String }
-type Parent { kid: weak Child }
+struct Child { name String }
+struct Parent { kid weak Child }
 fn main() {
-    let c = Child { name: "Rex" };
-    let p = Parent { kid: c };
+    let c = Child { name = "Rex" };
+    let p = Parent { kid = c };
 }
 "#,
     );
@@ -318,14 +318,14 @@ fn main() {
 fn assigning_into_a_weak_field_calls_weak_release_and_weak_retain() {
     let (_cg, ir) = compile(
         r#"
-type Child { name: String }
-type Parent { kid: weak Child }
-fn set_kid(mut p: Parent, c: Child) {
+struct Child { name String }
+struct Parent { kid weak Child }
+fn set_kid(p mut Parent, c Child) {
     p.kid = c;
 }
 fn main() {
-    let mut p = Parent { kid: Child { name: "Rex" } };
-    let c = Child { name: "Buddy" };
+    let mut p = Parent { kid = Child { name = "Rex" } };
+    let c = Child { name = "Buddy" };
     set_kid(mut p, c);
 }
 "#,

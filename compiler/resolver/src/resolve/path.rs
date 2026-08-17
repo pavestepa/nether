@@ -17,7 +17,7 @@ impl Resolver<'_> {
 
         let Some(id) = self.defs.lookup_in(path.span.file, &first.name) else {
             // A bare variant name (`Some`, `None`, ...) promoted into
-            // scope by `use module.Enum.Variant;` (`stdlib/mod.nt`'s own
+            // scope by `use module.Enum.Variant;` (`stdlib/mod.nr`'s own
             // `use option.Option.Some;`, for instance) — a variant has no
             // `DefId` of its own, so it can't be found via `lookup_in`
             // above; resolves directly to the same `Resolution::EnumVariant`
@@ -121,7 +121,7 @@ impl Resolver<'_> {
                     );
                 }
             }
-            DefKind::Interface | DefKind::Fn | DefKind::Primitive => {
+            DefKind::Trait | DefKind::Fn | DefKind::Primitive | DefKind::TypeAlias => {
                 self.error(
                     second.span,
                     format!("`{}` has no member named `{}`", first.name, second.name),

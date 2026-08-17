@@ -389,6 +389,7 @@ impl Lexer<'_> {
                 self.bump();
                 Some(Punct::AmpAmp)
             }
+            '&' => Some(Punct::Amp),
             '|' if self.peek() == Some('|') => {
                 self.bump();
                 Some(Punct::PipePipe)

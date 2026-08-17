@@ -82,8 +82,19 @@ impl<'m, 'ctx> Layout<'m, 'ctx> {
                 self.m.struct_type(&field_tys).into()
             }
             Type::Enum(_, _) => self.enum_layout(ty).ty.into(),
+            // `:T` shares `T`'s representation in Stage 1 (language-spec
+            // §3.2 — no distinct unique-inline layout until Stage 2's
+            // borrow checker can make one safe). `:&T`/`:&mut T` are
+            // pointers, the same representation an ARC value already
+            // uses; there is no `&expr` operator in Stage 1's expression
+            // grammar yet, so no value of this type is actually
+            // constructed at runtime — this arm only needs to give the
+            // type itself a defined layout (e.g. for a function
+            // signature's parameter type).
+            Type::Unique(inner) => self.llvm_type(inner),
+            Type::Ref(_) | Type::MutRef(_) => self.m.ptr_type(),
             Type::Never | Type::Error => self.m.int_type(1),
-            Type::Interface(_) | Type::Generic(_) => {
+            Type::Trait(_) | Type::Generic(_) => {
                 unreachable!("{ty:?} never appears as a value's type by the time monomorphized MIR reaches codegen")
             }
         }
@@ -125,6 +136,16 @@ impl<'m, 'ctx> Layout<'m, 'ctx> {
     /// share one exact LLVM `StructType` (LLVM struct-type identity
     /// matters for `struct_gep`).
     pub fn struct_layout(&self, struct_ty: &Type) -> StructLayout<'ctx> {
+        // `:T`/`T` share their layout in Stage 1 (language-spec §3.2) —
+        // strip a `Unique` wrapper here, at the one place this crate
+        // decides a struct's layout, so every caller gets the identical
+        // cached layout regardless of which ownership domain the MIR
+        // expression's `Type` came from. Without this, a `Type::Unique`
+        // key misses `sigs.type_fields`'s `Type::Struct`-only match (it
+        // has no `Unique` case — `nether_typecheck::Signatures` describes
+        // *shape*, not ownership) and silently builds a zero-field
+        // layout, which then panics on the first real field GEP.
+        let struct_ty = struct_ty.strip_unique();
         if let Some((ty, field_tys)) = self.structs.borrow().get(struct_ty) {
             return StructLayout {
                 ty: *ty,

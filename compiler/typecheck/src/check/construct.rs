@@ -1,10 +1,18 @@
 use super::*;
 
 impl Checker<'_> {
+    /// `owned` is `true` for `:Dog { ... }` (language-spec §3, §11) — the
+    /// literal's checked type is `Type::Unique(Type::Struct(..))` rather
+    /// than the bare `Type::Struct(..)` an ordinary `Dog { ... }` literal
+    /// produces. `expected` is unwrapped through the matching `Unique`
+    /// layer first so generic inference against an owned expected type
+    /// (e.g. `let d: Dog = :Dog { .. };`) still reaches the inner
+    /// `Type::Struct` comparison below exactly as the unowned path does.
     pub(super) fn check_struct_lit(
         &mut self,
         path: &Path,
         fields: &[(Ident, Expr)],
+        owned: bool,
         expected: Option<&Type>,
     ) -> Type {
         let Some(res) = self.resolved.path_res.get(&path.id).cloned() else {
@@ -36,7 +44,12 @@ impl Checker<'_> {
             .cloned()
             .unwrap_or_default();
         let mut subst: HashMap<Symbol, Type> = HashMap::new();
-        if let Some(Type::Struct(expected_id, args)) = expected {
+        let inner_expected = match (owned, expected) {
+            (true, Some(Type::Unique(inner))) => Some(inner.as_ref()),
+            (false, expected) => expected,
+            (true, _) => None,
+        };
+        if let Some(Type::Struct(expected_id, args)) = inner_expected {
             if *expected_id == id && args.len() == generic_names.len() {
                 subst.extend(generic_names.iter().cloned().zip(args.iter().cloned()));
             }
@@ -76,13 +89,18 @@ impl Checker<'_> {
                 );
             }
         }
-        Type::Struct(
+        let struct_ty = Type::Struct(
             id,
             generic_names
                 .iter()
                 .map(|name| subst.get(name).cloned().unwrap_or(Type::Error))
                 .collect(),
-        )
+        );
+        if owned {
+            Type::Unique(Box::new(struct_ty))
+        } else {
+            struct_ty
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -156,7 +174,25 @@ impl Checker<'_> {
             collect_generic_bindings(&sig.ret, expected_return, &mut subst);
         }
         let fixed_arg_count = args.len().min(fixed_params.len());
+        // Tracks, within *this* call's argument list only, whether each
+        // borrowed local has already been borrowed mutably — the entire
+        // exclusivity story this slice can honestly enforce, since
+        // there's still no way for a `:&T`/`:&mut T` value to persist past
+        // the call that produced it (Stage 2, slice 2).
+        let mut borrowed_in_call: HashMap<LocalId, bool> = HashMap::new();
         for (param, arg) in fixed_params.iter().zip(&args[..fixed_arg_count]) {
+            let expected = substitute_generic(&param.ty, &subst);
+            if matches!(expected, Type::Ref(_) | Type::MutRef(_)) {
+                if matches!(arg.kind, ExprKind::MutArg(_)) {
+                    self.err(
+                        arg.span,
+                        "`mut` is not valid for a `:&T`/`:&mut T` argument — the parameter's own type already says whether it borrows mutably",
+                    );
+                }
+                let actual = self.check_borrow_arg(arg, &expected, &mut borrowed_in_call);
+                collect_generic_bindings(&param.ty, &actual, &mut subst);
+                continue;
+            }
             let (inner_expr, is_mut_arg) = match &arg.kind {
                 ExprKind::MutArg(inner) => (inner.as_ref(), true),
                 _ => (arg, false),
@@ -229,7 +265,7 @@ impl Checker<'_> {
             };
             let Some(bound) = bound else { continue };
             let concrete_bound = GenericBound {
-                interface: bound.interface,
+                trait_id: bound.trait_id,
                 args: bound
                     .args
                     .iter()
@@ -284,7 +320,7 @@ impl Checker<'_> {
                         continue;
                     }
                     let concrete_bound = GenericBound {
-                        interface: bound.interface,
+                        trait_id: bound.trait_id,
                         args: bound
                             .args
                             .iter()
@@ -328,7 +364,7 @@ impl Checker<'_> {
         let name = self
             .resolved
             .definitions
-            .get(bound.interface)
+            .get(bound.trait_id)
             .name
             .to_string();
         if bound.args.is_empty() {
@@ -347,7 +383,7 @@ impl Checker<'_> {
     }
 
     pub(super) fn is_into_string_bound(&self, bound: &GenericBound) -> bool {
-        self.resolved.definitions.get(bound.interface).name.as_str() == "Into"
+        self.resolved.definitions.get(bound.trait_id).name.as_str() == "Into"
             && bound.args == [Type::String]
     }
 
@@ -372,10 +408,11 @@ impl Checker<'_> {
     pub(super) fn is_into_string_convertible(&self, ty: &Type) -> bool {
         match ty {
             Type::String | Type::Primitive(_) | Type::Error => true,
+            Type::Unique(inner) => self.is_into_string_convertible(inner),
             Type::Struct(id, _) | Type::TupleStruct(id, _) | Type::Enum(id, _) => {
                 let into = self.resolved.definitions.lookup(&Symbol::new("Into"));
-                let bound = into.map(|interface| GenericBound {
-                    interface,
+                let bound = into.map(|trait_id| GenericBound {
+                    trait_id,
                     args: vec![Type::String],
                 });
                 bound
@@ -383,7 +420,7 @@ impl Checker<'_> {
                     .is_some_and(|bound| self.sigs.satisfies(ty, bound))
                     && self
                         .sigs
-                        .method(*id, &Symbol::new("into_string"))
+                        .method(*id, &Symbol::new("into_string"), ReceiverDomain::Arc)
                         .is_some_and(|sig| sig.self_param.is_some() && sig.ret == Type::String)
             }
             Type::Generic(name) => self
@@ -428,5 +465,87 @@ impl Checker<'_> {
             expr.span,
             "a `mut` argument must be a plain mutable local variable",
         );
+    }
+
+    /// Checks one call argument against a `Type::Ref`/`Type::MutRef`
+    /// parameter (Stage 2, slice 2 — language-spec §8.1's `d: &Animal`/
+    /// `e: &mut Animal` forms). There is no `&expr` operator anywhere in
+    /// the grammar, so the *only* thing that can satisfy a reference
+    /// parameter is a bare, already-owned (`Type::Unique`) local — the
+    /// parameter's own declared type is what makes this a borrow, the
+    /// same way an ordinary ARC parameter needs no caller-side marker
+    /// either. `param_ty` is the already-substituted `Ref`/`MutRef`.
+    /// Returns the argument's checked type for the caller's own
+    /// `collect_generic_bindings` call, mirroring every other argument
+    /// shape in `check_call_args`.
+    fn check_borrow_arg(
+        &mut self,
+        arg: &Expr,
+        param_ty: &Type,
+        borrowed: &mut HashMap<LocalId, bool>,
+    ) -> Type {
+        let is_mut = matches!(param_ty, Type::MutRef(_));
+        let inner_expected = match param_ty {
+            Type::Ref(inner) | Type::MutRef(inner) => inner.as_ref().clone(),
+            _ => unreachable!("check_borrow_arg is only called for a Ref/MutRef param"),
+        };
+        let error = |this: &mut Self, arg: &Expr| {
+            this.expr_types.insert(arg.id, Type::Error);
+            Type::Error
+        };
+        let Some(id) = self.bare_local_of(arg) else {
+            self.err(
+                arg.span,
+                "a `:&T`/`:&mut T` argument must be a plain local variable holding an owned (`:T`) value — there is no `&expr` operator to borrow anything else",
+            );
+            return error(self, arg);
+        };
+        let Some((local_ty, local_mutable)) = self.locals.get(&id).cloned() else {
+            return error(self, arg);
+        };
+        let Type::Unique(actual_inner) = &local_ty else {
+            let desc = self.describe(&local_ty);
+            self.err(
+                arg.span,
+                format!("expected an owned (`:{{Type}}`) value to borrow, found `{desc}`"),
+            );
+            return error(self, arg);
+        };
+        let actual_inner = actual_inner.as_ref().clone();
+        if !actual_inner.compatible(&inner_expected) {
+            let expected_s = self.describe(&inner_expected);
+            let found_s = self.describe(&actual_inner);
+            self.err(
+                arg.span,
+                format!("expected `{expected_s}`, found `{found_s}`"),
+            );
+        }
+        if is_mut && !local_mutable {
+            self.err(
+                arg.span,
+                "cannot borrow an immutable binding as `:&mut` — declare it with `let mut`",
+            );
+        }
+        let prev = borrowed.get(&id).copied();
+        if let Some(prev_mut) = prev {
+            if prev_mut || is_mut {
+                self.err(
+                    arg.span,
+                    "cannot borrow a value as mutable more than once, or as both mutable and immutable, within the same call",
+                );
+            }
+        }
+        borrowed.insert(id, prev.unwrap_or(false) || is_mut);
+        // A borrow reads the value, it doesn't consume it — same
+        // treatment as a `: &self`/`: &mut self` receiver
+        // (`nether_typecheck::check::method::check_method_call_on`).
+        self.check_move(id, &local_ty, arg.span, false);
+        let result_ty = if is_mut {
+            Type::MutRef(Box::new(actual_inner))
+        } else {
+            Type::Ref(Box::new(actual_inner))
+        };
+        self.expr_types.insert(arg.id, result_ty.clone());
+        result_ty
     }
 }

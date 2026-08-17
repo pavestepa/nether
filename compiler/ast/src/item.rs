@@ -30,41 +30,63 @@ pub struct Module {
 
 #[derive(Debug, Clone)]
 pub enum Item {
-    Type(TypeDecl),
+    Struct(StructDecl),
+    TypeAlias(TypeAliasDecl),
     Impl(ImplBlock),
     Enum(EnumDecl),
-    Interface(InterfaceDecl),
+    Trait(TraitDecl),
     Fn(FnDecl),
     Use(UseDecl),
     Mod(ModDecl),
 }
 
-/// `type Dog { name: String }` / `type Point(i32, i32);` / `type Unit;`
-/// (language-spec §3.2). Whether this allocates on the heap or the stack is
-/// a semantic fact derived later from `name`'s casing
-/// (`docs/architecture/type-system.md` §2-3) — this node just records what
-/// was written.
+/// `struct Dog { name String }` / `struct Point(i32, i32);` /
+/// `struct Unit;` (language-spec §4.2). Always a heap/reference-category
+/// type — `struct` is reserved exclusively for this, distinct from the
+/// alias-only `type` keyword ([`TypeAliasDecl`]). Whether a *use* of this
+/// type is ARC (`T`) or uniquely owned (`:T`) is chosen at each use site
+/// (language-spec §3), not recorded here.
 #[derive(Debug, Clone)]
-pub struct TypeDecl {
+pub struct StructDecl {
     pub id: NodeId,
     pub name: Ident,
-    /// `Box<T>` — language-spec §8 lists "generic types" as supported;
+    /// `Box<T>` — language-spec §13 lists "generic types" as supported;
     /// empty for a non-generic declaration.
     pub generics: Vec<GenericParam>,
-    /// Interfaces opted into on the declaration (`type Dog: Sound, Clone`).
+    /// Traits opted into on the declaration (`struct Dog: Sound, Clone`).
     /// Missing default methods are inherited only through this list.
-    pub interfaces: Vec<TypeExpr>,
-    pub kind: TypeDeclKind,
-    /// Joined text of any leading `///` doc comments (language-spec §2.1).
+    pub traits: Vec<TypeExpr>,
+    pub kind: StructDeclKind,
+    /// Joined text of any leading `///` doc comments (language-spec §2.2).
     pub doc: Option<String>,
     pub span: Span,
 }
 
 #[derive(Debug, Clone)]
-pub enum TypeDeclKind {
+pub enum StructDeclKind {
     Struct(Vec<Field>),
     TupleStruct(Vec<TypeExpr>),
     Unit,
+}
+
+/// `type color = (u32, u32, u32);` (language-spec §4.3) — a type alias.
+/// Distinct from [`StructDecl`]: `type` never declares a new
+/// heap/reference-category type, only names an existing [`TypeExpr`].
+/// Naming-convention validation (language-spec §5) is checked against
+/// `ty`'s *resolved* representation category, not against this node's
+/// syntax.
+///
+/// The ownership-qualified form (`type: Name = :TypeExpr;`) is specified
+/// for the full language but not yet implemented — the parser recognizes
+/// and rejects it with a dedicated diagnostic rather than silently
+/// mis-parsing it (language-spec §4.3).
+#[derive(Debug, Clone)]
+pub struct TypeAliasDecl {
+    pub id: NodeId,
+    pub name: Ident,
+    pub ty: TypeExpr,
+    pub doc: Option<String>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -93,11 +115,11 @@ pub struct ImplBlock {
     pub generics: Vec<GenericParam>,
     pub target: Ident,
     pub target_args: Vec<TypeExpr>,
-    /// The interfaces in `impl Dog: Sound, Clone` — full type expressions
+    /// The traits in `impl Dog: Sound, Clone` — full type expressions
     /// (not bare
-    /// [`Path`]) because an interface name may itself be generic
+    /// [`Path`]) because a trait name may itself be generic
     /// (language-spec §7.1).
-    pub interfaces: Vec<TypeExpr>,
+    pub traits: Vec<TypeExpr>,
     pub methods: Vec<FnDecl>,
     pub span: Span,
 }
@@ -110,8 +132,8 @@ pub struct EnumDecl {
     pub id: NodeId,
     pub name: Ident,
     pub generics: Vec<GenericParam>,
-    /// Interfaces opted into on the declaration (`enum State: Display`).
-    pub interfaces: Vec<TypeExpr>,
+    /// Traits opted into on the declaration (`enum State: Display`).
+    pub traits: Vec<TypeExpr>,
     pub variants: Vec<EnumVariant>,
     pub doc: Option<String>,
     pub span: Span,
@@ -119,9 +141,9 @@ pub struct EnumDecl {
 
 /// A generic parameter as written, e.g. the `T` in `<T>` or the `T: Sound`
 /// / `T: Into<String>` in `<T: Sound>` / `<T: Into<String>>`. `bound` names
-/// an [`interface`](InterfaceDecl), possibly itself generic — a full
+/// an [`trait`](TraitDecl), possibly itself generic — a full
 /// [`TypeExpr`] rather than a bare [`Path`], for the same reason as
-/// [`ImplBlock::interface`]. Language-spec §8 generics are resolved via
+/// [`ImplBlock::trait`]. Language-spec §8 generics are resolved via
 /// monomorphization, so this is purely syntactic — `resolver`/`typecheck`
 /// turn `bound` into an actual constraint check.
 #[derive(Debug, Clone)]
@@ -139,18 +161,18 @@ pub struct EnumVariant {
     pub span: Span,
 }
 
-/// `interface Sound { sound(): String { "..." } }` (language-spec §7).
-/// Static dispatch only — an `InterfaceDecl` never gains a runtime
+/// `trait Sound { sound(): String { "..." } }` (language-spec §7).
+/// Static dispatch only — an `TraitDecl` never gains a runtime
 /// representation; it is erased by monomorphization (see
 /// `docs/architecture/type-system.md` §4).
 #[derive(Debug, Clone)]
-pub struct InterfaceDecl {
+pub struct TraitDecl {
     pub id: NodeId,
     pub name: Ident,
-    /// language-spec §8 lists "generic interfaces" as supported; empty for
+    /// language-spec §8 lists "generic traits" as supported; empty for
     /// a non-generic declaration.
     pub generics: Vec<GenericParam>,
-    /// Direct parent interfaces (`interface Child: ParentA, ParentB`).
+    /// Direct parent traits (`trait Child: ParentA, ParentB`).
     pub parents: Vec<TypeExpr>,
     /// A method with `body: None` has no default implementation and must
     /// be provided by every `impl`; a method with `body: Some(_)` is a
@@ -160,7 +182,7 @@ pub struct InterfaceDecl {
     pub span: Span,
 }
 
-/// A standalone `fn` or an `impl`/`interface` method. There is no `fn`
+/// A standalone `fn` or an `impl`/`trait` method. There is no `fn`
 /// keyword inside an `impl` block (language-spec §6) — the parser only
 /// requires the keyword for top-level functions and sets it implicitly for
 /// methods; both shapes reuse this one node.
@@ -174,7 +196,7 @@ pub struct FnDecl {
     pub self_param: Option<SelfParam>,
     pub params: Vec<Param>,
     pub ret: Option<TypeExpr>,
-    /// `None` only for an interface method with no default body
+    /// `None` only for a trait method with no default body
     /// (language-spec §7).
     pub body: Option<Block>,
     pub private: bool,
@@ -182,19 +204,40 @@ pub struct FnDecl {
     pub span: Span,
 }
 
+/// A method's receiver form (language-spec §8.4). The three `Owned*`
+/// variants are the unique-ownership-domain counterparts of `ByRef`/
+/// `ByMutRef` — a trait/impl may declare both an ARC-domain and an
+/// owned-domain overload of the same method name, and receiver mode is
+/// part of overload resolution, not merely a mutability flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelfParam {
-    /// `self` — immutable reference (language-spec §6).
+    /// `self` — ordinary ARC receiver.
     ByRef,
-    /// `mut self` — mutable reference. There is no owning `self` in
-    /// Nether (language-spec §6).
+    /// `mut self` — ARC receiver with mutation permission.
     ByMutRef,
+    /// `: self` — owned, consuming receiver.
+    Owned,
+    /// `: &self` — borrowed unique receiver.
+    OwnedRef,
+    /// `: &mut self` — mutable borrowed unique receiver.
+    OwnedMutRef,
 }
 
-/// A function/method parameter. `mutable` marks the explicit
-/// mutable-reference form (`mut name: Type`, language-spec §5.1) — distinct
-/// from an ordinary by-value (stack: clone) or by-shared-reference (heap:
-/// ARC) parameter.
+/// A function/method parameter. Five forms exist (language-spec §8.1),
+/// distinguished by `mutable` and `ty`'s shape, not by a separate
+/// ownership-mode field:
+///
+/// | Source | `mutable` | `ty` |
+/// |---|---|---|
+/// | `a Animal` (ordinary ARC) | `false` | `Named(Animal)` |
+/// | `b mut Animal` (ARC + mutation permission) | `true` | `Named(Animal)` |
+/// | `c: Animal` (owned, moved) | `false` | `Unique(Named(Animal))` |
+/// | `d: &Animal` (borrow) | `false` | `Ref(Named(Animal))` |
+/// | `e: &mut Animal` (mutable borrow) | `false` | `MutRef(Named(Animal))` |
+///
+/// Note the `mut` placement for the ARC+mutation form is *after* the name
+/// and type-less (`b mut Animal`), deliberately asymmetric with `let mut`
+/// (which places `mut` before the name) — this mirrors `mut self`.
 #[derive(Debug, Clone)]
 pub struct Param {
     /// Identifies this binding site for `resolver`, the same way
@@ -202,7 +245,7 @@ pub struct Param {
     pub id: NodeId,
     pub name: Ident,
     pub mutable: bool,
-    /// `true` for `name: ...Type` — a trailing variadic parameter that
+    /// `true` for a trailing variadic parameter (`name ...Type`) that
     /// collects every remaining call-site argument. `ty` is then the
     /// *element* type (`Type`, not `Array<Type>`); a call site collects
     /// its trailing arguments into an `Array<Type>` automatically. Parser
@@ -221,8 +264,8 @@ pub struct UseDecl {
 }
 
 /// `mod child;` declares and loads a child file module. The driver maps
-/// it to `child.nt`/`child.nr` or `child/mod.nt`/`child/mod.nr` relative
-/// to the declaring module. `private mod child;` records the same
+/// it to `child.nr` or `child/mod.nr` relative to the declaring module.
+/// `private mod child;` records the same
 /// declaration with `private == true`; like [`Field::private`] and
 /// [`FnDecl::private`] elsewhere, this is recorded but not yet enforced by
 /// `resolver`/`typecheck`.

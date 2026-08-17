@@ -17,13 +17,29 @@ pub enum Type {
     Array(Box<Type>),
     String,
     Function(Vec<Type>, Box<Type>),
-    Interface(DefId),
+    Trait(DefId),
     Generic(Symbol),
     Weak(Box<Type>),
+    Unique(Box<Type>),
+    Ref(Box<Type>),
+    MutRef(Box<Type>),
     Never,
     Error,
 }
 ```
+
+`Unique`/`Ref`/`MutRef` (added in Stage 1, see `docs/spec/language-spec.md`
+§3) represent the unique-ownership domain (`:T`, `:&T`, `:&mut T`) —
+orthogonal to representation category (§3 below), not a replacement for
+it. They exist only so `typecheck` can enforce ownership-domain
+compatibility (no implicit `T`↔`:T` coercion); `HirLowerer::ty_of`/
+`local_ty`/`lower_fn`'s param and return handling strip `Unique` before
+any type reaches HIR/MIR/codegen, since `:T` shares `T`'s exact runtime
+representation in Stage 1 (§3.2) — those crates' own `Type` matches are
+unchanged from before this rewrite and have no `Unique` arm to maintain.
+`Ref`/`MutRef` are not stripped the same way (they're genuinely different
+representations, pointers) but Stage 1's codegen support for them is
+narrow — see the language spec.
 
 `Struct`/`TupleStruct`/`Enum` carry their concrete type arguments.
 `Option<T>` and `Result<T, E>` are represented exactly as `Enum` values;
@@ -43,23 +59,23 @@ concrete arguments from a `Type` before HIR/MIR/codegen use them. This is
 the invariant that prevents `Option<Dog>` or `Boxed<String>` from reaching
 layout code with an unresolved generic payload.
 
-A bound retains its interface arguments:
+A bound retains its trait arguments:
 
 ```rust
 pub struct GenericBound {
-    pub interface: DefId,
+    pub trait_id: DefId,
     pub args: Vec<Type>,
 }
 ```
 
 Consequently `Convert<String>` and `Convert<i32>` are distinct. Generic
-interface method signatures and inherited default bodies are specialized
+trait method signatures and inherited default bodies are specialized
 with these arguments. Generic type parameters are also in scope
 implicitly inside `impl Boxed { ... }`, so `self` remains `Boxed<T>` until
 monomorphization.
 
-Interface bounds form a transitive graph. `Signatures` stores each
-interface's generic parameters and direct parent templates; satisfaction
+Trait bounds form a transitive graph. `Signatures` stores each
+trait's generic parameters and direct parent templates; satisfaction
 recursively substitutes the concrete child arguments into those templates.
 Thus `Child<String>: Parent<String>` allows a concrete `Child<String>`
 implementation wherever `Parent<String>` is required. The type checker
@@ -79,10 +95,13 @@ where-clauses, specialization, or blanket implementations.
 
 `alloc_kind(ty, definitions)` implements the language's naming rule:
 
-- PascalCase `type`/tuple-struct declarations are heap/ARC values;
-- camelCase declarations, primitives, tuples, and every enum are values;
+- PascalCase `struct`/tuple-struct declarations are heap/ARC values;
+- lowercase declarations, primitives, tuples, and every enum are values;
 - `String`, `Array<T>`, and function/closure environments are heap/ARC;
-- `weak T` is a stack-sized observer, legal only when `T` is heap-kind.
+- `weak T` is a stack-sized observer, legal only when `T` is heap-kind;
+- the unique-ownership qualifier (`Type::Unique`) is orthogonal to this
+  and passes straight through to its inner type's classification
+  (language-spec §3.2 — `:T` shares `T`'s representation in Stage 1).
 
 Classification happens after substitution. A generic stack aggregate can
 still contain managed fields, so `Signatures::has_managed_content` is the
@@ -90,17 +109,17 @@ broader ownership predicate used by MIR. It recursively detects heap
 fields, closure values, strings, arrays, and weak observers inside
 tuples/value structs/enums and selects generated deep retain/drop shims.
 
-Directly recursive value layouts such as `type node { next: node }` or
+Directly recursive value layouts such as `struct node { next node }` or
 `enum List { Next(List) }` are rejected by typecheck. A PascalCase heap
 type is an indirection and therefore breaks such a layout cycle.
 
-## 4. Interfaces
+## 4. Traits
 
-Interfaces are constraints, not runtime value types. `Type::Interface`
+Traits are constraints, not runtime value types. `Type::Trait`
 appears while checking declarations/default bodies, but a source
-expression, field, or ordinary parameter cannot have an interface as its
+expression, field, or ordinary parameter cannot have a trait as its
 dynamic type. Dispatch is resolved statically and erased during
-monomorphization; there are no vtables or `dyn Interface` values.
+monomorphization; there are no vtables or `dyn Trait` values.
 
 ## 5. Concrete layout
 
@@ -118,5 +137,5 @@ payload fields for all variants coexist rather than overlap as a union.
 ## 6. Extension points
 
 Const generics would require a non-type substitution value alongside
-`Type::Generic`. Associated types would extend interface signatures.
+`Type::Generic`. Associated types would extend trait signatures.
 Neither change requires LLVM-specific data in the front-end type model.

@@ -142,7 +142,11 @@ impl Resolver<'_> {
                 self.resolve_expr(body);
                 self.scopes.pop();
             }
-            ExprKind::StructLit { path, fields } => {
+            ExprKind::StructLit {
+                path,
+                fields,
+                owned: _,
+            } => {
                 self.resolve_struct_lit_path(path);
                 for (_, value) in fields {
                     self.resolve_expr(value);

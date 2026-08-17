@@ -6,16 +6,66 @@ use nether_resolver::{DefId, Definitions};
 use crate::alloc::{alloc_kind, AllocKind};
 use crate::ty::Type;
 
-/// One generic/interface constraint with its concrete type arguments.
+/// One generic/trait constraint with its concrete type arguments.
 ///
 /// Keeping the arguments is essential: `Convert<String>` and
 /// `Convert<i32>` are distinct implementations and method signatures
-/// declared by a generic interface must be specialized with the chosen
+/// declared by a generic trait must be specialized with the chosen
 /// arguments before they reach HIR.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GenericBound {
-    pub interface: DefId,
+    pub trait_id: DefId,
     pub args: Vec<Type>,
+}
+
+/// Which ownership domain a method receiver belongs to (language-spec
+/// §8.4) — the second axis (alongside method name) a concrete owner's
+/// method set is keyed by, so `foo(self)` and `foo(: self)` can coexist
+/// as genuinely distinct overloads on one type rather than colliding as a
+/// duplicate definition. `Static` (no `self` at all) is kept as its own
+/// domain rather than folded into `Arc`, preserving today's pre-existing
+/// behavior that a static method's name can't collide with an instance
+/// method's — this pass only adds a new distinction between `Arc`/`Owned`,
+/// it doesn't relax the `Static` one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ReceiverDomain {
+    /// No `self` parameter — a static method, called through the type.
+    Static,
+    /// `self` / `mut self` — an ordinary ARC-domain receiver.
+    Arc,
+    /// `: self` / `: &self` / `: &mut self` — a unique-ownership-domain
+    /// receiver.
+    Owned,
+}
+
+impl ReceiverDomain {
+    pub fn of_self_param(self_param: Option<&SelfParam>) -> Self {
+        match self_param {
+            None => ReceiverDomain::Static,
+            Some(SelfParam::ByRef | SelfParam::ByMutRef) => ReceiverDomain::Arc,
+            Some(SelfParam::Owned | SelfParam::OwnedRef | SelfParam::OwnedMutRef) => {
+                ReceiverDomain::Owned
+            }
+        }
+    }
+
+    /// The domain a *receiver expression's* static type belongs to —
+    /// `Type::Unique`/`Type::Ref`/`Type::MutRef` all mean the value is in
+    /// the owned domain (a `:&T` is a reference *to* an owned `T` — same
+    /// declarations apply), anything else is the ordinary ARC domain.
+    /// Never `Static` — that only comes from a signature's own (absent)
+    /// `self` parameter ([`Self::of_self_param`]), never from a value's
+    /// type. Resolving to the `Owned` bucket for a reference is safe by
+    /// itself — it only decides *which method set* to search — the
+    /// consuming-through-a-mere-reference case this alone doesn't rule
+    /// out is rejected separately, once the specific `self_param` found is
+    /// known (`nether_typecheck::check::method::check_method_call_on`).
+    pub fn of_receiver_ty(ty: &Type) -> Self {
+        match ty {
+            Type::Unique(_) | Type::Ref(_) | Type::MutRef(_) => ReceiverDomain::Owned,
+            _ => ReceiverDomain::Arc,
+        }
+    }
 }
 
 /// A resolved function/method signature — `self`/mutability/generics
@@ -26,7 +76,7 @@ pub struct FnSig {
     pub params: Vec<ParamSig>,
     pub ret: Type,
     /// This item's own generic parameters: name plus an optional bound
-    /// interface, used for call-site bound checking (`check.rs`).
+    /// trait, used for call-site bound checking (`check.rs`).
     pub generics: Vec<(Symbol, Option<GenericBound>)>,
 }
 
@@ -115,14 +165,17 @@ pub struct Signatures {
     pub enum_sigs: HashMap<DefId, EnumSig>,
     /// Standalone `fn` signatures, keyed by their own `DefId`.
     pub fns: HashMap<DefId, FnSig>,
-    /// `impl`/`interface` method signatures, keyed by `(owner type or enum
-    /// DefId, method name)` — not by `nether_resolver`'s per-method index,
-    /// so this table doesn't need to replicate that index's construction
-    /// order; a call site recovers the name from
-    /// `Definitions::get(owner).methods[idx]` and looks it up here. See
-    /// [`MethodSet`] for why one owner/name pair can hold more than one
-    /// signature.
-    pub methods: HashMap<(DefId, Symbol), MethodSet>,
+    /// `impl`/`trait` method signatures, keyed by `(owner type or enum
+    /// DefId, method name, receiver domain)` — not by `nether_resolver`'s
+    /// per-method index, so this table doesn't need to replicate that
+    /// index's construction order; a call site recovers the name from
+    /// `Definitions::get(owner).methods[idx]` and looks it up here. The
+    /// `ReceiverDomain` component is what lets `foo(self)` and
+    /// `foo(: self)` coexist as distinct entries (language-spec §8.4)
+    /// rather than colliding — see [`MethodSet`] for why one
+    /// owner/name/domain triple can *itself* still hold more than one
+    /// signature (generic + concrete specializations).
+    pub methods: HashMap<(DefId, Symbol, ReceiverDomain), MethodSet>,
     /// Which `impl` blocks are a concrete specialization
     /// (`impl Option<i32> { ... }`, keyed by the block's own
     /// [`NodeId`]) and, if so, their fully-resolved concrete owner
@@ -131,38 +184,66 @@ pub struct Signatures {
     /// itself. Absent for every other `impl` block (the implicit form, or
     /// the explicit `impl<T> Owner<T> { ... }` generic-passthrough form).
     pub impl_specializations: HashMap<NodeId, Vec<Type>>,
-    /// Fully inherited interface method signatures.
-    pub interface_methods: HashMap<(DefId, Symbol), FnSig>,
-    /// Generic parameter names and direct parent templates for interfaces.
-    pub interface_generics: HashMap<DefId, Vec<Symbol>>,
-    pub interface_parents: HashMap<DefId, Vec<GenericBound>>,
-    /// `(owner type pattern, interface + arguments)` pairs with a declared
+    /// Fully inherited trait method signatures.
+    pub trait_methods: HashMap<(DefId, Symbol), FnSig>,
+    /// Generic parameter names and direct parent templates for traits.
+    pub trait_generics: HashMap<DefId, Vec<Symbol>>,
+    pub trait_parents: HashMap<DefId, Vec<GenericBound>>,
+    /// `(owner type pattern, trait + arguments)` pairs with a declared
     /// implementation. The owner can contain `Type::Generic` arguments,
     /// e.g. `Boxed<T>`, so one impl applies to every monomorphization.
     pub impls: HashSet<(Type, GenericBound)>,
-    /// Type substitutions used by inherited generic-interface defaults.
-    /// The interface body is type-checked once in its generic form, then
+    /// Type substitutions used by inherited generic-trait defaults.
+    /// The trait body is type-checked once in its generic form, then
     /// HIR uses this map when lowering the copy attached to an impl.
-    pub default_method_substitutions: HashMap<(DefId, Symbol), HashMap<Symbol, Type>>,
-    /// Interface declaration that supplies each inherited default body.
-    pub default_method_sources: HashMap<(DefId, Symbol), DefId>,
+    /// Keyed the same 3-tuple way as `methods` — two different traits
+    /// could require the same method name in different domains on one
+    /// owner, and each needs its own default tracked separately.
+    pub default_method_substitutions:
+        HashMap<(DefId, Symbol, ReceiverDomain), HashMap<Symbol, Type>>,
+    /// Trait declaration that supplies each inherited default body.
+    pub default_method_sources: HashMap<(DefId, Symbol, ReceiverDomain), DefId>,
 }
 
 impl Signatures {
-    /// The generic/non-specialized signature for `(owner, name)` — every
-    /// caller that isn't resolving an actual instance-method call site
-    /// (static-member calls, interface-conformance checks, `Into<String>`
-    /// lookups) uses this; specialization is deliberately scoped to
-    /// instance methods only (`docs/generics.md`), so a static method
-    /// always has exactly this one signature.
-    pub fn method(&self, owner: DefId, name: &Symbol) -> Option<&FnSig> {
-        self.methods.get(&(owner, name.clone()))?.generic.as_ref()
+    /// The generic/non-specialized signature for `(owner, name, domain)` —
+    /// every caller that isn't resolving an actual instance-method call
+    /// site (static-member calls, trait-conformance checks, `Into<String>`
+    /// lookups) uses this with an explicit domain it already knows;
+    /// specialization is deliberately scoped to instance methods only
+    /// (`docs/generics.md`), so a static method always has exactly this
+    /// one signature.
+    pub fn method(&self, owner: DefId, name: &Symbol, domain: ReceiverDomain) -> Option<&FnSig> {
+        self.methods
+            .get(&(owner, name.clone(), domain))?
+            .generic
+            .as_ref()
+    }
+
+    /// Looks up `(owner, name)` across every [`ReceiverDomain`], for the
+    /// one call site (`static_member_call_or_value`) that needs to give a
+    /// precise "this is an instance method, not static" diagnostic even
+    /// when it doesn't yet know which domain the (possibly wrong-kind-of)
+    /// method actually lives in. `Static` can never coexist with `Arc`/
+    /// `Owned` for the same `(owner, name)` (still a hard duplicate-
+    /// definition error, unchanged by this pass), so at most one domain
+    /// ever matches in practice.
+    pub fn method_any_domain(&self, owner: DefId, name: &Symbol) -> Option<&FnSig> {
+        [ReceiverDomain::Static, ReceiverDomain::Arc, ReceiverDomain::Owned]
+            .into_iter()
+            .find_map(|domain| self.method(owner, name, domain))
     }
 
     /// The signature to use for an instance-method call whose receiver's
     /// owner carries `args` — see [`MethodSet::for_args`].
-    pub fn method_for(&self, owner: DefId, name: &Symbol, args: &[Type]) -> Option<&FnSig> {
-        self.methods.get(&(owner, name.clone()))?.for_args(args)
+    pub fn method_for(
+        &self,
+        owner: DefId,
+        name: &Symbol,
+        domain: ReceiverDomain,
+        args: &[Type],
+    ) -> Option<&FnSig> {
+        self.methods.get(&(owner, name.clone(), domain))?.for_args(args)
     }
 
     pub fn satisfies(&self, ty: &Type, bound: &GenericBound) -> bool {
@@ -172,7 +253,7 @@ impl Signatures {
                 return false;
             }
             let implemented = GenericBound {
-                interface: implemented.interface,
+                trait_id: implemented.trait_id,
                 args: implemented
                     .args
                     .iter()
@@ -200,8 +281,8 @@ impl Signatures {
             return false;
         }
         let generics = self
-            .interface_generics
-            .get(&actual.interface)
+            .trait_generics
+            .get(&actual.trait_id)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
         let subst: HashMap<Symbol, Type> = generics
@@ -210,13 +291,13 @@ impl Signatures {
             .zip(actual.args.iter().cloned())
             .collect();
         let found = self
-            .interface_parents
-            .get(&actual.interface)
+            .trait_parents
+            .get(&actual.trait_id)
             .into_iter()
             .flatten()
             .any(|parent| {
                 let parent = GenericBound {
-                    interface: parent.interface,
+                    trait_id: parent.trait_id,
                     args: parent
                         .args
                         .iter()

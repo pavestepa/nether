@@ -1,6 +1,0 @@
-enum Event {
-    Found(i32),
-    Damage(i32),
-    Rest(i32),
-    Message(String),
-}

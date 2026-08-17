@@ -7,8 +7,8 @@
 //!
 //! Responsibilities:
 //! - Build [`sig::Signatures`]: struct/tuple-struct/unit field shapes,
-//!   enum variant payloads, standalone-`fn` and `impl`/`interface` method
-//!   signatures — including inheriting interface default methods an
+//!   enum variant payloads, standalone-`fn` and `impl`/`trait` method
+//!   signatures — including inheriting trait default methods an
 //!   `impl` doesn't override, and reporting a missing required method.
 //! - Lower every [`nether_ast::TypeExpr`] to a [`ty::Type`], reusing
 //!   `resolver`'s already-computed path resolutions rather than
@@ -19,7 +19,7 @@
 //!   disambiguation that only becomes possible once a base's type is
 //!   known), operators, `if`/`match`/loops, `match` exhaustiveness over
 //!   enum variants, `mut`-parameter/argument agreement (language-spec
-//!   §5.1), `weak T` only wrapping a heap type (§3.4), and interface
+//!   §5.1), `weak T` only wrapping a heap type (§3.4), and trait
 //!   bound satisfaction at generic call sites where the concrete type
 //!   argument can be inferred from the arguments.
 //!
@@ -43,7 +43,7 @@
 //!   expected return type, but remains local to one call.
 //! - `loop`'s own type is always `()` — a `break value` inside a `loop` is
 //!   type-checked but not unified into the loop expression's result type.
-//! - The source grammar permits one interface bound per generic
+//! - The source grammar permits one trait bound per generic
 //!   parameter; there are no where-clauses, associated types, blanket
 //!   implementations, or specialization.
 
@@ -54,7 +54,7 @@ mod ty;
 
 pub use alloc::{alloc_kind, AllocKind};
 pub use check::{check, TypedTables};
-pub use sig::{EnumSig, FnSig, GenericBound, ParamSig, Signatures, TypeShape};
+pub use sig::{EnumSig, FnSig, GenericBound, ParamSig, ReceiverDomain, Signatures, TypeShape};
 pub use ty::{PrimitiveKind, Type};
 
 // Re-exported so `sig::Signatures`'s public methods can be used without

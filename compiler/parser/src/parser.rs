@@ -158,7 +158,7 @@ impl Parser {
     /// A dotted path of plain identifiers (language-spec §10): `foo`,
     /// `foo.bar`, `foo.bar.baz`. Used wherever the grammar calls for a
     /// name that is unambiguously a full path with no interleaved calls or
-    /// indexing — `use` targets, interface names in `impl Type: Iface`,
+    /// indexing — `use` targets, trait names in `impl Type: Iface`,
     /// enum-variant patterns. General expression parsing does its own,
     /// separate leading-path accumulation (see `expr.rs`) because there a
     /// call can interrupt the chain (`Dog.new(x).y`).
@@ -232,6 +232,7 @@ fn punct_str(p: Punct) -> &'static str {
         Punct::Gt => ">",
         Punct::Ge => ">=",
         Punct::Bang => "!",
+        Punct::Amp => "&",
         Punct::AmpAmp => "&&",
         Punct::PipePipe => "||",
         Punct::FatArrow => "=>",

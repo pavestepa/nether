@@ -17,8 +17,8 @@ fn builtin_definitions() -> Definitions {
 
     // `Array`, like `Option`/`Result`, is *not* seeded here — it's an
     // ordinary generic `type Array<T>;` declaration in
-    // `stdlib/array.nt`, reachable everywhere the same way any other name
-    // in the bundled prelude is (`stdlib/mod.nt`'s own `use`, promoted by
+    // `stdlib/array.nr`, reachable everywhere the same way any other name
+    // in the bundled prelude is (`stdlib/mod.nr`'s own `use`, promoted by
     // `Definitions::promote_to_prelude` — see `nether_driver`'s module
     // docs). This is what a compiler-builtin generic type actually needs
     // to be written in Nether source with no special support at all:
@@ -30,17 +30,23 @@ fn builtin_definitions() -> Definitions {
     defs.insert_builtin(Symbol::new("println"), DefKind::Fn);
     defs.insert_builtin(Symbol::new("print"), DefKind::Fn);
 
-    // `Into<T>` is the compiler-known conversion interface from
+    // `to(value)` — the universal ownership-domain conversion (language-
+    // spec §9), the same kind of name-recognized builtin as `println`/
+    // `print` above: no real `FnSig` backs it, `nether_typecheck::check::
+    // call::resolve_fn_value` special-cases the name directly.
+    defs.insert_builtin(Symbol::new("to"), DefKind::Fn);
+
+    // `Into<T>` is the compiler-known conversion trait from
     // language-spec §7.1. Its concrete `Into<String>` convention is used
     // by interpolation and the print builtins; user-defined conversions
     // still use ordinary `impl Type: Into<T>` blocks.
-    defs.insert_builtin(Symbol::new("Into"), DefKind::Interface);
+    defs.insert_builtin(Symbol::new("Into"), DefKind::Trait);
 
     defs
 }
 
 /// Builds the top-level namespace for `module`: builtins, then every
-/// user-declared `type`/`enum`/`interface`/`fn`, then merges each `impl`
+/// user-declared `type`/`enum`/`trait`/`fn`, then merges each `impl`
 /// block's method names into its target type's or enum's method list.
 ///
 /// Duplicate top-level names produce a diagnostic and keep the first
@@ -52,16 +58,19 @@ pub fn collect(module: &Module, prelude_file: Option<FileId>) -> (Definitions, V
 
     for item in &module.items {
         match item {
-            Item::Type(t) => {
+            Item::Struct(t) => {
                 defs.insert_checked(&t.name, DefKind::Type, &mut diags);
+            }
+            Item::TypeAlias(t) => {
+                defs.insert_checked(&t.name, DefKind::TypeAlias, &mut diags);
             }
             Item::Enum(e) => {
                 let id = defs.insert_checked(&e.name, DefKind::Enum, &mut diags);
                 let variants = e.variants.iter().map(|v| v.name.name.clone()).collect();
                 defs.defs[id.0 as usize].variants = variants;
             }
-            Item::Interface(i) => {
-                let id = defs.insert_checked(&i.name, DefKind::Interface, &mut diags);
+            Item::Trait(i) => {
+                let id = defs.insert_checked(&i.name, DefKind::Trait, &mut diags);
                 defs.defs[id.0 as usize].methods =
                     i.methods.iter().map(|m| m.name.name.clone()).collect();
             }
@@ -72,46 +81,46 @@ pub fn collect(module: &Module, prelude_file: Option<FileId>) -> (Definitions, V
         }
     }
 
-    fn interface_id(ty: &TypeExpr, defs: &Definitions) -> Option<DefId> {
+    fn trait_id(ty: &TypeExpr, defs: &Definitions) -> Option<DefId> {
         let TypeExpr::Named { path, .. } = ty else {
             return None;
         };
         let name = path.segments.first()?;
         let id = defs.lookup_in(path.span.file, &name.name)?;
-        (defs.get(id).kind == DefKind::Interface).then_some(id)
+        (defs.get(id).kind == DefKind::Trait).then_some(id)
     }
 
-    let interface_parents: HashMap<DefId, Vec<DefId>> = module
+    let trait_parents: HashMap<DefId, Vec<DefId>> = module
         .items
         .iter()
         .filter_map(|item| {
-            let Item::Interface(interface) = item else {
+            let Item::Trait(trait_decl) = item else {
                 return None;
             };
-            let id = defs.lookup_in(interface.span.file, &interface.name.name)?;
+            let id = defs.lookup_in(trait_decl.span.file, &trait_decl.name.name)?;
             Some((
                 id,
-                interface
+                trait_decl
                     .parents
                     .iter()
-                    .filter_map(|parent| interface_id(parent, &defs))
+                    .filter_map(|parent| trait_id(parent, &defs))
                     .collect(),
             ))
         })
         .collect();
 
     fn inherited_method_names(
-        interface: DefId,
+        trait_def: DefId,
         defs: &Definitions,
         parents: &HashMap<DefId, Vec<DefId>>,
         visiting: &mut Vec<DefId>,
     ) -> Vec<Symbol> {
-        if visiting.contains(&interface) {
+        if visiting.contains(&trait_def) {
             return Vec::new();
         }
-        visiting.push(interface);
-        let mut names = defs.get(interface).methods.clone();
-        for parent in parents.get(&interface).into_iter().flatten() {
+        visiting.push(trait_def);
+        let mut names = defs.get(trait_def).methods.clone();
+        for parent in parents.get(&trait_def).into_iter().flatten() {
             for name in inherited_method_names(*parent, defs, parents, visiting) {
                 if !names.contains(&name) {
                     names.push(name);
@@ -124,29 +133,29 @@ pub fn collect(module: &Module, prelude_file: Option<FileId>) -> (Definitions, V
 
     let mut declared_members = Vec::new();
     for item in &module.items {
-        let (owner, interfaces) = match item {
-            Item::Type(decl) => (
+        let (owner, traits) = match item {
+            Item::Struct(decl) => (
                 defs.lookup_in(decl.span.file, &decl.name.name),
-                decl.interfaces.as_slice(),
+                decl.traits.as_slice(),
             ),
             Item::Enum(decl) => (
                 defs.lookup_in(decl.span.file, &decl.name.name),
-                decl.interfaces.as_slice(),
+                decl.traits.as_slice(),
             ),
             Item::Impl(block) => (
                 defs.lookup_in(block.span.file, &block.target.name),
-                block.interfaces.as_slice(),
+                block.traits.as_slice(),
             ),
             _ => continue,
         };
         let Some(owner) = owner else { continue };
         let mut names = Vec::new();
-        for interface in interfaces {
-            let Some(interface) = interface_id(interface, &defs) else {
+        for trait_ref in traits {
+            let Some(trait_def) = trait_id(trait_ref, &defs) else {
                 continue;
             };
             for name in
-                inherited_method_names(interface, &defs, &interface_parents, &mut Vec::new())
+                inherited_method_names(trait_def, &defs, &trait_parents, &mut Vec::new())
             {
                 if !names.contains(&name) {
                     names.push(name);
@@ -238,7 +247,7 @@ pub fn collect(module: &Module, prelude_file: Option<FileId>) -> (Definitions, V
         }
     }
 
-    // The bundled prelude (`stdlib/mod.nt`) re-exports its own top-level
+    // The bundled prelude (`stdlib/mod.nr`) re-exports its own top-level
     // `use` names to every file with no `use` of their own — see
     // `Definitions::promote_to_prelude`.
     if let Some(prelude_file) = prelude_file {

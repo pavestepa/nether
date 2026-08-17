@@ -1,34 +1,36 @@
 use std::collections::{HashMap, HashSet};
 
 use nether_ast::{
-    BinaryOp, Block, EnumDecl, Expr, ExprKind, FnDecl, Ident, ImplBlock, InterfaceDecl, Item,
-    Literal, Module, NodeId, Path, Pattern, SelfParam, Stmt, Symbol, TemplatePart, TypeDecl,
-    TypeDeclKind, TypeExpr, UnaryOp,
+    BinaryOp, Block, EnumDecl, Expr, ExprKind, FnDecl, Ident, ImplBlock, TraitDecl, Item,
+    Literal, Module, NodeId, Path, Pattern, SelfParam, Stmt, Symbol, TemplatePart, StructDecl,
+    StructDeclKind, TypeAliasDecl, TypeExpr, UnaryOp,
 };
 use nether_diagnostics::{Diagnostic, Span};
-use nether_resolver::{DefId, DefKind, Resolution, ResolvedNames};
+use nether_resolver::{DefId, DefKind, LocalId, Resolution, ResolvedNames};
 
-use crate::sig::{EnumSig, FnSig, GenericBound, MethodSet, Signatures, TypeShape};
+use crate::sig::{EnumSig, FnSig, GenericBound, MethodSet, ReceiverDomain, Signatures, TypeShape};
 use crate::ty::{PrimitiveKind, Type};
 
 mod call;
+mod casing;
 mod checker;
 mod construct;
 mod control;
 mod declarations;
 mod entry;
 mod expr;
-mod interfaces;
+mod traits;
 mod layout;
 mod method;
 
+use casing::validate_alias_casing;
 use checker::Checker;
 use declarations::*;
 use entry::{
     collect_generic_bindings, contextualize_unknowns, describe_type, prefer_concrete_type,
     substitute_generic,
 };
-use interfaces::*;
+use traits::*;
 use layout::*;
 
 pub use entry::check;
@@ -57,20 +59,22 @@ pub struct TypedTables {
 /// crate's construction order to match `resolver`'s (see this crate's
 /// module docs for why that would otherwise be a fragile coupling).
 struct DeclIndex<'a> {
-    type_decls: HashMap<DefId, &'a TypeDecl>,
+    type_decls: HashMap<DefId, &'a StructDecl>,
     enum_decls: HashMap<DefId, &'a EnumDecl>,
-    interface_decls: HashMap<DefId, &'a InterfaceDecl>,
+    trait_decls: HashMap<DefId, &'a TraitDecl>,
+    type_aliases: HashMap<DefId, &'a TypeAliasDecl>,
 }
 
 fn index_decls<'a>(module: &'a Module, resolved: &ResolvedNames) -> DeclIndex<'a> {
     let mut idx = DeclIndex {
         type_decls: HashMap::new(),
         enum_decls: HashMap::new(),
-        interface_decls: HashMap::new(),
+        trait_decls: HashMap::new(),
+        type_aliases: HashMap::new(),
     };
     for item in &module.items {
         match item {
-            Item::Type(t) => {
+            Item::Struct(t) => {
                 if let Some(id) = resolved.definitions.lookup_in(t.span.file, &t.name.name) {
                     idx.type_decls.insert(id, t);
                 }
@@ -80,9 +84,14 @@ fn index_decls<'a>(module: &'a Module, resolved: &ResolvedNames) -> DeclIndex<'a
                     idx.enum_decls.insert(id, e);
                 }
             }
-            Item::Interface(i) => {
+            Item::Trait(i) => {
                 if let Some(id) = resolved.definitions.lookup_in(i.span.file, &i.name.name) {
-                    idx.interface_decls.insert(id, i);
+                    idx.trait_decls.insert(id, i);
+                }
+            }
+            Item::TypeAlias(a) => {
+                if let Some(id) = resolved.definitions.lookup_in(a.span.file, &a.name.name) {
+                    idx.type_aliases.insert(id, a);
                 }
             }
             _ => {}
@@ -97,28 +106,43 @@ fn index_decls<'a>(module: &'a Module, resolved: &ResolvedNames) -> DeclIndex<'a
 
 /// Converts a syntactic [`TypeExpr`] into a structured [`Type`], reading
 /// the [`Resolution`] `resolver` already computed for its [`Path`] rather
-/// than re-deriving name lookups itself.
+/// than re-deriving name lookups itself. Public entry point — always
+/// starts a fresh alias-cycle guard (see [`lower_type_expr_inner`]).
 fn lower_type_expr(
     ty: &TypeExpr,
     resolved: &ResolvedNames,
     decls: &DeclIndex,
     diags: &mut Vec<Diagnostic>,
 ) -> Type {
+    lower_type_expr_inner(ty, resolved, decls, diags, &mut HashSet::new())
+}
+
+/// `visiting` tracks which [`TypeAliasDecl`]s are currently being
+/// substituted through, so a self-referential alias (`type A = B; type B
+/// = A;`) produces a diagnostic in [`lower_named_type`] instead of
+/// overflowing the stack — language-spec §4.3.
+fn lower_type_expr_inner(
+    ty: &TypeExpr,
+    resolved: &ResolvedNames,
+    decls: &DeclIndex,
+    diags: &mut Vec<Diagnostic>,
+    visiting: &mut HashSet<DefId>,
+) -> Type {
     match ty {
         TypeExpr::Named { path, generics, .. } => {
-            lower_named_type(path, generics, resolved, decls, diags)
+            lower_named_type(path, generics, resolved, decls, diags, visiting)
         }
         TypeExpr::Tuple(elems, _) => Type::Tuple(
             elems
                 .iter()
-                .map(|e| lower_type_expr(e, resolved, decls, diags))
+                .map(|e| lower_type_expr_inner(e, resolved, decls, diags, visiting))
                 .collect(),
         ),
-        TypeExpr::Array(inner, _) => {
-            Type::Array(Box::new(lower_type_expr(inner, resolved, decls, diags)))
-        }
+        TypeExpr::Array(inner, _) => Type::Array(Box::new(lower_type_expr_inner(
+            inner, resolved, decls, diags, visiting,
+        ))),
         TypeExpr::Weak(inner, span) => {
-            let inner_ty = lower_type_expr(inner, resolved, decls, diags);
+            let inner_ty = lower_type_expr_inner(inner, resolved, decls, diags, visiting);
             if !inner_ty.is_error()
                 && crate::alloc::alloc_kind(&inner_ty, &resolved.definitions)
                     != crate::alloc::AllocKind::Heap
@@ -130,12 +154,21 @@ fn lower_type_expr(
             }
             Type::Weak(Box::new(inner_ty))
         }
+        TypeExpr::Unique(inner, _) => Type::Unique(Box::new(lower_type_expr_inner(
+            inner, resolved, decls, diags, visiting,
+        ))),
+        TypeExpr::Ref(inner, _) => Type::Ref(Box::new(lower_type_expr_inner(
+            inner, resolved, decls, diags, visiting,
+        ))),
+        TypeExpr::MutRef(inner, _) => Type::MutRef(Box::new(lower_type_expr_inner(
+            inner, resolved, decls, diags, visiting,
+        ))),
         TypeExpr::Function { params, ret, .. } => Type::Function(
             params
                 .iter()
-                .map(|p| lower_type_expr(p, resolved, decls, diags))
+                .map(|p| lower_type_expr_inner(p, resolved, decls, diags, visiting))
                 .collect(),
-            Box::new(lower_type_expr(ret, resolved, decls, diags)),
+            Box::new(lower_type_expr_inner(ret, resolved, decls, diags, visiting)),
         ),
     }
 }
@@ -146,6 +179,7 @@ fn lower_named_type(
     resolved: &ResolvedNames,
     decls: &DeclIndex,
     diags: &mut Vec<Diagnostic>,
+    visiting: &mut HashSet<DefId>,
 ) -> Type {
     let Some(res) = resolved.path_res.get(&path.id) else {
         return Type::Error;
@@ -161,11 +195,12 @@ fn lower_named_type(
             }
             if name == "Array" {
                 return if generics.len() == 1 {
-                    Type::Array(Box::new(lower_type_expr(
+                    Type::Array(Box::new(lower_type_expr_inner(
                         &generics[0],
                         resolved,
                         decls,
                         diags,
+                        visiting,
                     )))
                 } else {
                     diags.push(
@@ -181,7 +216,7 @@ fn lower_named_type(
             match def.kind {
                 DefKind::Enum => {
                     // `Option`/`Result` are ordinary prelude `enum`s now
-                    // (`stdlib/option.nt`/`result.nt`), so they always
+                    // (`stdlib/option.nr`/`result.nt`), so they always
                     // have a `decls.enum_decls` entry like any other enum
                     // — no builtin-arity fallback needed.
                     let expected = decls
@@ -201,7 +236,7 @@ fn lower_named_type(
                     }
                     let args = generics
                         .iter()
-                        .map(|g| lower_type_expr(g, resolved, decls, diags))
+                        .map(|g| lower_type_expr_inner(g, resolved, decls, diags, visiting))
                         .collect();
                     Type::Enum(id, args)
                 }
@@ -229,21 +264,42 @@ fn lower_named_type(
                     }
                     let args = generics
                         .iter()
-                        .map(|generic| lower_type_expr(generic, resolved, decls, diags))
+                        .map(|generic| {
+                            lower_type_expr_inner(generic, resolved, decls, diags, visiting)
+                        })
                         .collect();
                     match &decl.kind {
-                        TypeDeclKind::TupleStruct(_) => Type::TupleStruct(id, args),
+                        StructDeclKind::TupleStruct(_) => Type::TupleStruct(id, args),
                         _ => Type::Struct(id, args),
                     }
                 }
-                DefKind::Interface => {
+                DefKind::Trait => {
                     diags.push(
                         Diagnostic::error(format!(
-                            "`{name}` is an interface and cannot be used as a value type"
+                            "`{name}` is a trait and cannot be used as a value type"
                         ))
                         .with_label(path.span, "use it as a generic bound instead"),
                     );
                     Type::Error
+                }
+                DefKind::TypeAlias => {
+                    if !visiting.insert(id) {
+                        diags.push(
+                            Diagnostic::error(format!(
+                                "type alias `{name}` is defined in terms of itself"
+                            ))
+                            .with_label(path.span, "cyclic alias"),
+                        );
+                        return Type::Error;
+                    }
+                    let result = match decls.type_aliases.get(&id) {
+                        Some(alias_decl) => {
+                            lower_type_expr_inner(&alias_decl.ty, resolved, decls, diags, visiting)
+                        }
+                        None => Type::Error,
+                    };
+                    visiting.remove(&id);
+                    result
                 }
                 DefKind::Fn | DefKind::Primitive | DefKind::Imported => Type::Error,
             }
@@ -279,16 +335,16 @@ fn lower_generic_bound(
     } = ty
     else {
         diags.push(
-            Diagnostic::error("a generic bound must name an interface")
-                .with_label(ty.span(), "not an interface"),
+            Diagnostic::error("a generic bound must name a trait")
+                .with_label(ty.span(), "not a trait"),
         );
         return None;
     };
     let id = type_expr_def_id(ty, resolved)?;
-    if resolved.definitions.get(id).kind != DefKind::Interface {
+    if resolved.definitions.get(id).kind != DefKind::Trait {
         diags.push(
             Diagnostic::error(format!(
-                "`{}` is not an interface",
+                "`{}` is not a trait",
                 resolved.definitions.get(id).name
             ))
             .with_label(*span, "used as a bound here"),
@@ -296,7 +352,7 @@ fn lower_generic_bound(
         return None;
     }
     let expected = decls
-        .interface_decls
+        .trait_decls
         .get(&id)
         .map(|decl| decl.generics.len())
         .unwrap_or_else(|| usize::from(resolved.definitions.get(id).name.as_str() == "Into"));
@@ -312,7 +368,7 @@ fn lower_generic_bound(
         return None;
     }
     Some(GenericBound {
-        interface: id,
+        trait_id: id,
         args: generics
             .iter()
             .map(|arg| lower_type_expr(arg, resolved, decls, diags))

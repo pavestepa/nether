@@ -4,18 +4,18 @@ use super::*;
 fn generic_param_resolves_in_fn_signature() {
     let resolved = resolve_ok(
         r#"
-interface Sound {
-    sound(): String {
+trait Sound {
+    sound() String {
         "..."
     }
 }
-fn f<T: Sound>(x: T) {
+fn f<T: Sound>(x T) {
     println(x);
 }
 "#,
     );
     let sound_id = resolved.definitions.lookup(&"Sound".into()).unwrap();
-    assert_eq!(resolved.definitions.get(sound_id).kind, DefKind::Interface);
+    assert_eq!(resolved.definitions.get(sound_id).kind, DefKind::Trait);
 }
 
 #[test]
@@ -24,7 +24,7 @@ fn explicit_impl_generics_bind_a_name_for_a_declaration_less_owner() {
     // for an owner with no local declaration to read a parameter name
     // from — `Option`/`Result` used to be the only real example (compiler
     // builtins with no `TypeDecl`/`EnumDecl`), but they're ordinary
-    // prelude `enum`s now (`stdlib/option.nt`/`result.nt`), so nothing
+    // prelude `enum`s now (`stdlib/option.nr`/`result.nt`), so nothing
     // reachable from a single self-contained module is truly
     // declaration-less anymore. This keeps the explicit-form mechanism
     // itself covered with a local stand-in.
@@ -102,7 +102,7 @@ fn prelude_file_reexports_are_visible_everywhere_with_no_use() {
 #[test]
 fn prelude_names_are_invisible_without_an_explicit_prelude_file() {
     // The same fixture resolved through plain `resolve` (as if the driver
-    // had found no bundled `stdlib/mod.nt`) must NOT see `helper` — proves
+    // had found no bundled `stdlib/mod.nr`) must NOT see `helper` — proves
     // the visibility genuinely comes from the prelude promotion, not from
     // `helper` being reachable some other way.
     let (module, _prelude_file) = parse_prelude_fixture("fn use_it(): i32 { helper() }\n");
@@ -220,7 +220,7 @@ impl Option {
 fn builtins_are_available_without_use() {
     // `Option`/`Result`/`Array` are deliberately not in this list — they're
     // ordinary `enum`/`type` declarations in the bundled prelude
-    // (`stdlib/option.nt`/`result.nt`/`array.nt`), not builtins;
+    // (`stdlib/option.nr`/`result.nt`/`array.nt`), not builtins;
     // `resolve_ok` resolves a bare `Module` directly with no driver and no
     // prelude loading, so they are genuinely unavailable here (see
     // `prelude_file_reexports_are_visible_everywhere_with_no_use` for

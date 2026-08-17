@@ -1,14 +1,14 @@
 use super::*;
 
-pub(super) fn build_interface_method_table(
+pub(super) fn build_trait_method_table(
     decls: &DeclIndex,
     resolved: &ResolvedNames,
     sigs: &mut Signatures,
     diags: &mut Vec<Diagnostic>,
-) -> InterfaceMethodTable {
+) -> TraitMethodTable {
     let mut table = HashMap::new();
-    for (&id, iface) in &decls.interface_decls {
-        sigs.interface_generics.insert(
+    for (&id, iface) in &decls.trait_decls {
+        sigs.trait_generics.insert(
             id,
             iface
                 .generics
@@ -21,7 +21,7 @@ pub(super) fn build_interface_method_table(
             .iter()
             .filter_map(|parent| lower_generic_bound(parent, resolved, decls, diags))
             .collect();
-        sigs.interface_parents.insert(id, parents);
+        sigs.trait_parents.insert(id, parents);
     }
 
     fn build_one(
@@ -31,29 +31,29 @@ pub(super) fn build_interface_method_table(
         sigs: &Signatures,
         diags: &mut Vec<Diagnostic>,
         visiting: &mut HashSet<DefId>,
-        table: &mut InterfaceMethodTable,
+        table: &mut TraitMethodTable,
     ) {
         if table.contains_key(&id) {
             return;
         }
-        let Some(iface) = decls.interface_decls.get(&id).copied() else {
+        let Some(iface) = decls.trait_decls.get(&id).copied() else {
             return;
         };
         if !visiting.insert(id) {
             diags.push(
                 Diagnostic::error(format!(
-                    "interface inheritance cycle involving `{}`",
+                    "trait inheritance cycle involving `{}`",
                     resolved.definitions.get(id).name
                 ))
-                .with_label(iface.span, "cycle reaches this interface"),
+                .with_label(iface.span, "cycle reaches this trait"),
             );
             return;
         }
 
-        let mut methods: HashMap<Symbol, InterfaceMethod> = HashMap::new();
-        for parent in sigs.interface_parents.get(&id).cloned().unwrap_or_default() {
+        let mut methods: HashMap<Symbol, TraitMethod> = HashMap::new();
+        for parent in sigs.trait_parents.get(&id).cloned().unwrap_or_default() {
             build_one(
-                parent.interface,
+                parent.trait_id,
                 decls,
                 resolved,
                 sigs,
@@ -62,8 +62,8 @@ pub(super) fn build_interface_method_table(
                 table,
             );
             let parent_generics = sigs
-                .interface_generics
-                .get(&parent.interface)
+                .trait_generics
+                .get(&parent.trait_id)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
             let parent_subst: HashMap<Symbol, Type> = parent_generics
@@ -71,10 +71,10 @@ pub(super) fn build_interface_method_table(
                 .cloned()
                 .zip(parent.args.iter().cloned())
                 .collect();
-            for (name, inherited) in table.get(&parent.interface).cloned().unwrap_or_default() {
-                let inherited = InterfaceMethod {
+            for (name, inherited) in table.get(&parent.trait_id).cloned().unwrap_or_default() {
+                let inherited = TraitMethod {
                     sig: specialize_fn_sig(&inherited.sig, &parent_subst),
-                    default: inherited.default.map(|default| InterfaceDefault {
+                    default: inherited.default.map(|default| TraitDefault {
                         source: default.source,
                         subst: default
                             .subst
@@ -88,10 +88,10 @@ pub(super) fn build_interface_method_table(
                     if !method_signatures_match(&existing.sig, &inherited.sig) {
                         diags.push(
                             Diagnostic::error(format!(
-                                "inherited method `{name}` has incompatible signatures in interface `{}`",
+                                "inherited method `{name}` has incompatible signatures in trait `{}`",
                                 iface.name.name
                             ))
-                            .with_label(iface.span, "conflicting parent interfaces"),
+                            .with_label(iface.span, "conflicting parent traits"),
                         );
                     }
                     existing.ambiguous_default |= inherited.ambiguous_default;
@@ -126,9 +126,9 @@ pub(super) fn build_interface_method_table(
         for method in &iface.methods {
             methods.insert(
                 method.name.name.clone(),
-                InterfaceMethod {
+                TraitMethod {
                     sig: build_fn_sig(method, resolved, decls, diags),
-                    default: method.body.as_ref().map(|_| InterfaceDefault {
+                    default: method.body.as_ref().map(|_| TraitDefault {
                         source: id,
                         subst: identity_subst.clone(),
                     }),
@@ -141,13 +141,13 @@ pub(super) fn build_interface_method_table(
     }
 
     let mut visiting = HashSet::new();
-    for id in decls.interface_decls.keys().copied().collect::<Vec<_>>() {
+    for id in decls.trait_decls.keys().copied().collect::<Vec<_>>() {
         build_one(id, decls, resolved, sigs, diags, &mut visiting, &mut table);
     }
-    for (interface, methods) in &table {
+    for (trait_id, methods) in &table {
         for (name, method) in methods {
-            sigs.interface_methods
-                .insert((*interface, name.clone()), method.sig.clone());
+            sigs.trait_methods
+                .insert((*trait_id, name.clone()), method.sig.clone());
         }
     }
     table
@@ -157,7 +157,7 @@ pub(super) fn build_impl_methods(
     module: &Module,
     resolved: &ResolvedNames,
     decls: &DeclIndex,
-    interface_methods: &InterfaceMethodTable,
+    trait_methods: &TraitMethodTable,
     sigs: &mut Signatures,
     diags: &mut Vec<Diagnostic>,
 ) {
@@ -183,11 +183,11 @@ pub(super) fn build_impl_methods(
         let specialization = impl_specialization_args(b, owner, decls, resolved, diags);
         if let Some(args) = &specialization {
             sigs.impl_specializations.insert(b.id, args.clone());
-            if !b.interfaces.is_empty() {
+            if !b.traits.is_empty() {
                 diags.push(
                     Diagnostic::error(
                         "a concrete specialization (`impl Owner<ConcreteArgs>`) cannot also \
-                         implement an interface yet",
+                         implement a trait yet",
                     )
                     .with_label(b.span, "in this `impl` block"),
                 );
@@ -217,13 +217,29 @@ pub(super) fn build_impl_methods(
         }
     }
 
-    let mut sets: HashMap<(DefId, Symbol), MethodSet> = HashMap::new();
+    let mut sets: HashMap<(DefId, Symbol, ReceiverDomain), MethodSet> = HashMap::new();
     for entry in &raw {
-        let key = (entry.owner, entry.name.clone());
-        let set = sets.entry(key).or_default();
+        let domain = ReceiverDomain::of_self_param(entry.sig.self_param.as_ref());
+        let key = (entry.owner, entry.name.clone(), domain);
         match &entry.specialization {
             None => {
-                if set.generic.is_some() {
+                // `Static` still collides with either instance domain (a
+                // static method's name can't also be an instance method's,
+                // language-spec §8.5) — only `Arc` and `Owned` are allowed
+                // to coexist (§8.4). Checked against `sets` directly,
+                // before taking `key`'s own entry, since these are
+                // necessarily different map slots.
+                let static_conflict = domain != ReceiverDomain::Static
+                    && sets
+                        .get(&(entry.owner, entry.name.clone(), ReceiverDomain::Static))
+                        .is_some_and(|s| s.generic.is_some());
+                let instance_conflict = domain == ReceiverDomain::Static
+                    && [ReceiverDomain::Arc, ReceiverDomain::Owned].into_iter().any(|other| {
+                        sets.get(&(entry.owner, entry.name.clone(), other))
+                            .is_some_and(|s| s.generic.is_some())
+                    });
+                let set = sets.entry(key).or_default();
+                if set.generic.is_some() || static_conflict || instance_conflict {
                     diags.push(
                         Diagnostic::error(format!(
                             "method `{}` is defined more than once for `{}`",
@@ -236,6 +252,7 @@ pub(super) fn build_impl_methods(
                 }
             }
             Some(args) => {
+                let set = sets.entry(key).or_default();
                 if set
                     .specializations
                     .iter()
@@ -258,7 +275,8 @@ pub(super) fn build_impl_methods(
         let Some(args) = &entry.specialization else {
             continue;
         };
-        let key = (entry.owner, entry.name.clone());
+        let domain = ReceiverDomain::of_self_param(entry.sig.self_param.as_ref());
+        let key = (entry.owner, entry.name.clone(), domain);
         let Some(generic_sig) = sets.get(&key).and_then(|set| set.generic.as_ref()) else {
             continue;
         };
@@ -287,14 +305,14 @@ pub(super) fn build_impl_methods(
 
     let mut requests = Vec::new();
     for (&owner, decl) in &decls.type_decls {
-        for interface in &decl.interfaces {
-            if let Some(bound) = lower_generic_bound(interface, resolved, decls, diags) {
+        for trait_ref in &decl.traits {
+            if let Some(bound) = lower_generic_bound(trait_ref, resolved, decls, diags) {
                 let owner_generics = owner_generic_params(owner, decls, resolved, diags);
                 requests.push(Request {
                     owner,
                     owner_ty: owner_as_type_from_generics(owner, resolved, decls, &owner_generics),
                     owner_name: decl.name.name.clone(),
-                    owner_span: interface.span(),
+                    owner_span: trait_ref.span(),
                     owner_generics,
                     bound,
                     allow_defaults: true,
@@ -303,14 +321,14 @@ pub(super) fn build_impl_methods(
         }
     }
     for (&owner, decl) in &decls.enum_decls {
-        for interface in &decl.interfaces {
-            if let Some(bound) = lower_generic_bound(interface, resolved, decls, diags) {
+        for trait_ref in &decl.traits {
+            if let Some(bound) = lower_generic_bound(trait_ref, resolved, decls, diags) {
                 let owner_generics = owner_generic_params(owner, decls, resolved, diags);
                 requests.push(Request {
                     owner,
                     owner_ty: owner_as_type_from_generics(owner, resolved, decls, &owner_generics),
                     owner_name: decl.name.name.clone(),
-                    owner_span: interface.span(),
+                    owner_span: trait_ref.span(),
                     owner_generics,
                     bound,
                     allow_defaults: true,
@@ -326,14 +344,14 @@ pub(super) fn build_impl_methods(
         else {
             continue;
         };
-        for interface in &block.interfaces {
-            if let Some(bound) = lower_generic_bound(interface, resolved, decls, diags) {
+        for trait_ref in &block.traits {
+            if let Some(bound) = lower_generic_bound(trait_ref, resolved, decls, diags) {
                 let owner_generics = owner_generics_for_impl(block, owner, decls, resolved, diags);
                 requests.push(Request {
                     owner,
                     owner_ty: owner_as_type_from_generics(owner, resolved, decls, &owner_generics),
                     owner_name: block.target.name.clone(),
-                    owner_span: interface.span(),
+                    owner_span: trait_ref.span(),
                     owner_generics,
                     bound,
                     allow_defaults: false,
@@ -353,7 +371,7 @@ pub(super) fn build_impl_methods(
                 Diagnostic::error(format!(
                     "`{}` already implements `{}`",
                     request.owner_name,
-                    resolved.definitions.get(request.bound.interface).name
+                    resolved.definitions.get(request.bound.trait_id).name
                 ))
                 .with_label(request.owner_span, "duplicate implementation"),
             );
@@ -370,24 +388,24 @@ pub(super) fn build_impl_methods(
     struct DeclaredNeed {
         owner_name: Symbol,
         span: Span,
-        interface_name: Symbol,
+        trait_name: Symbol,
         sig: FnSig,
         defaults: Vec<DefaultCandidate>,
         ambiguous: bool,
     }
-    let mut declared: HashMap<(DefId, Symbol), DeclaredNeed> = HashMap::new();
+    let mut declared: HashMap<(DefId, Symbol, ReceiverDomain), DeclaredNeed> = HashMap::new();
 
     for request in requests {
-        let iface_id = request.bound.interface;
-        let Some(methods) = interface_methods.get(&iface_id) else {
+        let iface_id = request.bound.trait_id;
+        let Some(methods) = trait_methods.get(&iface_id) else {
             continue;
         };
-        let interface_generics = sigs
-            .interface_generics
+        let trait_generics = sigs
+            .trait_generics
             .get(&iface_id)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
-        let interface_subst: HashMap<Symbol, Type> = interface_generics
+        let trait_subst: HashMap<Symbol, Type> = trait_generics
             .iter()
             .cloned()
             .zip(request.bound.args.iter().cloned())
@@ -395,14 +413,15 @@ pub(super) fn build_impl_methods(
         let owner_generics = request.owner_generics.clone();
 
         for (name, method) in methods {
-            let mut expected = specialize_fn_sig(&method.sig, &interface_subst);
+            let mut expected = specialize_fn_sig(&method.sig, &trait_subst);
             expected.generics.splice(0..0, owner_generics.clone());
-            let key = (request.owner, name.clone());
+            let domain = ReceiverDomain::of_self_param(expected.self_param.as_ref());
+            let key = (request.owner, name.clone(), domain);
             if let Some(actual) = sigs.methods.get(&key).and_then(|set| set.generic.as_ref()) {
                 if !method_signatures_match(actual, &expected) {
                     diags.push(
                         Diagnostic::error(format!(
-                            "method `{name}` does not match its declaration in interface `{}`",
+                            "method `{name}` does not match its declaration in trait `{}`",
                             resolved.definitions.get(iface_id).name
                         ))
                         .with_label(request.owner_span, "implementation is here"),
@@ -414,7 +433,7 @@ pub(super) fn build_impl_methods(
             if !request.allow_defaults {
                 diags.push(
                     Diagnostic::error(format!(
-                        "`{}` must explicitly implement method `{name}` of interface `{}`",
+                        "`{}` must explicitly implement method `{name}` of trait `{}`",
                         request.owner_name,
                         resolved.definitions.get(iface_id).name
                     ))
@@ -428,14 +447,14 @@ pub(super) fn build_impl_methods(
                 subst: default
                     .subst
                     .iter()
-                    .map(|(name, ty)| (name.clone(), substitute_generic(ty, &interface_subst)))
+                    .map(|(name, ty)| (name.clone(), substitute_generic(ty, &trait_subst)))
                     .collect(),
                 sig: expected.clone(),
             });
             let need = declared.entry(key).or_insert_with(|| DeclaredNeed {
                 owner_name: request.owner_name.clone(),
                 span: request.owner_span,
-                interface_name: resolved.definitions.get(iface_id).name.clone(),
+                trait_name: resolved.definitions.get(iface_id).name.clone(),
                 sig: expected.clone(),
                 defaults: Vec::new(),
                 ambiguous: false,
@@ -444,9 +463,9 @@ pub(super) fn build_impl_methods(
                 need.ambiguous = true;
                 diags.push(
                     Diagnostic::error(format!(
-                        "method `{name}` has incompatible signatures in implemented interfaces"
+                        "method `{name}` has incompatible signatures in implemented traits"
                     ))
-                    .with_label(request.owner_span, "conflicting interface"),
+                    .with_label(request.owner_span, "conflicting trait"),
                 );
             }
             need.ambiguous |= method.ambiguous_default;
@@ -460,7 +479,7 @@ pub(super) fn build_impl_methods(
         }
     }
 
-    for ((owner, name), need) in declared {
+    for ((owner, name, domain), need) in declared {
         if need.ambiguous || need.defaults.len() > 1 {
             diags.push(
                 Diagnostic::error(format!(
@@ -471,18 +490,18 @@ pub(super) fn build_impl_methods(
             );
         } else if let Some(default) = need.defaults.into_iter().next() {
             sigs.methods
-                .entry((owner, name.clone()))
+                .entry((owner, name.clone(), domain))
                 .or_default()
                 .generic = Some(default.sig);
             sigs.default_method_substitutions
-                .insert((owner, name.clone()), default.subst);
+                .insert((owner, name.clone(), domain), default.subst);
             sigs.default_method_sources
-                .insert((owner, name), default.source);
+                .insert((owner, name, domain), default.source);
         } else {
             diags.push(
                 Diagnostic::error(format!(
-                    "`{}` does not implement required method `{name}` of interface `{}`",
-                    need.owner_name, need.interface_name
+                    "`{}` does not implement required method `{name}` of trait `{}`",
+                    need.owner_name, need.trait_name
                 ))
                 .with_label(need.span, "missing implementation"),
             );

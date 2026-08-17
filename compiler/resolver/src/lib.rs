@@ -11,7 +11,7 @@
 //!   bundled prelude (`Option`/`Result` included — ordinary `enum`
 //!   declarations in `stdlib/`, not builtins; see
 //!   [`def::Definitions::promote_to_prelude`]), and user-declared
-//!   `type`/`enum`/`interface`/`fn`, with `impl` block method names
+//!   `type`/`enum`/`trait`/`fn`, with `impl` block method names
 //!   merged into their target's entry.
 //! - Build nested local scopes for function/method/closure bodies —
 //!   `self`, parameters, `let` bindings, and pattern bindings (match arms,

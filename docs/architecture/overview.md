@@ -130,15 +130,15 @@ function signatures (declared, not defined, in `codegen`/`llvm`).
 
 1. **Lexer** (`lexer`) — source text → token stream. Owns all
    character-level decisions: comment stripping, string/template-string
-   scanning (including the `${` interpolation split, per spec §2.3),
+   scanning (including the `${` interpolation split, per spec §2.4),
    numeric literal scanning. Produces `Span`-tagged tokens; never
    allocates AST nodes.
 2. **Parser** (`parser`) — token stream → `ast`. Pratt parser for
    expressions (per the operator-precedence needs of a C-like/Rust-like
    grammar); recursive-descent for items/statements. Purely syntactic —
    does not resolve names or check types. Produces one AST node kind for
-   dotted paths (module path vs. member access is not decided here, per
-   spec §10).
+   dotted paths (module path vs. member access is not decided here — see
+   spec §15 for module path syntax).
 3. **Name Resolution** (`resolver`) — walks the AST, builds scopes, binds
    every identifier/path to a concrete declaration (or reports an
    unresolved-name diagnostic). The driver has already expanded
@@ -146,10 +146,10 @@ function signatures (declared, not defined, in `codegen`/`llvm`).
    imports to target file namespaces; resolver binds each imported name
    and disambiguates remaining value/static access.
 4. **Type Checking** (`typecheck`) — assigns a structured `Type` (never a
-   string — see `type-system.md`) to every expression, checks interface
+   string — see `type-system.md`) to every expression, checks trait
    bounds are satisfied, checks `mut`/heap-vs-stack rules are respected
    (e.g. a `mut` parameter's argument must itself be a `mut` binding, per
-   spec §5.1).
+   spec §8.1).
 5. **HIR lowering** (`hir`) — desugars the typed AST into a smaller,
    uniform node set: e.g. `for` loops desugar to their underlying
    iteration primitive, string interpolation desugars to concatenation
@@ -168,7 +168,8 @@ function signatures (declared, not defined, in `codegen`/`llvm`).
    it's now needed mechanically by the next pass.
 8. **ARC insertion pass** (`mir`, as a distinct pass over MIR — see
    `arc-model.md`) — walks the CFG and inserts explicit
-   retain/release/RVO-elision calls per the rules in spec §13. Runs
+   retain/release/RVO-elision calls per the rules in spec §21 and
+   `arc-model.md`. Runs
    entirely on MIR, never on HIR or AST, so it only has to reason about a
    CFG + a fixed instruction set, not arbitrary nested expression trees.
 9. **LLVM IR Generation** (`codegen`, using the `llvm` backend-abstraction
@@ -220,11 +221,13 @@ The end-to-end native pipeline is implemented. The compiler is an
 experimental alpha/MVP rather than a production toolchain: it has no
 package manager or incremental compilation, imports have no aliases,
 globs or re-exports, inline modules are absent,
-generics intentionally omit where-clauses/associated types/specialization,
-the standard library is small, enums use a space-inefficient flat layout,
-and linking is host-only (cross-target object emission is supported).
+generics intentionally omit where-clauses/associated types/const generics
+(instance-method specialization for one concrete instantiation is
+supported — see `../generics.md`), the standard library is small, enums use
+a space-inefficient flat layout, and linking is host-only (cross-target
+object emission is supported).
 
-Generic functions, methods, structs, tuple structs, enums, interfaces,
-generic bounds and interface inheritance are implemented through static
+Generic functions, methods, structs, tuple structs, enums, traits,
+generic bounds and trait inheritance are implemented through static
 monomorphization. The example-driven feature and limitation reference is
 [`../generics.md`](../generics.md).

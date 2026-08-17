@@ -6,7 +6,7 @@ fn mod_std_alias_loads_the_bundled_stdlib_root_without_conflict() {
     // prelude already loads (`load_module_graph`), under the name `std` —
     // `resolve_use_module`'s `std`/`stdlib` fallback branches both point
     // at the same `bundled_stdlib_root()`. Everything currently bundled
-    // (`stdlib/option.nt`/`result.nt`) is `impl`-only with no top-level
+    // (`stdlib/option.nr`/`result.nt`) is `impl`-only with no top-level
     // name to `use`, so this exercises the *file-loading* half of the
     // alias specifically: an explicit `mod std;` must not conflict with
     // (double-register, duplicate-diagnostic) the same file the prelude
@@ -23,8 +23,8 @@ mod std;
 
 fn main() {
     println(`${Option.Some(4).unwrap_or(0)}`);
-    let ok: Result<i32, String> = Result.Ok(6);
-    println(`${ok.map((x: i32) => { x + 1 }).unwrap_or(0)}`);
+    let ok Result<i32, String> = Result.Ok(6);
+    println(`${ok.map((x i32) => { x + 1 }).unwrap_or(0)}`);
 }
 "#,
     )
@@ -70,14 +70,14 @@ fn concrete_specialization_overrides_the_generic_impl() {
         &entry,
         r#"
 impl<T> Option<T> {
-    describe(self): String {
-        "generic"
+    describe(self) String {
+        return "generic";
     }
 }
 
 impl Option<i32> {
-    describe(self): String {
-        "int"
+    describe(self) String {
+        return "int";
     }
 }
 
@@ -125,12 +125,12 @@ fn variadic_parameter_collects_trailing_arguments_into_an_array() {
     std::fs::write(
         &entry,
         r#"
-fn sum(items: ...i32): i32 {
+fn sum(items ...i32) i32 {
     let mut total = 0;
     for item in items {
         total = total + item;
     }
-    total
+    return total;
 }
 
 fn main() {
@@ -187,7 +187,7 @@ fn string_concatenation_by_reassignment_inside_a_loop_over_an_array_parameter_co
     std::fs::write(
         &entry,
         r#"
-fn joined(parts: Array<String>): String {
+fn joined(parts Array<String>) String {
     let mut result = "";
     for part in parts {
         result = `${result}${part}`;

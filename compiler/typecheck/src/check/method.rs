@@ -164,7 +164,12 @@ impl Checker<'_> {
         else {
             return Type::Error;
         };
-        let Some(sig) = self.sigs.method(owner_id, &name).cloned() else {
+        // Any domain: this is a call through the *type* (`Dog.new(...)`),
+        // which is only ever valid for a `Static` signature — but we still
+        // want to find an `Arc`/`Owned` instance method here too, purely
+        // to give the precise "instance method" diagnostic below instead
+        // of a generic "no method" one.
+        let Some(sig) = self.sigs.method_any_domain(owner_id, &name).cloned() else {
             return Type::Error;
         };
         if sig.self_param.is_some() {
@@ -197,7 +202,19 @@ impl Checker<'_> {
         span: Span,
         call_id: Option<NodeId>,
         receiver_mutable: Option<bool>,
+        receiver_local: Option<LocalId>,
     ) -> Type {
+        // Captured from the *un-stripped* type — an owned (`:Dog`) receiver
+        // or a reference to one (`:&Dog`/`:&mut Dog`) must resolve against
+        // the owner's `Owned`-domain method set, not its ARC-domain one
+        // (language-spec §8.4, §3.1).
+        let receiver_domain = ReceiverDomain::of_receiver_ty(base_ty);
+        let unstripped_base_ty = base_ty.clone();
+        // `strip_indirection`, not just `strip_unique` — a `:&T`/`:&mut T`
+        // receiver's owner/field resolution below needs to see through
+        // the reference the same way it already sees through `Unique`
+        // (Stage 2, slice 3).
+        let base_ty = base_ty.strip_indirection();
         if let Type::Generic(name) = base_ty {
             return self.check_generic_method_call(name, method, generic_args, args, span, call_id);
         }
@@ -244,7 +261,21 @@ impl Checker<'_> {
             Type::Array(elem) => std::slice::from_ref(elem.as_ref()),
             _ => &[],
         };
-        let Some(method_set) = self.sigs.methods.get(&(owner_id, method.name.clone())) else {
+        // Try the receiver's own domain first; fall back to `Static` so a
+        // static method can still be called through a value
+        // (`static_methods_can_be_called_through_values`) — `Static` can
+        // never coexist with `Arc`/`Owned` for the same name, so at most
+        // one of these two lookups ever succeeds.
+        let method_set = self
+            .sigs
+            .methods
+            .get(&(owner_id, method.name.clone(), receiver_domain))
+            .or_else(|| {
+                self.sigs
+                    .methods
+                    .get(&(owner_id, method.name.clone(), ReceiverDomain::Static))
+            });
+        let Some(method_set) = method_set else {
             let desc = self.describe(base_ty);
             self.err(
                 method.span,
@@ -264,8 +295,45 @@ impl Checker<'_> {
             );
             return Type::Error;
         };
-        if sig.self_param == Some(SelfParam::ByMutRef) && receiver_mutable != Some(true) {
-            self.err(method.span, "cannot call a `mut self` method through an immutable receiver — declare it with `let mut`");
+        // `ByMutRef` (`mut self`) and `OwnedMutRef` (`: &mut self`) both
+        // need an exclusive/mutable receiver — `receiver_mutable` already
+        // answers this correctly for both a `let mut`-bound owned local
+        // and a `:&mut T` parameter, since a `Type::MutRef` parameter's
+        // own binding already counts as mutable
+        // (`Checker::check_fn_decl`, Stage 2 slice 2).
+        if matches!(
+            sig.self_param,
+            Some(SelfParam::ByMutRef | SelfParam::OwnedMutRef)
+        ) && receiver_mutable != Some(true)
+        {
+            self.err(method.span, "cannot call a `mut self` method (or `: &mut self`) through an immutable receiver — declare it with `let mut`");
+        }
+        // A `: self` (consuming) method can never be called through a mere
+        // reference — the receiver's *unstripped* type must genuinely be
+        // `Type::Unique`, not `Type::Ref`/`Type::MutRef` (Stage 2, slice
+        // 3) — otherwise `ReceiverDomain::of_receiver_ty` folding
+        // references into the same `Owned` bucket as owned values (so
+        // `: &self`/`: &mut self` methods are reachable at all through a
+        // `:&T`/`:&mut T` parameter) would unsoundly let this consume a
+        // value the caller only lent out.
+        if sig.self_param == Some(SelfParam::Owned)
+            && matches!(unstripped_base_ty, Type::Ref(_) | Type::MutRef(_))
+        {
+            self.err(
+                method.span,
+                "cannot call a consuming (`: self`) method through a borrowed reference",
+            );
+        }
+        // A `: self` receiver consumes the owned value it's called
+        // through; `: &self`/`: &mut self` only borrow it (validity-check
+        // only, same as a field read) — language-spec §8.4. `receiver_local`
+        // is `None` whenever the receiver isn't literally a bare local
+        // (e.g. `container.field.method()`), which this pass doesn't
+        // track moves for at all (language-spec §4.2: a field is never
+        // itself `Type::Unique`, so there is nothing to consume there).
+        if let Some(id) = receiver_local {
+            let consumes = sig.self_param == Some(SelfParam::Owned);
+            self.check_move(id, &unstripped_base_ty, span, consumes);
         }
         // Build a placeholder `Owner<T, ...>` to structurally match against
         // `base_ty`'s concrete arguments below, binding each owner
@@ -321,7 +389,7 @@ impl Checker<'_> {
     ) -> Type {
         let bound = self.generics.get(name).cloned().flatten();
         if let Some(bound) = bound {
-            let bound_name = self.resolved.definitions.get(bound.interface).name.as_str();
+            let bound_name = self.resolved.definitions.get(bound.trait_id).name.as_str();
             if bound_name == "Into"
                 && bound.args == [Type::String]
                 && method.name.as_str() == "into_string"
@@ -339,20 +407,20 @@ impl Checker<'_> {
             }
             if let Some(raw_sig) = self
                 .sigs
-                .interface_methods
-                .get(&(bound.interface, method.name.clone()))
+                .trait_methods
+                .get(&(bound.trait_id, method.name.clone()))
                 .cloned()
             {
-                let interface_subst: HashMap<Symbol, Type> = self
+                let trait_subst: HashMap<Symbol, Type> = self
                     .sigs
-                    .interface_generics
-                    .get(&bound.interface)
+                    .trait_generics
+                    .get(&bound.trait_id)
                     .into_iter()
                     .flatten()
                     .cloned()
                     .zip(bound.args)
                     .collect();
-                let sig = specialize_fn_sig(&raw_sig, &interface_subst);
+                let sig = specialize_fn_sig(&raw_sig, &trait_subst);
                 let subst =
                     self.check_call_args(&sig, args, span, None, None, generic_args, call_id);
                 return substitute_generic(&sig.ret, &subst);

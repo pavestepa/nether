@@ -14,7 +14,7 @@ fn arithmetic_requires_matching_numeric_operands() {
 fn if_else_branch_type_mismatch_reported() {
     assert_err(
         r#"
-fn f(): i32 {
+fn f() i32 {
     if true {
         1
     } else {
@@ -43,14 +43,14 @@ fn field_assignment_through_an_immutable_binding_is_rejected() {
     // heap-only exemption.
     assert_err(
         r#"
-type Dog { name: String }
+struct Dog { name String }
 impl Dog {
-    rename(mut self, new_name: String) {
+    rename(mut self, new_name String) {
         self.name = new_name;
     }
 }
 fn main() {
-    let d = Dog { name: "Rex" };
+    let d = Dog { name = "Rex" };
     d.name = "Buddy";
 }
 "#,
@@ -58,9 +58,9 @@ fn main() {
     );
     assert_ok(
         r#"
-type Dog { name: String }
+struct Dog { name String }
 fn main() {
-    let mut d = Dog { name: "Rex" };
+    let mut d = Dog { name = "Rex" };
     d.name = "Buddy";
 }
 "#,
@@ -71,14 +71,14 @@ fn main() {
 fn calling_a_mut_self_method_through_an_immutable_receiver_is_rejected() {
     assert_err(
         r#"
-type Dog { name: String }
+struct Dog { name String }
 impl Dog {
-    rename(mut self, new_name: String) {
+    rename(mut self, new_name String) {
         self.name = new_name;
     }
 }
 fn main() {
-    let d = Dog { name: "Rex" };
+    let d = Dog { name = "Rex" };
     d.rename("Buddy");
 }
 "#,
@@ -86,14 +86,14 @@ fn main() {
     );
     assert_ok(
         r#"
-type Dog { name: String }
+struct Dog { name String }
 impl Dog {
-    rename(mut self, new_name: String) {
+    rename(mut self, new_name String) {
         self.name = new_name;
     }
 }
 fn main() {
-    let mut d = Dog { name: "Rex" };
+    let mut d = Dog { name = "Rex" };
     d.rename("Buddy");
 }
 "#,
@@ -107,20 +107,20 @@ fn mut_self_method_call_on_a_field_of_mut_self_is_allowed() {
     // method, matching `self.field = x`'s own root-local rule.
     assert_ok(
         r#"
-type Dog { name: String }
+struct Dog { name String }
 impl Dog {
-    rename(mut self, new_name: String) {
+    rename(mut self, new_name String) {
         self.name = new_name;
     }
 }
-type Holder { dog: Dog }
+struct Holder { dog Dog }
 impl Holder {
-    rename_dog(mut self, new_name: String) {
+    rename_dog(mut self, new_name String) {
         self.dog.rename(new_name);
     }
 }
 fn main() {
-    let mut h = Holder { dog: Dog { name: "Rex" } };
+    let mut h = Holder { dog = Dog { name = "Rex" } };
     h.rename_dog("Buddy");
 }
 "#,
@@ -144,7 +144,20 @@ fn array_push_and_pop_require_a_mutable_binding() {
 
 #[test]
 fn return_type_mismatch_is_reported() {
-    assert_err("fn f(): i32 { return \"x\"; }", "expected return type");
+    assert_err("fn f() i32 { return \"x\"; }", "expected return type");
+}
+
+#[test]
+fn function_tail_expression_is_discarded_instead_of_returned() {
+    assert_err("fn f() i32 { 1 }", "expected return type `i32`, found `()`");
+    assert_ok("fn f() i32 { return 1; }");
+    // The same syntax remains a value when it is an ordinary block used by
+    // another expression rather than the function body's own outer block.
+    assert_ok("fn f() i32 { return if true { 1 } else { 2 }; }");
+    // A tail in a unit-returning function is a discarded expression and is
+    // still type-checked.
+    assert_ok("fn f() { 1 }");
+    assert_err("fn f() { 1 + true }", "same type");
 }
 
 #[test]
@@ -154,17 +167,17 @@ fn block_with_no_tail_but_a_diverging_last_statement_types_as_never() {
     // diverges — `return`/`break`/`continue` written with a trailing
     // semicolon are ordinary `Stmt::Expr`s, whose `Type::Never` was
     // computed and then discarded.
-    assert_ok("fn foo(a: i32): i32 { return a; }");
+    assert_ok("fn foo(a i32) i32 { return a; }");
     // There's no dead-code diagnostic in this language, so a diverging
     // statement isn't necessarily the last one — the block must still
     // type as `Never`, not fall back to `()`, when an earlier statement
     // diverges.
-    assert_ok("fn foo(a: i32): i32 { return a; let y = 1; }");
+    assert_ok("fn foo(a i32) i32 { return a; let y = 1; }");
     // Both `if`/`else` branches diverging, as ordinary statements inside
     // a fn body with no tail.
     assert_ok(
         r#"
-fn foo(a: i32): i32 {
+fn foo(a i32) i32 {
     if a > 0 {
         return a;
     } else {
@@ -174,14 +187,14 @@ fn foo(a: i32): i32 {
 "#,
     );
     // A diverging `let` initializer also propagates.
-    assert_ok("fn foo(a: i32): i32 { let x = return a; }");
+    assert_ok("fn foo(a i32) i32 { let x = return a; }");
 }
 
 #[test]
 fn array_and_index_type_checks() {
     assert_ok("fn main() { let a = [1, 2, 3]; let x = a[0]; }");
     assert_err(
-        "fn main() { let a: [i32] = []; let x = a[\"no\"]; }",
+        "fn main() { let a [i32] = []; let x = a[\"no\"]; }",
         "must be an integer type",
     );
     assert_err("fn main() { let a = []; }", "cannot infer");
@@ -190,7 +203,7 @@ fn array_and_index_type_checks() {
 #[test]
 fn array_builtin_methods_type_check() {
     assert_ok(
-        "fn main() { let mut a = [1, 2]; a.push(3); let n: usize = a.len(); let p = a.pop(); }",
+        "fn main() { let mut a = [1, 2]; a.push(3); let n usize = a.len(); let p = a.pop(); }",
     );
     assert_err(
         "fn main() { let mut a = [1, 2]; a.push(\"x\"); }",
@@ -201,7 +214,7 @@ fn array_builtin_methods_type_check() {
 #[test]
 fn user_defined_impl_on_array_type_checks_and_self_sees_builtin_operations() {
     // `Array<T>` is an ordinary generic type declared in the bundled
-    // prelude (`stdlib/array.nt`) now, not a closed compiler builtin — a
+    // prelude (`stdlib/array.nr`) now, not a closed compiler builtin — a
     // user `impl<T> Array<T>` block's `self` types as `Array<T>` and can
     // freely mix a user-defined method (`sum`, calling itself indirectly
     // via `for_each`) with the still-runtime-backed builtins (`len`,
@@ -209,8 +222,8 @@ fn user_defined_impl_on_array_type_checks_and_self_sees_builtin_operations() {
     assert_ok(
         r#"
 impl<T> Array<T> {
-    for_each(mut self, f: (T) => ()) {
-        let mut i: usize = 0;
+    for_each(mut self, f (T) => ()) {
+        let mut i usize = 0;
         while i < self.len() {
             f(self[i]);
             i = i + 1;
@@ -220,7 +233,7 @@ impl<T> Array<T> {
 
 fn main() {
     let mut a = [1, 2, 3];
-    a.for_each((v: i32) => {
+    a.for_each((v i32) => {
         println(`${v}`);
     });
 }
@@ -236,7 +249,7 @@ fn user_defined_array_method_rejects_a_receiver_type_mismatch() {
     assert_err(
         r#"
 impl<T> Array<T> {
-    first_or(self, fallback: T): T {
+    first_or(self, fallback T) T {
         if self.len() > 0 {
             self[0]
         } else {
