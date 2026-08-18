@@ -359,7 +359,7 @@ impl Dog Sound {
     }
 }
 
-fn make_noise<T: Sound>(value T) String {
+fn make_noise<T Sound>(value T) String {
     value.sound()
 }
 
@@ -389,7 +389,7 @@ impl Boxed Read<T> {
     }
 }
 
-fn read_text<T: Read<String>>(value T) String {
+fn read_text<T Read<String>>(value T) String {
     value.read()
 }
 
@@ -406,11 +406,11 @@ only useful when their resulting method sets do not conflict.
 Generic bounds can also be attached to type parameters:
 
 ```nether
-struct SpeakerBox<T: Sound> {
+struct SpeakerBox<T Sound> {
     value T
 }
 
-fn open<T: Sound>(box SpeakerBox<T>) String {
+fn open<T Sound>(box SpeakerBox<T>) String {
     box.value.sound()
 }
 ```
@@ -435,7 +435,7 @@ trait Sound {
 
 trait NamedSound Named, Sound {}
 
-fn describe<T: NamedSound>(value T) String {
+fn describe<T NamedSound>(value T) String {
     `${value.name()}: ${value.sound()}`
 }
 ```
@@ -459,7 +459,7 @@ impl Dog {
     sound(self) String { "woof" }
 }
 
-fn only_named<T: Named>(value T) String {
+fn only_named<T Named>(value T) String {
     value.name()
 }
 
@@ -486,7 +486,7 @@ impl TextSource CachedSource<String> {
     cached(self) bool { true }
 }
 
-fn read_source<T: Source<String>>(source T) String {
+fn read_source<T Source<String>>(source T) String {
     source.read()
 }
 
@@ -588,7 +588,7 @@ impl Resolved {
 generic string conversion and is used by printing and interpolation:
 
 ```nether
-fn stringify<T: Into<String>>(value T) String {
+fn stringify<T Into<String>>(value T) String {
     value.into_string()
 }
 ```
@@ -710,12 +710,17 @@ parameters already fixed by its receiver.
 ### `where` clauses and multiple inline bounds
 
 ```nether
-// Not supported:
-// fn render<T>(value: T): String where T: Named, T: Sound { ... }
-// fn render<T: Named + Sound>(value: T): String { ... }
+fn render<T Named + Sound>(value T) String {
+    return `${value.name()}: ${value.sound()}`;
+}
+
+fn render_where<T>(value T) String where T Named + Sound {
+    return `${value.name()}: ${value.sound()}`;
+}
 ```
 
-Define a child trait inheriting all required parents instead.
+Generic bounds never use a colon: `<T: Named>` and `where T: Named` are
+syntax errors.
 
 ### Associated types
 

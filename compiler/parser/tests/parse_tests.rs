@@ -284,7 +284,7 @@ fn removed_private_keyword_reports_a_diagnostic_and_recovers() {
 
 #[test]
 fn generic_bound_on_fn() {
-    let module = parse_ok("fn f<T: Sound>(x T) {\n    println(x);\n}\n");
+    let module = parse_ok("fn f<T Sound>(x T) {\n    println(x);\n}\n");
     let Item::Fn(f) = &module.items[0] else {
         panic!("expected FnDecl")
     };
@@ -299,7 +299,7 @@ fn generic_bound_on_fn() {
 #[test]
 fn generic_bound_can_itself_be_generic() {
     // `T: Into<String>` — the bound interface is itself parameterized.
-    let module = parse_ok("fn f<T: Into<String>>(x T) {\n    println(x);\n}\n");
+    let module = parse_ok("fn f<T Into<String>>(x T) {\n    println(x);\n}\n");
     let Item::Fn(f) = &module.items[0] else {
         panic!("expected FnDecl")
     };
@@ -327,6 +327,36 @@ fn generic_parameter_accepts_multiple_bounds() {
         })
         .collect();
     assert_eq!(names, ["Sound", "Named"]);
+
+    let module = parse_ok("fn describe<T>(value T) where T Sound + Named {}\n");
+    let Item::Fn(f) = &module.items[0] else {
+        panic!("expected FnDecl")
+    };
+    assert_eq!(f.generics[0].bounds.len(), 2);
+
+    let (_, diagnostics) = parse_with_diagnostics("fn invalid<T>(value T) where U Sound {}\n");
+    assert!(diagnostics.iter().any(|diagnostic| diagnostic
+        .message
+        .contains("undeclared generic parameter `U`")));
+
+    let (_, diagnostics) = parse_with_diagnostics("fn old<T: Sound>(value T) {}\n");
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.message.contains("write `<T Trait>`")));
+
+    let (_, diagnostics) = parse_with_diagnostics("fn old<T>(value T) where T: Sound {}\n");
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.message.contains("write `where T Trait`")));
+
+    parse_ok(
+        r#"
+struct Box<T> where T Sound { value T }
+enum Maybe<T> where T Sound { Some(T), None }
+trait Convert<T> where T Sound { convert<U>(value U) where U Named; }
+impl<T> Box<T> where T Sound { get<U>(self, fallback U) T where U Named { return self.value; } }
+"#,
+    );
 }
 
 #[test]

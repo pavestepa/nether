@@ -112,7 +112,7 @@ trait Sound {
         return "...";
     }
 }
-fn make_noise<T: Sound>(x T) {
+fn make_noise<T Sound>(x T) {
     println(x.sound());
 }
 "#,

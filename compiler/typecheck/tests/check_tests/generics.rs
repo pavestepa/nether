@@ -29,7 +29,7 @@ struct Boxed<T> { value T }
 impl Boxed Transform {
     transform<U>(self, value U) U { return value; }
 }
-fn apply<T: Transform>(value T) String {
+fn apply<T Transform>(value T) String {
     return value.transform<String>("ready");
 }
 fn main() {
@@ -54,7 +54,7 @@ fn main() { identity<String>(2); }
     assert_err(
         r#"
 trait Sound { sound(self) String; }
-fn make_noise<T: Sound>(value T) String { return value.sound(); }
+fn make_noise<T Sound>(value T) String { return value.sound(); }
 fn main() { make_noise<u32>(2); }
 "#,
         "does not implement `Sound`",
@@ -65,7 +65,7 @@ fn main() { make_noise<u32>(2); }
 fn into_string_bound_is_checked_inside_generic_bodies() {
     assert_ok(
         r#"
-fn stringify<T: Into<String>>(value T) String {
+fn stringify<T Into<String>>(value T) String {
     return value.into_string();
 }
 fn main() {
@@ -98,10 +98,10 @@ struct Dog Identity<String> { name String }
 impl Dog Convert<String> {
     convert(self) String { return self.name; }
 }
-fn convert<U: Convert<String>>(value U) String {
+fn convert<U Convert<String>>(value U) String {
     return value.convert();
 }
-fn identify<U: Identity<String>>(value U) String {
+fn identify<U Identity<String>>(value U) String {
     return value.identity("ready");
 }
 fn main() {
@@ -116,7 +116,7 @@ fn main() {
 trait Convert<T> { convert(self) T; }
 struct Dog;
 impl Dog Convert<i32> { convert(self) i32 { 1 } }
-fn convert<U: Convert<String>>(value U) String { return value.convert(); }
+fn convert<U Convert<String>>(value U) String { return value.convert(); }
 fn main() { convert(Dog); }
 "#,
         "does not implement `Convert<String>`",
@@ -134,7 +134,7 @@ impl Dog Convert<String> { convert(self) i32 { 1 } }
 trait Read<T> { read(self) T; }
 struct Boxed<T> { value T }
 impl Boxed Read<T> { read(self) T { return self.value; } }
-fn read_text<U: Read<String>>(value U) String { return value.read(); }
+fn read_text<U Read<String>>(value U) String { return value.read(); }
 fn main() {
     let text = Boxed { value = "ready" };
     println(read_text(text));
@@ -165,7 +165,7 @@ struct Animal;
 impl Animal Static {
     value() String { return "A"; }
 }
-fn read<T: Static>(animal T) String {
+fn read<T Static>(animal T) String {
     return animal.value();
 }
 fn main() {
@@ -185,8 +185,8 @@ struct A;
 impl A B, C {}
 impl A { b(self) String { return "b"; } }
 impl A { c(self) String { return "c"; } }
-fn use_b<T: B>(value T) String { return value.b(); }
-fn use_c<T: C>(value T) String { return value.c(); }
+fn use_b<T B>(value T) String { return value.b(); }
+fn use_c<T C>(value T) String { return value.c(); }
 fn main() {
     use_b(A);
     use_c(A);
@@ -230,7 +230,7 @@ impl A {
     parent(self) String { return "parent"; }
     child(self) String { return "child"; }
 }
-fn use_parent<T: Parent>(value T) String { return value.parent(); }
+fn use_parent<T Parent>(value T) String { return value.parent(); }
 fn main() { use_parent(A); }
 "#,
     );

@@ -75,8 +75,8 @@ fn generic_type_bounds_are_enforced_after_inference() {
 trait Sound { sound(self) String; }
 struct Dog;
 impl Dog Sound { sound(self) String { return "woof"; } }
-struct Cage<T: Sound> { value T }
-fn open<T: Sound>(cage Cage<T>) String { return cage.value.sound(); }
+struct Cage<T> where T Sound { value T }
+fn open<T Sound>(cage Cage<T>) String { return cage.value.sound(); }
 fn main() {
     let cage = Cage { value = Dog };
     println(open(cage));
@@ -87,7 +87,7 @@ fn main() {
         r#"
 trait Sound { sound(self) String; }
 struct Rock;
-struct Cage<T: Sound> { value T }
+struct Cage<T> where T Sound { value T }
 fn main() { let cage = Cage { value = Rock }; }
 "#,
         "required by this generic type",

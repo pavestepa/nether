@@ -9,7 +9,7 @@ trait Sound {
         "..."
     }
 }
-fn f<T: Sound>(x T) {
+fn f<T Sound>(x T) {
     println(x);
 }
 "#,

@@ -426,7 +426,7 @@ fn generic_bound_satisfied_and_unsatisfied() {
 trait Sound { sound() String { return "..."; } }
 struct Dog { name String }
 impl Dog Sound { sound() String { return "Woof"; } }
-fn make_noise<T: Sound>(x T) String {
+fn make_noise<T Sound>(x T) String {
     return x.sound();
 }
 fn main() {
@@ -439,7 +439,7 @@ fn main() {
         r#"
 trait Sound { sound() String { return "..."; } }
 struct Rock { weight i32 }
-fn make_noise<T: Sound>(x T) String {
+fn make_noise<T Sound>(x T) String {
     return x.sound();
 }
 fn main() {
@@ -473,10 +473,45 @@ trait Sound { sound(self) String; }
 trait Named { name(self) String; }
 struct Bell;
 impl Bell Sound { sound(self) String { return "ding"; } }
-fn describe<T: Sound + Named>(value T) String { return value.sound(); }
+fn describe<T Sound + Named>(value T) String { return value.sound(); }
 fn main() { describe(Bell); }
 "#,
         "does not implement `Named`",
+    );
+
+    assert_ok(
+        r#"
+trait Sound { sound(self) String; }
+trait Named { name(self) String; }
+struct Dog;
+impl Dog Sound { sound(self) String { return "woof"; } }
+impl Dog Named { name(self) String { return "Rex"; } }
+fn describe<T>(value T) String where T Sound + Named {
+    return `${value.name()}: ${value.sound()}`;
+}
+fn main() { println(describe(Dog)); }
+"#,
+    );
+
+    assert_err(
+        r#"
+trait Sound { sound(self) String; }
+trait Named { name(self) String; }
+struct Bell;
+impl Bell Sound { sound(self) String { return "ding"; } }
+fn describe<T>(value T) String where T Sound + Named { return value.sound(); }
+fn main() { describe(Bell); }
+"#,
+        "does not implement `Named`",
+    );
+
+    assert_err(
+        r#"
+trait Left { value(self) i32; }
+trait Right { value(self) i32; }
+fn read<T Left + Right>(value T) i32 { return value.value(); }
+"#,
+        "is ambiguous across multiple bounds",
     );
 }
 

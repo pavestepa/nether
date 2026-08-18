@@ -54,11 +54,11 @@ trait Read<T> {
 impl Boxed Read<T> {
     read(self) T { return self.value; }
 }
-fn read_text<T: Read<String>>(value T) String { return value.read(); }
+fn read_text<T Read<String>>(value T) String { return value.read(); }
 trait Identity<T> {
     identity(self, value T) T { return value; }
 }
-fn identify<T: Identity<String>>(value T) String {
+fn identify<T Identity<String>>(value T) String {
     return value.identity("generic-interface");
 }
 

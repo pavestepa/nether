@@ -179,9 +179,10 @@ impl Parser {
         self.expect_keyword(Keyword::Struct);
         let id = self.next_id();
         let name = self.expect_ident();
-        let generics = self.parse_optional_generic_params();
+        let mut generics = self.parse_optional_generic_params();
         derived_traits.extend(self.parse_trait_list());
         let traits = derived_traits;
+        self.parse_where_clause(&mut generics);
         let kind = match self.peek() {
             Token::Punct(Punct::LBrace) => {
                 self.bump();
@@ -291,10 +292,11 @@ impl Parser {
     fn parse_impl_block(&mut self) -> Option<ImplBlock> {
         let start = self.expect_keyword(Keyword::Impl);
         let id = self.next_id();
-        let generics = self.parse_optional_generic_params();
+        let mut generics = self.parse_optional_generic_params();
         let target = self.expect_ident();
         let target_args = self.parse_optional_generic_args();
         let traits = self.parse_trait_list();
+        self.parse_where_clause(&mut generics);
         self.expect_punct(Punct::LBrace, "to start an impl body");
         let mut methods = Vec::new();
         while !matches!(self.peek(), Token::Punct(Punct::RBrace)) && !self.is_eof() {
@@ -328,9 +330,10 @@ impl Parser {
         self.expect_keyword(Keyword::Enum);
         let id = self.next_id();
         let name = self.expect_ident();
-        let generics = self.parse_optional_generic_params();
+        let mut generics = self.parse_optional_generic_params();
         derived_traits.extend(self.parse_trait_list());
         let traits = derived_traits;
+        self.parse_where_clause(&mut generics);
         self.expect_punct(Punct::LBrace, "to start an enum body");
         let mut variants = Vec::new();
         while !matches!(self.peek(), Token::Punct(Punct::RBrace)) && !self.is_eof() {
@@ -388,8 +391,9 @@ impl Parser {
         self.expect_keyword(Keyword::Trait);
         let id = self.next_id();
         let name = self.expect_ident();
-        let generics = self.parse_optional_generic_params();
+        let mut generics = self.parse_optional_generic_params();
         let parents = self.parse_trait_list();
+        self.parse_where_clause(&mut generics);
         self.expect_punct(Punct::LBrace, "to start a trait body");
         let mut methods = Vec::new();
         while !matches!(self.peek(), Token::Punct(Punct::RBrace)) && !self.is_eof() {
@@ -469,11 +473,12 @@ impl Parser {
         self.expect_keyword(Keyword::Fn);
         let id = self.next_id();
         let name = self.expect_ident();
-        let generics = self.parse_optional_generic_params();
+        let mut generics = self.parse_optional_generic_params();
         self.expect_punct(Punct::LParen, "to start a parameter list");
         let params = self.parse_params_list();
         self.expect_punct(Punct::RParen, "to close a parameter list");
         let ret = self.parse_optional_return_type();
+        self.parse_where_clause(&mut generics);
         let body = if matches!(self.peek(), Token::Punct(Punct::LBrace)) {
             Some(self.parse_block())
         } else {
@@ -520,12 +525,13 @@ impl Parser {
         }
         let id = self.next_id();
         let name = self.expect_ident();
-        let generics = self.parse_optional_generic_params();
+        let mut generics = self.parse_optional_generic_params();
         self.expect_punct(Punct::LParen, "to start a parameter list");
         let self_param = self.parse_optional_self_param();
         let params = self.parse_params_list();
         self.expect_punct(Punct::RParen, "to close a parameter list");
         let ret = self.parse_optional_return_type();
+        self.parse_where_clause(&mut generics);
         let body = if matches!(self.peek(), Token::Punct(Punct::LBrace)) {
             Some(self.parse_block())
         } else {
@@ -686,6 +692,12 @@ impl Parser {
         while !matches!(self.peek(), Token::Punct(Punct::Gt)) && !self.is_eof() {
             let name = self.expect_ident();
             let has_legacy_colon = self.eat_punct(Punct::Colon);
+            if has_legacy_colon {
+                self.error(
+                    self.prev_span(),
+                    "generic bounds do not use `:`; write `<T Trait>`",
+                );
+            }
             let has_inline_bound =
                 has_legacy_colon || !matches!(self.peek(), Token::Punct(Punct::Comma | Punct::Gt));
             let bounds = if has_inline_bound {
@@ -704,5 +716,41 @@ impl Parser {
         }
         self.expect_punct(Punct::Gt, "to close a generic parameter list");
         params
+    }
+
+    /// Parses `where T Sound + Named, U Clone`.
+    /// Predicates are merged into their declared generic parameter so all
+    /// later stages have one bounds representation and one semantics.
+    fn parse_where_clause(&mut self, generics: &mut [GenericParam]) {
+        if !self.eat_keyword(Keyword::Where) {
+            return;
+        }
+        loop {
+            let name = self.expect_ident();
+            if self.eat_punct(Punct::Colon) {
+                self.error(
+                    self.prev_span(),
+                    "`where` bounds do not use `:`; write `where T Trait`",
+                );
+            }
+            let mut bounds = vec![self.parse_type_expr()];
+            while self.eat_punct(Punct::Plus) {
+                bounds.push(self.parse_type_expr());
+            }
+            if let Some(generic) = generics.iter_mut().find(|g| g.name.name == name.name) {
+                generic.bounds.extend(bounds);
+            } else {
+                self.error(
+                    name.span,
+                    format!(
+                        "`where` predicate names undeclared generic parameter `{}`",
+                        name.name
+                    ),
+                );
+            }
+            if !self.eat_punct(Punct::Comma) {
+                break;
+            }
+        }
     }
 }

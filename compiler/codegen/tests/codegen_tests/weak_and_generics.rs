@@ -165,7 +165,7 @@ fn main() {
 fn generic_into_string_supports_primitive_and_string_instantiations() {
     let (_cg, ir) = compile(
         r#"
-fn stringify<T: Into<String>>(value T) String {
+fn stringify<T Into<String>>(value T) String {
     return value.into_string();
 }
 fn main() {

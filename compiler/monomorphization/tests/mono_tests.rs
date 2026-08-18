@@ -301,7 +301,7 @@ struct Cat Sound { name String }
 impl Dog Sound {
     sound(self) String { return "Woof"; }
 }
-fn make_noise<T: Sound>(x T) String {
+fn make_noise<T Sound>(x T) String {
     return x.sound();
 }
 fn main() {
@@ -373,7 +373,7 @@ struct Animal;
 impl Animal Static {
     value() String { return "A"; }
 }
-fn read<T: Static>(animal T) String {
+fn read<T Static>(animal T) String {
     return animal.value();
 }
 fn main() {
@@ -426,7 +426,7 @@ struct Boxed<T> { value T }
 impl Boxed Transform {
     transform<U>(self, value U) U { return value; }
 }
-fn apply<T: Transform>(value T) String {
+fn apply<T Transform>(value T) String {
     return value.transform<String>("ready");
 }
 fn main() {

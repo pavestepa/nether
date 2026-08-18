@@ -158,8 +158,8 @@ pub struct EnumDecl {
     pub span: Span,
 }
 
-/// A generic parameter as written, e.g. the `T` in `<T>` or the `T: Sound`
-/// / `T: Into<String>` in `<T: Sound>` / `<T: Into<String>>`. `bounds` name
+/// A generic parameter as written, e.g. the `T` in `<T>` or the `T Sound`
+/// / `T Into<String>` in `<T Sound>` / `<T Into<String>>`. `bounds` name
 /// [`trait`](TraitDecl)s, possibly themselves generic — full
 /// [`TypeExpr`] rather than a bare [`Path`], for the same reason as
 /// [`ImplBlock::trait`]. Language-spec §8 generics are resolved via

@@ -396,6 +396,29 @@ impl Checker<'_> {
         call_id: Option<NodeId>,
     ) -> Type {
         let bounds = self.generics.get(name).cloned().unwrap_or_default();
+        let matching_bounds = bounds
+            .iter()
+            .filter(|bound| {
+                let bound_name = self.resolved.definitions.get(bound.trait_id).name.as_str();
+                (bound_name == "Into"
+                    && bound.args == [Type::String]
+                    && method.name.as_str() == "into_string")
+                    || self
+                        .sigs
+                        .trait_methods
+                        .contains_key(&(bound.trait_id, method.name.clone()))
+            })
+            .count();
+        if matching_bounds > 1 {
+            self.err(
+                method.span,
+                format!(
+                    "method `{}` is ambiguous across multiple bounds of generic parameter `{name}`",
+                    method.name
+                ),
+            );
+            return Type::Error;
+        }
         for bound in bounds {
             let bound_name = self.resolved.definitions.get(bound.trait_id).name.as_str();
             if bound_name == "Into"

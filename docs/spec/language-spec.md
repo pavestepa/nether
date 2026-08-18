@@ -484,7 +484,7 @@ conversion (§9). A trait requirement itself still names exactly one domain
 per method (an implementing type's overload set can be wider than what any
 one trait requires, but a single trait method isn't yet dual-domain-
 overloadable on its own) — dual-domain trait *requirements*, and generic-
-bound (`<T: Sound>`) dispatch across both domains, remain unstaged.
+bound (`<T Sound>`) dispatch across both domains, remain unstaged.
 
 ### 8.5 Static methods **[current behavior, unchanged by Stage 1]**
 
@@ -653,16 +653,21 @@ impl Dog Sound {
 }
 ```
 
-Not yet implemented: associated types/constants, const generics, `where`
-clauses, specialization, existential
+Not yet implemented: associated types/constants, const generics,
+specialization, existential
 (`any Trait`) and opaque (`some Trait`) types, blanket/conditional impls —
 all **Stage 3**. A trait name still cannot be used as a bare value
 type today; it may only appear as a generic bound. Multiple traits on one
 `impl` are comma-separated (`impl Dog Sound, Clone { ... }`). Generic
 parameters accept one or more `+`-separated inline bounds, canonically
-`<T Sound + Named>`; the earlier `<T: Sound + Named>` spelling remains
-accepted for source compatibility. Every bound is checked at instantiation,
-and methods declared by any bound are available in the generic body.
+`<T Sound + Named>`. The colon form `<T: Sound>` is invalid. Every bound is
+checked at instantiation, and methods declared by any bound are available in the generic body. The same
+constraints may be moved after the declaration head with
+`where T Sound + Named, U Clone`; `where T: Sound` is invalid for the same
+reason. `where` is supported on functions/methods, structs,
+enums, traits, and explicit generic `impl` blocks. A predicate naming an
+undeclared parameter and a method supplied ambiguously by two bounds are
+diagnosed.
 
 ---
 
@@ -791,6 +796,7 @@ Full retain/release insertion rules live in
 | `:T` unrefcounted allocation, move transfer and ARC promotion | **Stage 2 — done** |
 | `#[allow_pascal_case]` on type aliases | **Stage 3 — done** |
 | Multiple inline generic bounds (`T A + B`) | **Stage 3 — done** |
+| `where` clauses on generic declarations | **Stage 3 — done** |
 | Associated types, const generics, specialization, `any`/`some` | Stage 3 |
 | Development-mode witness-table generics dispatch | Stage 3 |
 | async/await, Tokio runtime bridge | Stage 4 |

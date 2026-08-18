@@ -17,6 +17,7 @@ The compiler implements:
 - traits with static dispatch, multiple inheritance, defaults, and
   generic monomorphization;
 - multiple generic bounds with canonical `<T TraitA + TraitB>` syntax;
+- equivalent `where T TraitA + TraitB` clauses on generic declarations;
 - HIR, closure conversion, CFG-based MIR, and ARC insertion;
 - structs, tuples, enums/match, arrays, weak references, and closures;
 - local multi-file modules through `use`;

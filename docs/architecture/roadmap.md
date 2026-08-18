@@ -214,8 +214,7 @@ the compiler builtin `hash(value)` returns a deterministic `u64`, while
 unsupported and cyclic graphs are diagnosed. String and floating-point fields
 remain excluded until their stable hashing semantics are specified. Remaining:
 associated
-types/constants, const generics, `where`
-clauses, specialization (`default impl` + concrete override), existential
+types/constants, const generics, specialization (`default impl` + concrete override), existential
 (`any Trait`) and opaque (`some Trait`) types with existential-safety
 checking, and development-mode
 witness-table/dictionary generics dispatch (so `nether build` stops
