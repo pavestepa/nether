@@ -341,6 +341,7 @@ impl Lexer<'_> {
     fn lex_punct(&mut self, start: u32) {
         let c = self.bump().unwrap();
         let punct = match c {
+            '#' => Some(Punct::Hash),
             '{' => Some(Punct::LBrace),
             '}' => Some(Punct::RBrace),
             '(' => Some(Punct::LParen),

@@ -19,6 +19,7 @@ pub enum Keyword {
     Use,
     Mod,
     Pub,
+    Move,
     Weak,
     Match,
     If,
@@ -48,6 +49,7 @@ pub fn keyword_from_str(s: &str) -> Option<Keyword> {
         "use" => Keyword::Use,
         "mod" => Keyword::Mod,
         "pub" => Keyword::Pub,
+        "move" => Keyword::Move,
         "weak" => Keyword::Weak,
         "match" => Keyword::Match,
         "if" => Keyword::If,
@@ -67,6 +69,8 @@ pub fn keyword_from_str(s: &str) -> Option<Keyword> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Punct {
+    /// `#` — starts an item attribute such as `#[allow_pascal_case]`.
+    Hash,
     LBrace,
     RBrace,
     LParen,

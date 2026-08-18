@@ -95,11 +95,10 @@ pub enum Type {
     /// `:T`/`:t` — the uniquely-owned form of `inner` (language-spec §3).
     /// Orthogonal to `inner`'s own representation category (heap vs.
     /// inline, decided by `inner`'s own shape): `Unique(Struct(..))` is
-    /// `:T`, `Unique(Primitive(..))` is `:t`. In Stage 1 this is purely a
-    /// compile-time-checked distinction — [`crate::alloc::alloc_kind`]
-    /// passes straight through to `inner`, so `:T` shares `T`'s ARC
-    /// runtime representation until Stage 2's borrow checker can safely
-    /// skip retain/release once uniqueness is actually enforced.
+    /// `:T`, `Unique(Primitive(..))` is `:t`. HIR preserves heap `Unique`
+    /// through MIR/codegen for unrefcounted allocation and move transfer;
+    /// inline `Unique` is erased after type checking because its bits are
+    /// identical to the inner value.
     Unique(Box<Type>),
     /// `:&T` — a shared borrow, always within the unique-ownership domain
     /// (language-spec §3.1; there is no bare, always-ARC reference form).

@@ -4,6 +4,19 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
     pub(super) fn gen_rvalue(&mut self, rvalue: &Rvalue, dest_ty: &Type) -> Value<'ctx> {
         match rvalue {
             Rvalue::Use(op) => self.gen_operand(op),
+            Rvalue::AddressOf(place) => self.address_of_place(place),
+            Rvalue::Deref(reference) => {
+                let address = self.gen_operand(reference);
+                self.load_value(address, dest_ty)
+            }
+            Rvalue::PromoteUnique(value) => self
+                .m
+                .call(
+                    self.runtime.unique_promote,
+                    &[self.gen_operand(value)],
+                    "promoted",
+                )
+                .expect("nether_rt_unique_promote returns a pointer"),
             Rvalue::Unary(op, a) => self.gen_unary(*op, a),
             Rvalue::Binary(op, a, b) => self.gen_binary(*op, a, b),
             Rvalue::Call { target, args } => self.gen_call(target, args, dest_ty),
@@ -154,7 +167,12 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
                     .iter()
                     .zip(&mir_target.params)
                     .map(|(arg, &param)| {
-                        if mir_target.local_decl(param).mutable {
+                        if mir_target.local_decl(param).mutable
+                            && !matches!(
+                                mir_target.local_decl(param).ty,
+                                Type::Ref(_) | Type::MutRef(_)
+                            )
+                        {
                             let Operand::Local(local) = arg else {
                                 panic!("a mutable parameter requires a local argument");
                             };

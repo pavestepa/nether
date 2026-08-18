@@ -1,4 +1,5 @@
 use super::*;
+use nether_typecheck::{alloc_kind, AllocKind};
 
 impl Lowerer<'_> {
     /// Lowers a value path and its trailing field/method chain.
@@ -38,20 +39,54 @@ impl Lowerer<'_> {
                 let ty = self.local_ty(id);
                 let local = self.local_for(id);
                 let expr = local_ref(local, ty.clone());
+                let expr = if matches!(result_ty, Type::Ref(_) | Type::MutRef(_))
+                    && !matches!(ty, Type::Ref(_) | Type::MutRef(_))
+                    && res.consumed == total
+                    && call_args.is_none()
+                {
+                    HirExpr {
+                        kind: HirExprKind::Borrow(Box::new(expr)),
+                        ty: result_ty.clone(),
+                    }
+                } else {
+                    expr
+                };
+                let expr = if matches!(ty, Type::Ref(_) | Type::MutRef(_))
+                    && !matches!(result_ty, Type::Ref(_) | Type::MutRef(_))
+                    && res.consumed == total
+                    && call_args.is_none()
+                    && match &ty {
+                        Type::Ref(inner) | Type::MutRef(inner) => {
+                            alloc_kind(inner, &self.resolved.definitions) == AllocKind::Stack
+                        }
+                        _ => false,
+                    } {
+                    HirExpr {
+                        kind: HirExprKind::Deref(Box::new(expr)),
+                        ty: result_ty.clone(),
+                    }
+                } else {
+                    expr
+                };
                 if res.consumed == total {
                     if let Some(args) = call_args {
                         return self.lower_call_value(expr, args, result_ty);
                     }
                 }
-                let upgraded_ty = self.upgrade_weak(ty.clone());
-                let kind = self.weak_upgrade_kind(expr, &ty);
-                (
-                    HirExpr {
-                        kind,
-                        ty: upgraded_ty.clone(),
-                    },
-                    upgraded_ty,
-                )
+                if matches!(ty, Type::Weak(_)) {
+                    let upgraded_ty = self.upgrade_weak(ty.clone());
+                    let kind = self.weak_upgrade_kind(expr, &ty);
+                    (
+                        HirExpr {
+                            kind,
+                            ty: upgraded_ty.clone(),
+                        },
+                        upgraded_ty,
+                    )
+                } else {
+                    let current_ty = expr.ty.clone();
+                    (expr, current_ty)
+                }
             }
             Resolution::Def(id) => {
                 self.lower_def_value(id, direct_call_args, generic_args, &result_ty)
@@ -119,18 +154,29 @@ impl Lowerer<'_> {
                     return (expr, result_ty.clone());
                 }
                 if name.as_str() == "to" {
-                    // Every transition `nether_typecheck` actually accepts
-                    // (Stage 2, slice 4) is pure relabeling — `:T`/`T`
-                    // already share one runtime representation (spec
-                    // §3.2), and an inline value promoted to `:t` aliases
-                    // nothing new — so lowering `to(value)` is just
-                    // lowering `value` itself, re-typed to the call's own
-                    // already-checked result type. No new `HirExprKind`,
-                    // no MIR/codegen involvement.
+                    // Inline transitions are pure relabeling. A heap
+                    // `:T -> T` transition receives an explicit
+                    // `PromoteUnique` node so MIR/codegen can move the
+                    // payload from the unique allocator into ARC.
                     let arg = call_args.and_then(|args| args.first());
                     return match arg {
                         Some(arg) => {
                             let mut lowered = self.lower_expr(arg);
+                            let promotes_heap_unique =
+                                self.expr_types.get(&arg.id).is_some_and(|ty| match ty {
+                                    Type::Unique(inner) => {
+                                        alloc_kind(inner, &self.resolved.definitions)
+                                            == AllocKind::Heap
+                                            && !matches!(result_ty, Type::Unique(_))
+                                    }
+                                    _ => false,
+                                });
+                            if promotes_heap_unique {
+                                lowered = HirExpr {
+                                    kind: HirExprKind::PromoteUnique(Box::new(lowered)),
+                                    ty: result_ty.clone(),
+                                };
+                            }
                             lowered.ty = result_ty.clone();
                             (lowered, result_ty.clone())
                         }
@@ -310,7 +356,7 @@ impl Lowerer<'_> {
         // `receiver_domain` must come from the caller, computed from the
         // *pre-lowering* AST type (`receiver_domain_of`), not re-derived
         // from `receiver_ty` here.
-        let receiver_ty = receiver_ty.strip_unique();
+        let receiver_ty = receiver_ty.strip_indirection();
         if let Type::Array(_) = receiver_ty {
             if matches!(method.name.as_str(), "len" | "push" | "pop") {
                 let lowered = self.lower_args(args);

@@ -20,8 +20,13 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
                 self.runtime,
                 dest_ty,
             ));
+            let alloc = if matches!(dest_ty, Type::Unique(_)) {
+                self.runtime.unique_alloc
+            } else {
+                self.runtime.alloc
+            };
             self.m
-                .call(self.runtime.alloc, &[size, drop_fn], "obj")
+                .call(alloc, &[size, drop_fn], "obj")
                 .expect("nether_rt_arc_alloc returns a value")
         } else {
             self.m.alloca(sl.ty.into(), "agg")

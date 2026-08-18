@@ -1,10 +1,14 @@
 //! # nether_rt_arc
 //!
-//! Purpose: the reference-counting allocator every Nether heap value is
-//! built on (`docs/architecture/crates.md` § `runtime/arc`,
+//! Purpose: the ARC allocator for ordinary heap values plus the
+//! unrefcounted allocator/promotion bridge for unique heap values
+//! (`docs/architecture/crates.md` § `runtime/arc`,
 //! `docs/architecture/arc-model.md`).
 //!
 //! Responsibilities:
+//! - Allocate `:T` behind a count-free [`UniqueHeader`], destroy its sole
+//!   ownership with `nether_rt_unique_free`, and promote its payload into
+//!   ARC with `nether_rt_unique_promote` for `:T -> T`.
 //! - Allocate a heap object as a hidden [`Header`] (a strong count, a
 //!   weak count, the original size, and an optional drop callback)
 //!   immediately followed by the caller-requested payload bytes; return
@@ -83,7 +87,16 @@ struct Header {
     drop: Option<extern "C" fn(*mut u8)>,
 }
 
+/// Header for uniquely owned heap objects. It deliberately contains no
+/// reference counts; only destruction metadata needed for the sole owner.
+#[repr(C)]
+struct UniqueHeader {
+    size: i64,
+    drop: Option<extern "C" fn(*mut u8)>,
+}
+
 const HEADER_SIZE: usize = std::mem::size_of::<Header>();
+const UNIQUE_HEADER_SIZE: usize = std::mem::size_of::<UniqueHeader>();
 
 /// # Safety
 /// `payload` must be a pointer previously returned by
@@ -95,6 +108,65 @@ unsafe fn header_of(payload: *mut u8) -> *mut Header {
 fn layout_for(payload_size: i64) -> Layout {
     let total = HEADER_SIZE + usize::try_from(payload_size).unwrap_or(0);
     Layout::from_size_align(total, ALIGN).expect("nether_rt_arc: invalid allocation size")
+}
+
+fn unique_layout_for(payload_size: i64) -> Layout {
+    let total = UNIQUE_HEADER_SIZE + usize::try_from(payload_size).unwrap_or(0);
+    Layout::from_size_align(total, ALIGN).expect("nether_rt_arc: invalid unique allocation size")
+}
+
+unsafe fn unique_header_of(payload: *mut u8) -> *mut UniqueHeader {
+    unsafe { payload.sub(UNIQUE_HEADER_SIZE).cast::<UniqueHeader>() }
+}
+
+#[no_mangle]
+pub extern "C" fn nether_rt_unique_alloc(
+    size: i64,
+    drop: Option<extern "C" fn(*mut u8)>,
+) -> *mut u8 {
+    let layout = unique_layout_for(size);
+    unsafe {
+        let base = alloc(layout);
+        if base.is_null() {
+            handle_alloc_error(layout);
+        }
+        base.cast::<UniqueHeader>()
+            .write(UniqueHeader { size, drop });
+        base.add(UNIQUE_HEADER_SIZE)
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nether_rt_unique_free(payload: *mut u8) {
+    if payload.is_null() {
+        return;
+    }
+    unsafe {
+        let header = unique_header_of(payload);
+        if let Some(drop_fn) = (*header).drop {
+            drop_fn(payload);
+        }
+        dealloc(header.cast::<u8>(), unique_layout_for((*header).size));
+    }
+}
+
+/// Converts the sole-owner allocation into an ARC allocation without
+/// cloning its fields: bytes move to a new ARC block and the old unique
+/// block is deallocated without running its payload drop callback.
+#[no_mangle]
+pub unsafe extern "C" fn nether_rt_unique_promote(payload: *mut u8) -> *mut u8 {
+    if payload.is_null() {
+        return payload;
+    }
+    unsafe {
+        let header = unique_header_of(payload);
+        let size = (*header).size;
+        let drop = (*header).drop;
+        let promoted = nether_rt_arc_alloc(size, drop);
+        std::ptr::copy_nonoverlapping(payload, promoted, usize::try_from(size).unwrap_or(0));
+        dealloc(header.cast::<u8>(), unique_layout_for(size));
+        promoted
+    }
 }
 
 /// # Safety
@@ -249,8 +321,10 @@ pub unsafe extern "C" fn nether_rt_arc_weak_upgrade(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
 
     static DROPS: AtomicUsize = AtomicUsize::new(0);
+    static DROP_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     extern "C" fn record_drop(_payload: *mut u8) {
         DROPS.fetch_add(1, Ordering::SeqCst);
@@ -258,6 +332,7 @@ mod tests {
 
     #[test]
     fn alloc_then_release_once_runs_drop() {
+        let _guard = DROP_TEST_LOCK.lock().unwrap();
         let before = DROPS.load(Ordering::SeqCst);
         let p = nether_rt_arc_alloc(8, Some(record_drop));
         unsafe {
@@ -268,7 +343,35 @@ mod tests {
     }
 
     #[test]
+    fn unique_free_runs_drop_exactly_once() {
+        let _guard = DROP_TEST_LOCK.lock().unwrap();
+        let before = DROPS.load(Ordering::SeqCst);
+        let p = nether_rt_unique_alloc(8, Some(record_drop));
+        unsafe {
+            *p.cast::<i64>() = 42;
+            nether_rt_unique_free(p);
+        }
+        assert_eq!(DROPS.load(Ordering::SeqCst), before + 1);
+    }
+
+    #[test]
+    fn unique_promotion_preserves_payload_and_defers_drop_to_arc() {
+        let _guard = DROP_TEST_LOCK.lock().unwrap();
+        let before = DROPS.load(Ordering::SeqCst);
+        let unique = nether_rt_unique_alloc(8, Some(record_drop));
+        unsafe {
+            *unique.cast::<i64>() = 42;
+            let arc = nether_rt_unique_promote(unique);
+            assert_eq!(*arc.cast::<i64>(), 42);
+            assert_eq!(DROPS.load(Ordering::SeqCst), before);
+            nether_rt_arc_release(arc);
+        }
+        assert_eq!(DROPS.load(Ordering::SeqCst), before + 1);
+    }
+
+    #[test]
     fn retain_delays_the_drop_until_the_matching_release() {
+        let _guard = DROP_TEST_LOCK.lock().unwrap();
         let before = DROPS.load(Ordering::SeqCst);
         let p = nether_rt_arc_alloc(8, Some(record_drop));
         unsafe {
@@ -324,6 +427,7 @@ mod tests {
 
     #[test]
     fn weak_upgrade_fails_once_the_referent_is_dropped_but_the_header_survives() {
+        let _guard = DROP_TEST_LOCK.lock().unwrap();
         let before = DROPS.load(Ordering::SeqCst);
         let p = nether_rt_arc_alloc(8, Some(record_drop));
         unsafe {

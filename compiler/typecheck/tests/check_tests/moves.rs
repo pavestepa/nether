@@ -260,11 +260,26 @@ struct Dog { name String }
 fn consume(d: Dog) { println(d.name); }
 fn main() {
     let dog: Dog = :Dog { name = "Rex" };
-    let f = () => { consume(dog); };
+    let f = move () => { consume(dog); };
     println(dog.name);
 }
 "#,
         "use of a value after it was moved",
+    );
+}
+
+#[test]
+fn owned_capture_requires_an_explicit_move_closure() {
+    assert_err(
+        r#"
+struct Dog { name String }
+fn consume(d: Dog) { println(d.name); }
+fn main() {
+    let dog: Dog = :Dog { name = "Rex" };
+    let f = () => { consume(dog); };
+}
+"#,
+        "requires an explicit `move` closure",
     );
 }
 

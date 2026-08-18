@@ -180,9 +180,11 @@ impl Checker<'_> {
                 Type::Never
             }
             ExprKind::Return(value) => self.check_return(value, expr.span),
-            ExprKind::Closure { params, body } => {
-                self.check_closure(expr.id, params, body, expected)
-            }
+            ExprKind::Closure {
+                move_capture,
+                params,
+                body,
+            } => self.check_closure(expr.id, *move_capture, params, body, expected),
             ExprKind::StructLit {
                 path,
                 fields,
@@ -402,6 +404,16 @@ impl Checker<'_> {
             } else {
                 self.check_field_access_named(&current_ty, seg)
             };
+        }
+        if res.consumed == total {
+            if let Type::MutRef(inner) = current_ty {
+                if crate::alloc::alloc_kind(&inner, &self.resolved.definitions)
+                    == crate::alloc::AllocKind::Stack
+                {
+                    return *inner;
+                }
+                return Type::MutRef(inner);
+            }
         }
         current_ty
     }

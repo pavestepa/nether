@@ -117,6 +117,7 @@ impl Place {
 
 #[derive(Debug, Clone)]
 pub enum Projection {
+    Deref,
     Field(u32),
     VariantField { variant: u32, index: u32 },
     Index(Operand),
@@ -150,6 +151,10 @@ pub enum CallTarget {
 #[derive(Debug, Clone)]
 pub enum Rvalue {
     Use(Operand),
+    /// Address of an assignable place; no ownership credit is created.
+    AddressOf(Place),
+    Deref(Operand),
+    PromoteUnique(Operand),
     Unary(UnaryOp, Operand),
     Binary(BinaryOp, Operand, Operand),
     Call {
@@ -206,6 +211,9 @@ pub enum Rvalue {
 #[derive(Debug, Clone)]
 pub enum Instr {
     Assign(Place, Rvalue),
+    /// Marks a moved-from unique heap local as empty. Later lexical drops
+    /// remain valid because ARC release accepts null.
+    Clear(Local),
     Retain(Local),
     Release(Local),
     /// Bumps a `weak T` value's *weak* count — never its referent's

@@ -20,6 +20,7 @@ The compiler implements:
 - structs, tuples, enums/match, arrays, weak references, and closures;
 - local multi-file modules through `use`;
 - default-private declarations with explicit `pub` APIs and re-exports;
+- the narrow `#[allow_pascal_case]` escape hatch for exceptional type aliases;
 - LLVM object emission, optimization levels, and native linking;
 - a small Nether-source Option/Result/Array standard library.
 
@@ -31,8 +32,9 @@ call chains, so a safely returned reference can be stored in `let`; the
 resulting borrow is shortened after its last use. The same summaries cover
 instance/static methods (`self` included) and closures, including captured
 origins. Local origins and multiple possible parameter origins are rejected.
-Loop-carried and closure-captured references remain conservatively pinned to
-their lexical scope. See the roadmap for the exact boundary.
+Loop uses keep a borrow live through the loop expression, and a locally bound
+closure keeps captured borrows live through that closure's last use. Escaping
+or otherwise non-local closure values use a conservative lexical fallback.
 
 ## Requirements
 
@@ -188,7 +190,8 @@ traits, bounds, inheritance and current limitations, see
 
 Nether has no garbage collector, macros, or reflection. Its current borrow
 checker infers origins and shortens ordinary borrows after their last use,
-while loop-carried and closure-captured borrows remain conservatively lexical.
+with loop- and local-closure-sensitive shortening plus a safe lexical fallback
+for closure values whose final local use cannot be established.
 Async, threads, unsafe code, and dynamic trait dispatch are not implemented; see
 [`docs/architecture/roadmap.md`](docs/architecture/roadmap.md) for which
 stage adds each of those.

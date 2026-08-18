@@ -1,8 +1,8 @@
 use super::*;
 
 /// Stage 2, slice 4: `to(value)`, the universal ownership-domain
-/// conversion (language-spec §9) — target-inferred-from-context form
-/// only. Three of the four transitions are sound pure relabeling
+/// conversion (language-spec §9), with inferred or explicit target. Three
+/// of the four transitions are sound pure relabeling
 /// (`:T -> T`, `:t -> t`, `t -> :t`); `T -> :T` (heap) stays rejected
 /// until `Clone` exists (spec §10, Stage 3).
 
@@ -123,8 +123,8 @@ fn main() {
 }
 
 #[test]
-fn explicit_generic_to_is_not_yet_supported() {
-    assert_err(
+fn explicit_generic_to_uses_its_target_without_context() {
+    assert_ok(
         r#"
 struct Dog { name String }
 fn main() {
@@ -133,6 +133,47 @@ fn main() {
     println(d2.name);
 }
 "#,
-        "explicit target form is not yet implemented",
+    );
+}
+
+#[test]
+fn explicit_owned_inline_target_is_supported() {
+    assert_ok(
+        r#"
+fn main() {
+    let n = 4;
+    let owned = to<:i32>(n);
+    let plain i32 = to<i32>(owned);
+    println(`${plain}`);
+}
+"#,
+    );
+}
+
+#[test]
+fn explicit_to_target_must_match_context() {
+    assert_err(
+        r#"
+fn main() {
+    let n = 4;
+    let bad bool = to<:i32>(n);
+    println(`${bad}`);
+}
+"#,
+        "does not match expected type",
+    );
+}
+
+#[test]
+fn to_rejects_more_than_one_explicit_target() {
+    assert_err(
+        r#"
+fn main() {
+    let n = 4;
+    let bad = to<i32, bool>(n);
+    println(`${bad}`);
+}
+"#,
+        "takes exactly 1 type argument",
     );
 }

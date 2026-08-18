@@ -1,4 +1,6 @@
 use super::*;
+use nether_ast::SelfParam;
+use nether_typecheck::{alloc_kind, AllocKind};
 
 pub(super) struct Lowerer<'a> {
     pub(super) resolved: &'a ResolvedNames,
@@ -17,6 +19,24 @@ pub(super) struct Lowerer<'a> {
 }
 
 impl Lowerer<'_> {
+    fn runtime_ty(&self, ty: &Type) -> Type {
+        let ty = subst_type(ty, &self.type_subst);
+        match ty {
+            Type::Unique(inner)
+                if alloc_kind(&inner, &self.resolved.definitions) == AllocKind::Heap =>
+            {
+                Type::Unique(inner)
+            }
+            Type::Unique(inner) => *inner,
+            Type::Ref(inner) | Type::MutRef(inner)
+                if alloc_kind(&inner, &self.resolved.definitions) == AllocKind::Heap =>
+            {
+                *inner
+            }
+            other => other,
+        }
+    }
+
     pub(super) fn fresh_local(&mut self) -> HirLocalId {
         let id = HirLocalId(self.next_local);
         self.next_local += 1;
@@ -32,34 +52,27 @@ impl Lowerer<'_> {
         id
     }
 
-    /// `:T`/`t` share `T`'s runtime representation in Stage 1
-    /// (language-spec §3.2) — `Unique` is stripped here, at the boundary
-    /// where HIR reads a `typecheck`-computed `Type` for the first time,
-    /// so it never needs to flow any further: HIR/MIR/codegen's own
-    /// `Type::Struct`/`Type::Primitive`/etc. matches stay exactly as they
-    /// were pre-rewrite, with no `Unique` arm to remember everywhere.
-    /// Only `typecheck` itself needs to see the wrapper, to enforce
-    /// ownership-domain compatibility (assignment/parameter/return
-    /// checking) before this point. `Ref`/`MutRef` are stripped the same
-    /// way as of Stage 2, slice 2 — a `:&T`/`:&mut T` value shares `T`'s
-    /// representation too (a pointer, no retain/release —
-    /// `docs/architecture/roadmap.md`), so `strip_indirection` peels both
-    /// layers `strip_unique` alone would have left one of behind.
+    /// Translates typecheck types to their runtime form. Heap `Unique` is
+    /// preserved so MIR/codegen selects unique allocation and move rules;
+    /// inline `Unique` is erased because it has the same bits as its inner
+    /// value. Reference wrappers are preserved at storage/ABI sites and
+    /// lowered to pointers.
     pub(super) fn ty_of(&self, node_id: NodeId) -> Type {
         let ty = self
             .expr_types
             .get(&node_id)
             .cloned()
             .unwrap_or(Type::Error);
-        subst_type(ty.strip_indirection(), &self.type_subst)
+        match ty {
+            Type::Ref(_) | Type::MutRef(_) => subst_type(&ty, &self.type_subst),
+            _ => self.runtime_ty(&ty),
+        }
     }
 
     /// A method-call receiver's ownership domain, read directly from
-    /// `expr_types` **without** `ty_of`'s `strip_unique()` — `ty_of` erases
-    /// `Type::Unique` everywhere by design (`:T`/`T` share one runtime
-    /// representation in Stage 1, so nothing downstream needs the
-    /// distinction) except here: which `ReceiverDomain`-keyed method-set
-    /// entry a call resolves to genuinely depends on it, and that
+    /// `expr_types` before runtime-type translation. Which
+    /// `ReceiverDomain`-keyed method-set entry a call resolves to depends
+    /// on the source ownership wrapper, and that
     /// information doesn't exist anywhere else once a value's type has
     /// passed through `ty_of`.
     pub(super) fn receiver_domain_of(&self, node_id: NodeId) -> ReceiverDomain {
@@ -105,17 +118,30 @@ impl Lowerer<'_> {
             .get(&orig)
             .cloned()
             .unwrap_or(Type::Error);
-        subst_type(ty.strip_indirection(), &self.type_subst)
+        match ty {
+            Type::Ref(_) | Type::MutRef(_) => subst_type(&ty, &self.type_subst),
+            _ => self.runtime_ty(&ty),
+        }
     }
 
     pub(super) fn lower_fn(&mut self, p: &PendingFn, id: HirFnId) -> HirFunction {
         self.locals_map.clear();
         self.next_local = 0;
         self.type_subst.clone_from(&p.type_subst);
-        self.self_override = self.resolved.locals.get(&p.decl.id).copied().zip(
-            p.owner
-                .map(|owner| owner_type(owner, self.sigs, self.array_owner)),
-        );
+        self.self_override = self
+            .resolved
+            .locals
+            .get(&p.decl.id)
+            .copied()
+            .zip(p.owner.map(|owner| {
+                let owner = owner_type(owner, self.sigs, self.array_owner);
+                match p.decl.self_param {
+                    Some(SelfParam::Owned) => Type::Unique(Box::new(owner)),
+                    Some(SelfParam::OwnedRef) => Type::Ref(Box::new(owner)),
+                    Some(SelfParam::OwnedMutRef) => Type::MutRef(Box::new(owner)),
+                    _ => owner,
+                }
+            }));
 
         let mut params = Vec::new();
         for (param_ast, param_sig) in p.decl.params.iter().zip(&p.sig.params) {
@@ -143,7 +169,10 @@ impl Lowerer<'_> {
             let ty = if param_sig.variadic {
                 Type::Array(Box::new(param_sig.ty.clone()))
             } else {
-                param_sig.ty.strip_indirection().clone()
+                match &param_sig.ty {
+                    Type::Ref(_) | Type::MutRef(_) => subst_type(&param_sig.ty, &self.type_subst),
+                    _ => self.runtime_ty(&param_sig.ty),
+                }
             };
             params.push(HirParam {
                 local,
@@ -186,7 +215,10 @@ impl Lowerer<'_> {
             self_local,
             generics: p.sig.generics.clone(),
             params,
-            ret: p.sig.ret.strip_indirection().clone(),
+            ret: match &p.sig.ret {
+                Type::Ref(_) | Type::MutRef(_) => subst_type(&p.sig.ret, &self.type_subst),
+                _ => self.runtime_ty(&p.sig.ret),
+            },
             body: body_hir,
         }
     }
@@ -244,11 +276,19 @@ impl Lowerer<'_> {
         for stmt in &block.stmts {
             match stmt {
                 Stmt::Let(let_stmt) => {
-                    let value = self.lower_expr(&let_stmt.value);
+                    let mut value = self.lower_expr(&let_stmt.value);
                     let (local, ty) = match self.resolved.locals.get(&let_stmt.id) {
                         Some(orig) => (self.local_for(*orig), self.local_ty(*orig)),
                         None => (self.fresh_local(), value.ty.clone()),
                     };
+                    if matches!(ty, Type::Ref(_) | Type::MutRef(_))
+                        && !matches!(value.ty, Type::Ref(_) | Type::MutRef(_))
+                    {
+                        value = HirExpr {
+                            kind: HirExprKind::Borrow(Box::new(value)),
+                            ty: ty.clone(),
+                        };
+                    }
                     stmts.push(HirStmt {
                         kind: HirStmtKind::Let { local, ty, value },
                     });

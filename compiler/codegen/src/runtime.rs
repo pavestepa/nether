@@ -17,6 +17,9 @@ use nether_llvm::{Func, ModuleCx};
 pub struct Runtime<'ctx> {
     /// `nether_rt_arc::nether_rt_arc_alloc(size: i64, drop: Option<extern "C" fn(*mut u8)>) -> ptr`
     pub alloc: Func<'ctx>,
+    pub unique_alloc: Func<'ctx>,
+    pub unique_free: Func<'ctx>,
+    pub unique_promote: Func<'ctx>,
     /// `nether_rt_arc::nether_rt_arc_retain(ptr)`
     pub retain: Func<'ctx>,
     /// `nether_rt_arc::nether_rt_arc_release(ptr)`
@@ -89,6 +92,13 @@ impl<'ctx> Runtime<'ctx> {
 
         Runtime {
             alloc: m.declare_function("nether_rt_arc_alloc", m.fn_type(&[i64_ty, ptr], Some(ptr))),
+            unique_alloc: m.declare_function(
+                "nether_rt_unique_alloc",
+                m.fn_type(&[i64_ty, ptr], Some(ptr)),
+            ),
+            unique_free: m.declare_function("nether_rt_unique_free", void_fn(&[ptr])),
+            unique_promote: m
+                .declare_function("nether_rt_unique_promote", m.fn_type(&[ptr], Some(ptr))),
             retain: m.declare_function("nether_rt_arc_retain", void_fn(&[ptr])),
             release: m.declare_function("nether_rt_arc_release", void_fn(&[ptr])),
             weak_retain: m.declare_function("nether_rt_arc_weak_retain", void_fn(&[ptr])),

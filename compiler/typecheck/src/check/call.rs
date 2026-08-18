@@ -110,7 +110,18 @@ impl Checker<'_> {
                         return self.check_call_value(&ty, args, path.span);
                     }
                 }
-                self.upgrade_weak(ty)
+                match &ty {
+                    Type::Ref(inner) | Type::MutRef(inner)
+                        if res.consumed == total
+                            && call_args.is_none()
+                            && !matches!(expected, Some(Type::Ref(_) | Type::MutRef(_)))
+                            && crate::alloc::alloc_kind(inner, &self.resolved.definitions)
+                                == crate::alloc::AllocKind::Stack =>
+                    {
+                        (**inner).clone()
+                    }
+                    _ => self.upgrade_weak(ty),
+                }
             }
             Resolution::Def(id) => self.resolve_def_value(
                 id,
@@ -284,16 +295,14 @@ impl Checker<'_> {
         }
     }
 
-    /// `to(value)` — the universal ownership-domain conversion
-    /// (language-spec §9). Only the target-inferred-from-context form is
-    /// implemented (Stage 2, slice 4); `to<T>(value)`'s explicit form is a
-    /// smaller, deferred follow-up.
+    /// `to(value)` / `to<T>(value)` — the universal ownership-domain
+    /// conversion (language-spec §9). The target comes from the explicit
+    /// type argument when present and otherwise from the surrounding context.
     ///
-    /// Three of the four transitions (`:T -> T`, `:t -> t`, `t -> :t`) are
-    /// pure type-system relabeling — `:T`/`T` already share identical
-    /// runtime representation (§3.2), and an inline value is an
-    /// independent bit-copy already, so promoting it to `:t` aliases
-    /// nothing. `T -> :T` is different: the source may have other live
+    /// Three transitions are sound: inline `:t -> t` / `t -> :t` are
+    /// type-system relabeling, while heap `:T -> T` transfers the payload
+    /// into an ARC allocation during lowering. `T -> :T` is different:
+    /// the source may have other live
     /// ARC aliases, so relabeling it `:T` without an actual deep copy
     /// would produce a "uniquely owned" value that isn't — that direction
     /// stays rejected until `Clone` exists (spec §10, Stage 3).
@@ -304,10 +313,13 @@ impl Checker<'_> {
         expected: Option<&Type>,
         generic_args: &[Type],
     ) -> Type {
-        if !generic_args.is_empty() {
+        if generic_args.len() > 1 {
             self.err(
                 span,
-                "`to<T>(value)`'s explicit target form is not yet implemented — write `to(value)` and let the target be inferred from context",
+                format!(
+                    "`to<T>(value)` takes exactly 1 type argument, found {}",
+                    generic_args.len()
+                ),
             );
         }
         let Some(args) = call_args else {
@@ -324,7 +336,8 @@ impl Checker<'_> {
             }
             return Type::Error;
         }
-        let Some(target) = expected.cloned() else {
+        let target = generic_args.first().cloned().or_else(|| expected.cloned());
+        let Some(target) = target else {
             self.err(
                 span,
                 "cannot infer the target type of `to(value)`; add a type annotation",
@@ -332,6 +345,18 @@ impl Checker<'_> {
             self.check_expr(&args[0]);
             return Type::Error;
         };
+        if let (Some(explicit), Some(contextual)) = (generic_args.first(), expected) {
+            if !explicit.compatible(contextual) {
+                let expected_s = self.describe(contextual);
+                let found_s = self.describe(explicit);
+                self.err(
+                    span,
+                    format!(
+                        "explicit `to` target `{found_s}` does not match expected type `{expected_s}`"
+                    ),
+                );
+            }
+        }
         let arg_ty = self.check_expr_with_expected(&args[0], Some(&target));
         match (&arg_ty, &target) {
             (Type::Unique(source_inner), _) if !matches!(target, Type::Unique(_)) => {

@@ -101,6 +101,9 @@ pub struct TypeAliasDecl {
     pub id: NodeId,
     pub name: Ident,
     pub visibility: Visibility,
+    /// Narrow Stage 3 escape hatch for aliases whose public spelling
+    /// intentionally does not reflect their representation category.
+    pub allow_pascal_case: bool,
     pub ty: TypeExpr,
     pub doc: Option<String>,
     pub span: Span,

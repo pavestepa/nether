@@ -22,17 +22,24 @@ impl Parser {
     fn parse_item(&mut self) -> Option<Item> {
         let doc = self.take_doc_comments();
         let start = self.peek_span();
+        let allow_pascal_case = self.parse_item_attributes();
         let visibility = if self.eat_keyword(Keyword::Pub) {
             Visibility::Public
         } else {
             Visibility::Private
         };
+        if allow_pascal_case && !matches!(self.peek(), Token::Keyword(Keyword::Type)) {
+            self.error(
+                start,
+                "`allow_pascal_case` is only valid on a type alias declaration",
+            );
+        }
         match self.peek() {
             Token::Keyword(Keyword::Struct) => self
                 .parse_struct_decl(doc, visibility, start)
                 .map(Item::Struct),
             Token::Keyword(Keyword::Type) => self
-                .parse_type_alias_decl(doc, visibility, start)
+                .parse_type_alias_decl(doc, visibility, start, allow_pascal_case)
                 .map(Item::TypeAlias),
             Token::Keyword(Keyword::Impl) => self.parse_impl_block().map(Item::Impl),
             Token::Keyword(Keyword::Enum) => {
@@ -55,6 +62,31 @@ impl Parser {
                 None
             }
         }
+    }
+
+    /// Stage 3's first item attribute. Attributes are parsed centrally so
+    /// unknown names and use on the wrong item receive a focused diagnostic
+    /// rather than cascading into "expected an item" errors.
+    fn parse_item_attributes(&mut self) -> bool {
+        let mut allow_pascal_case = false;
+        while self.eat_punct(Punct::Hash) {
+            let attribute_start = self.prev_span();
+            self.expect_punct(Punct::LBracket, "after `#` in an item attribute");
+            let name = self.expect_ident();
+            self.expect_punct(Punct::RBracket, "to close an item attribute");
+            if name.name.as_str() == "allow_pascal_case" {
+                if allow_pascal_case {
+                    self.error(
+                        attribute_start.to(name.span),
+                        "duplicate `allow_pascal_case` attribute",
+                    );
+                }
+                allow_pascal_case = true;
+            } else {
+                self.error(name.span, format!("unknown item attribute `{}`", name.name));
+            }
+        }
+        allow_pascal_case
     }
 
     /// Collects consecutive leading `///` doc-comment lines into one
@@ -87,6 +119,7 @@ impl Parser {
                     | Token::Keyword(Keyword::Use)
                     | Token::Keyword(Keyword::Mod)
                     | Token::Keyword(Keyword::Pub)
+                    | Token::Punct(Punct::Hash)
             ) {
                 break;
             }
@@ -167,6 +200,7 @@ impl Parser {
         doc: Option<String>,
         visibility: Visibility,
         start: Span,
+        allow_pascal_case: bool,
     ) -> Option<TypeAliasDecl> {
         self.expect_keyword(Keyword::Type);
         if matches!(self.peek(), Token::Punct(Punct::Colon)) {
@@ -186,6 +220,7 @@ impl Parser {
             id,
             name,
             visibility,
+            allow_pascal_case,
             ty,
             doc,
             span: start.to(end),

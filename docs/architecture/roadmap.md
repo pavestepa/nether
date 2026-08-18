@@ -38,17 +38,21 @@ rebuilding.
 
 ## 2. Stage sequence
 
-**Implementation snapshot (2026-08-17).** Stage 1 is complete. Stage 2 has
+**Implementation snapshot (2026-08-18).** Stages 1 and 2 are complete. Stage 3 has
+started with the narrow `#[allow_pascal_case]` type-alias attribute, including
+focused diagnostics for unknown attributes and invalid targets. Stage 2 has
 flow-sensitive move checking, reference parameters and receiver calls,
 lexically scoped stored heap borrows, plus three sound `to(value)`
 ownership-domain conversions. Returned-reference origins are checked and
 propagated through named-function call chains, including storage in `let`;
 default-private visibility with explicit `pub` is implemented for declarations,
 imports/re-exports, fields, and methods;
-Method/closure origin summaries and last-use shortening are implemented;
-loop-carried and closure-captured borrows conservatively retain lexical scope.
-Stages 3–6 have not
-started as staged projects, although the pre-existing compiler already has
+Method/closure origin summaries, loop/local-closure-sensitive last-use
+shortening, inline-reference codegen, explicit `move` closures and `to<T>`
+are implemented. Unique heap values use an unrefcounted runtime allocation
+and promote explicitly into ARC for `:T -> T`.
+Stages 4–6 have not started as staged projects. Beyond Stage 3's first slice,
+the pre-existing compiler already has
 the baseline trait system and limited concrete instance-method
 specialization described elsewhere in the docs.
 
@@ -61,7 +65,7 @@ move/borrow analysis, reference-to-inline-value codegen, existential/opaque
 types, associated types/const generics/specialization, async, unsafe/FFI,
 atomic ARC, package manifest.
 
-**Stage 2 — real borrow checker.**
+**Stage 2 — real borrow checker — done.**
 
 *Move checking — done.* Flow-sensitive use-after-move/double-move
 detection for `:T`/`:t` local bindings (spec §3, §8.6.1) — exactly the
@@ -144,9 +148,10 @@ origin, prevents moves/direct mutation/conflicting call or stored borrows
 while it is live, and releases exclusivity when the reference leaves its
 lexical block. Heap representation is verified end-to-end through
 HIR/MIR/codegen. Last-use shortening releases ordinary stored borrows after
-their final use; loop-carried and closure-captured references stay pinned to
-the lexical scope because a single AST traversal cannot prove their final
-runtime iteration/use. Inline references still await addressable-local codegen.
+their final use, after a final loop expression, or after the last use of a
+locally bound closure that captures them. Non-local closure lifetimes retain a
+safe lexical fallback. Inline references use explicit address-of/dereference
+nodes through HIR and MIR and addressable stack locals in codegen.
 
 *Returned-reference origin inference and function summaries — done.* A `:&T`/`:&mut T`
 return expression is traced through bare reference locals and `if`/`match`/
@@ -165,50 +170,41 @@ distinct origin, and closure summaries preserve parameter and captured origins.
 *`to(value)` domain conversion — 3 of 4 transitions done.* Checked each of
 the spec's four transitions (spec §9) against what's actually sound without
 `Clone` (`Copy`/`Clone` don't exist yet — spec §10, Stage 3): `:T -> T`,
-`:t -> t`, and `t -> :t` are pure type-system relabeling (`:T`/`T` already
-share one runtime representation, spec §3.2; an inline value is an
-independent bit-copy already, so promoting it aliases nothing) — these
-three are implemented as a `println`/`print`-style compiler builtin
+`:t -> t`, and `t -> :t` are supported. Inline transitions are pure
+type-system relabeling. `:T -> T` transfers the unique payload into a fresh
+ARC allocation without cloning its fields. These three are implemented as a
+`println`/`print`-style compiler builtin
 (`nether_resolver`'s `def/collect.rs` registers `"to"` as a builtin `Fn`
 the same way; `nether_typecheck::check::call::resolve_fn_value` and
 `nether_hir`'s `lower_def_value` both special-case the name). `T -> :T`
 stays rejected with a dedicated diagnostic: the source may have other live
 ARC aliases, so relabeling it `:T` without an actual deep copy would
 produce a "uniquely owned" value that isn't — genuinely needs `Clone`, not
-a shortcut worth taking early. HIR lowering needed no new node at all: a
-supported `to(value)` call just becomes `value` itself, re-typed to the
-already-checked target — confirmed end-to-end (compile, link, run) with no
-MIR/codegen changes, the same pattern slices 2–3 established. Only the
-target-inferred-from-context form is implemented; `to<T>(value)`'s
-explicit form is diagnosed as not-yet-supported rather than silently
-mishandled — deferred as a smaller follow-up (open question: can an
-ownership-qualified type appear in a `<...>` generic-argument list at
-all, given nothing else in the grammar has exercised that position).
+a shortcut worth taking early. HIR/MIR carry an explicit unique-promotion
+node for the heap transition. Both target-inferred `to(value)` and explicit
+`to<T>(value)` forms are implemented, including ownership-qualified inline
+targets such as `to<:i32>(value)`.
 
-*Still open, this stage:* more precise loop/capture-sensitive regions beyond
-the current conservative pinning; `to<T>(value)`'s
-explicit form; `T -> :T` (needs `Clone`, Stage 3); reference-to-inline-
-value codegen; `move () => {}` closure captures (today's closures already
-move-check a captured `:T`/`:t` free variable at the closure literal's own
-position, since the move checker walks a closure's body as an ordinary
-part of the same AST traversal — but HIR's own capture-mode analysis,
-`compiler/hir/src/lower/captures.rs`, still has no by-value-vs-reference
-distinction). Ownership and borrow rules for `:T` are already enforced by the
-typechecker; switching its lowering to a real unrefcounted runtime
-representation remains open. Until then, `:T` and `T` share ARC
-representation (spec §3.2).
+*Stage 2 completion.* Loop-contained uses keep a borrow live through the loop
+expression and release it afterward when no later use exists. Locally bound
+closures transfer captured-reference use counts to the closure binding, so
+the borrow ends after the closure's last use; non-local/escaping closure
+values retain a conservative lexical fallback. `move () => {}` is explicit
+and required for unique captures. Inline shared/mutable references lower to
+addressable stack locals and are verified through native reads, returned
+references, and writes. `:T` uses `unique_alloc`/`unique_free`, moves without
+retain, and `to<T>` promotes it into a fresh ARC allocation. The reverse
+`T -> :T` operation is no longer Stage 2 work: it is a deep-copy operation
+and belongs with `Clone` in Stage 3.
 
-*Sequencing note:* the still-open remainder is the dependency root for
-almost everything downstream that touches the unique-ownership domain
-(closures, async captures, unsafe pointer ownership) — prioritize it
-directly after this slice.
-
-**Stage 3 — trait system extensions + dev-mode generics.** Associated
+**Stage 3 — trait system extensions + dev-mode generics — in progress.** The
+narrow `#[allow_pascal_case]` type-alias escape hatch is implemented. Remaining:
+associated
 types/constants, const generics, multiple inline bounds (`T A + B`), `where`
 clauses, specialization (`default impl` + concrete override), existential
 (`any Trait`) and opaque (`some Trait`) types with existential-safety
 checking, derivable-traits syntax (`Clone + Eq + Hash` before a
-declaration), `#[allow_pascal_case]`, and development-mode
+declaration), and development-mode
 witness-table/dictionary generics dispatch (so `nether build` stops
 monomorphizing every generic body — release retains full
 monomorphization/devirtualization/specialization). Also folds in the

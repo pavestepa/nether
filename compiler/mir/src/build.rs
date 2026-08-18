@@ -109,8 +109,17 @@ impl<'a> FnBuilder<'a> {
             closure_captures.push(local);
         }
         if let Some(self_id) = f.self_local {
-            let ty = f.self_ty.clone().unwrap_or(Type::Error);
-            let mutable = matches!(f.self_param, Some(SelfParam::ByMutRef));
+            let owner_ty = f.self_ty.clone().unwrap_or(Type::Error);
+            let ty = match f.self_param {
+                Some(SelfParam::Owned) => Type::Unique(Box::new(owner_ty)),
+                Some(SelfParam::OwnedRef) => Type::Ref(Box::new(owner_ty)),
+                Some(SelfParam::OwnedMutRef) => Type::MutRef(Box::new(owner_ty)),
+                _ => owner_ty,
+            };
+            let mutable = matches!(
+                f.self_param,
+                Some(SelfParam::ByMutRef | SelfParam::OwnedMutRef)
+            );
             let local = self.declare_local(ty.clone(), mutable);
             self.bind_hir_local(self_id, local);
             if mutable {
@@ -264,9 +273,23 @@ impl<'a> FnBuilder<'a> {
     fn prepare_new_binding(&mut self, value: &MonoExpr) -> Operand {
         if is_trivial_local_alias(value) {
             let op = self.lower_expr(value);
+            let moved_source = match op {
+                Operand::Local(source)
+                    if matches!(self.locals[source.index()].ty, Type::Unique(_)) =>
+                {
+                    Some(source)
+                }
+                _ => None,
+            };
             let local = self.materialize(Rvalue::Use(op), value.ty.clone());
-            if self.sigs.has_managed_content(&value.ty, self.defs) {
+            if self.sigs.has_managed_content(&value.ty, self.defs)
+                && !matches!(value.ty, Type::Unique(_))
+                && moved_source.is_none()
+            {
                 self.push_instr(Instr::Retain(local));
+            }
+            if let Some(source) = moved_source {
+                self.push_instr(Instr::Clear(source));
             }
             Operand::Local(local)
         } else {

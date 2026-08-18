@@ -208,6 +208,7 @@ impl Parser {
 
 fn punct_str(p: Punct) -> &'static str {
     match p {
+        Punct::Hash => "#",
         Punct::LBrace => "{",
         Punct::RBrace => "}",
         Punct::LParen => "(",

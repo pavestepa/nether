@@ -40,7 +40,7 @@ system — not one or the other.
 | Generics | monomorphized in release builds; witness-table/dictionary dispatch in development builds *(dev-mode witness tables: not yet implemented — Stage 3+; Stage 1 stays always-monomorphized)* |
 | Concurrency | async/await over a Tokio-backed runtime, plus raw OS threads *(not yet implemented — Stage 4)* |
 | Unsafe code | explicit `unsafe`, raw pointers, C ABI FFI *(not yet implemented — Stage 5)* |
-| Lifetimes | no explicit lifetime syntax; inferred origins, callable summaries, and last-use shortening power borrow checking *(loop/capture-sensitive regions remain conservative — see §3)* |
+| Lifetimes | no explicit lifetime syntax; inferred origins, callable summaries, and loop/local-closure-sensitive last-use shortening power borrow checking |
 
 Everything below assumes these are the only permanent design constraints:
 no explicit lifetime syntax, no `dyn` keyword, no `::` path separator.
@@ -132,7 +132,7 @@ orthogonal:
 
 | | Ordinary | Uniquely owned |
 |---|---|---|
-| **Heap/reference category** (`T`, e.g. `User`) | `T` — ARC reference. Assignment copies the reference (aliasing); mutation needs `mut` permission but not exclusivity. Atomic refcounts are deferred to Stage 6. | `:T` — uniquely owned heap value. Stage 2 enforces moves, live-borrow exclusivity, returned-reference origins, callable summaries, and ordinary last-use shortening. Loop/capture-sensitive regions remain conservative. |
+| **Heap/reference category** (`T`, e.g. `User`) | `T` — ARC reference. Assignment copies the reference (aliasing); mutation needs `mut` permission but not exclusivity. Atomic refcounts are deferred to Stage 6. | `:T` — uniquely owned, unrefcounted heap value. Stage 2 enforces moves, live-borrow exclusivity, returned-reference origins, callable summaries, and last-use shortening. |
 | **Inline/value category** (`t`, e.g. `i32`, `color`) | `t` — ordinary inline value. Implicitly copyable, normal value semantics. | `:t` — uniquely owned inline value. Same machine representation as `t`; move-only *semantically* — use-after-move is a compile error *(enforced — Stage 2's move checker, as above)*. |
 
 The representation category comes from **how the type is defined**:
@@ -162,7 +162,7 @@ println(d);   // ok
 println(c);   // compile error as of Stage 2 — "use of a value after it was moved"
 ```
 
-### 3.1 Reference chains **[heap references and returned origins: Stage 2; deeper chains/inline references: partial — see below]**
+### 3.1 Reference chains **[Stage 2; deeper member-access chains remain limited — see below]**
 
 References only exist inside the unique/owned domain — there is no bare
 `&T` without a leading `:`. `:&T` (shared borrow) and `:&mut T` (exclusive
@@ -184,14 +184,11 @@ list, the same local can't be borrowed `:&mut` twice, or `:&` and `:&mut`
 together. The same origin machinery also tracks references that outlive a
 call because they are returned or stored in a local, as described below.
 
-Reference codegen is for **heap-category types only** (`:&String`,
-`:&User`) — a reference to a heap type reuses the same pointer
-representation Nether already passes for ARC values, with no retain
-(`Type::Ref`/`Type::MutRef` were already `AllocKind::Stack` and already
-excluded from `has_managed_content` before this landed, so no MIR/codegen
-change was actually needed to make this true — see
-`docs/architecture/roadmap.md`). References to inline-category types still
-need real address-of-local codegen that does not exist yet.
+Reference codegen covers heap and inline categories. A heap reference reuses
+the object pointer ABI without retaining it. An inline reference points at an
+addressable local stack slot; HIR/MIR contain explicit address-of and implicit
+value-context dereference operations. A mutable inline reference writes
+through to that same originating slot.
 
 **Calling a method through a `:&T`/`:&mut T` receiver works** (Stage 2,
 slice 3), not just reading a field: a borrowing self-form
@@ -205,12 +202,14 @@ unsound. `: &mut self` additionally requires the receiver be exclusive
 (`:&mut T`, or a `mut`-bound owned local), the same mutability check a
 `mut self` ARC method already used.
 
-**Stored heap borrows use last-use shortening:**
+**Stored borrows use last-use shortening:**
 `let view: &User = owned_user;` and `let view: &mut User = owned_user;`
 record the owned local as their origin, enforce shared/exclusive access, and
-release that restriction after `view`'s last ordinary use. References used by
-a loop or captured by a closure conservatively remain borrowed until their
-block ends. References to inline values remain unavailable.
+release that restriction after `view`'s last ordinary use. A loop keeps the
+borrow live through the loop expression. A locally bound closure keeps each
+captured borrow live through the closure's last use; closure values without a
+provable final local use use lexical scope as the safety fallback. The same
+rules apply to inline referents.
 
 **Returned references are origin-checked and propagated through function calls.** A
 return traced to exactly one incoming reference parameter is accepted;
@@ -221,16 +220,16 @@ Consequently, origin survives arbitrary named-function call chains and a
 returned reference may be stored in `let`; that binding keeps the ultimate
 owned source borrowed until the returned binding's last use. Instance/static
 methods carry summaries too (`self` is a distinct origin), while closure
-summaries preserve both parameter and captured origins. Loop-carried and
-captured borrows remain conservatively lexical.
+summaries preserve both parameter and captured origins.
 
-### 3.2 Current runtime representation of `:T`
+### 3.2 Runtime representation of `:T`
 
-`:T` (unique heap) currently uses **the exact same ARC-refcounted runtime
-representation as `T`**. Stage 2 enforces uniqueness, moves, and borrows at
-compile time, but lowering has not yet switched `:T` to an unrefcounted
-representation. `:t` (unique inline) needs no runtime change — it has the
-same machine representation as `t`, restricted at the type-checker level.
+`:T` uses a dedicated unrefcounted allocation containing only payload size
+and drop metadata. Moves transfer its sole pointer without retaining and
+clear the moved-from slot; final destruction calls `unique_free`. Converting
+`:T -> T` moves the payload bytes into a fresh ARC allocation without cloning
+its fields. `:t` has the same machine representation as `t`, restricted by
+move semantics at the type-checker level.
 
 ---
 
@@ -349,10 +348,10 @@ forward unchanged from the pre-rewrite compiler specifically so that
 Without this carve-out, the entire bundled stdlib would be rejected on day
 one.
 
-`#[allow_pascal_case]` is a narrow escape hatch for exceptional
+`#[allow_pascal_case]` is an implemented narrow escape hatch for exceptional
 compiler/library types whose physical representation doesn't match the
 naming convention (e.g. a future multi-word `Vector` handle) — **[not yet
-implemented — Stage 3]**. It disables only the naming diagnostic; it does
+implemented — Stage 3's first slice]**. It disables only the naming diagnostic; it does
 not change ARC behavior, ownership, Copy behavior, ABI, allocation, thread
 safety, or borrow semantics.
 
@@ -404,8 +403,9 @@ a.name = "Bob";
 `mut` on an ARC binding means "this binding may mutate," not "this binding
 is the only reference." This is intentionally different from `:&mut T`,
 where Stage 2 enforces exclusivity for call arguments and stored/returned
-heap borrows. Ordinary local borrows end after their last use; loop-carried
-and closure-captured borrows conservatively remain live to lexical scope exit.
+heap/inline borrows. Ordinary local borrows end after their last use, loop
+borrows after the loop expression, and locally captured borrows after their
+closure's last use; non-local closure lifetimes use a lexical fallback.
 
 ---
 
@@ -532,8 +532,8 @@ move vs. a read-through):
 Move diagnostics carry two labels: where the value was moved, and where it
 was used again. Borrow exclusivity blocks moves and direct mutation while a
 stored borrow is live. Returned-reference origins propagate through named
-functions, methods, and closures; ordinary borrows end after last use, while
-loop-carried/captured borrows remain conservatively lexical.
+functions, methods, and closures; loop and locally captured uses participate
+in last-use shortening.
 
 ### 8.7 Variadic parameters **[Stage 1]**
 
@@ -556,7 +556,7 @@ follow-up work (roadmap §3).
 
 ---
 
-## 9. Universal `to(value)` conversion **[3 of 4 transitions: Stage 2; `T -> :T` and `to<T>(...)`: not yet]**
+## 9. Universal `to(value)` conversion **[3 transitions: Stage 2; `T -> :T`: Stage 3 with `Clone`]**
 
 The full language specifies a universal, explicit domain-conversion
 operation (`to(value)`, or `to<T>(value)` with an explicit target) covering
@@ -566,24 +566,19 @@ must call `to()` explicitly when crossing domains.
 
 `:T -> T`, `:t -> t`, and `t -> :t` are implemented (Stage 2) as a
 compiler builtin (`println`/`print`'s own mechanism — no user-overridable
-declaration exists to shadow it) with the target type inferred from
-surrounding context (`let arc_dog Dog = to(owned_dog);`); there is no
-runtime cost, since each of these three is pure type-system relabeling —
-`:T`/`T` already share identical runtime representation (§3.2), and an
-inline value promoted to `:t` is an independent bit-copy already, aliasing
-nothing. `to(owned_dog)` also moves `owned_dog` the same way passing it to
-any other function would (§8.6.1); `to(n)` for an ordinary inline `n`
-does not, since inline values are always freely copyable.
+declaration exists to shadow it). The target may be inferred from context
+(`let arc_dog Dog = to(owned_dog);`) or written explicitly
+(`to<Dog>(owned_dog)`, `to<:i32>(n)`). Inline transitions are representation-
+free relabeling. `:T -> T` explicitly promotes the unrefcounted allocation
+into ARC by moving its payload without cloning fields. It consumes the source
+the same way passing it to another owned parameter would (§8.6.1); `to(n)`
+for an ordinary inline `n` does not consume `n`.
 
 **`T -> :T` stays rejected**, with a dedicated diagnostic rather than
 silent unsoundness: the source may have other live ARC aliases, so
 relabeling it `:T` without an actual deep copy would produce a "uniquely
 owned" value that isn't. This direction needs `Clone` (§10), not yet
 implemented — Stage 3.
-
-**`to<T>(value)`'s explicit-target form is not yet implemented** — only
-target-inferred-from-context calls work today; an explicit generic
-argument is diagnosed rather than silently accepted.
 
 ---
 
@@ -699,7 +694,7 @@ root without a `mod stdlib;` declaration. The package manifest
 
 ---
 
-## 16. Closures **[current behavior, unchanged by Stage 1]**
+## 16. Closures **[Stage 2 capture semantics]**
 
 ```
 let add = (a i32, b i32) => {
@@ -707,9 +702,11 @@ let add = (a i32, b i32) => {
 };
 ```
 
-`move () => { ... }` explicit-move-capture closures for owned values are
-specified for the full language but not yet implemented (folds into Stage
-2, alongside the rest of move semantics).
+`move () => { ... }` explicitly transfers captured unique values into the
+closure environment at creation. Capturing a `:T`/`:t` value from an ordinary
+closure is rejected with a diagnostic requiring `move`. Reference captures
+remain borrows; for a locally bound closure their origin stays live through
+that closure's last use.
 
 ---
 
@@ -748,8 +745,8 @@ Available without `use`: `println`, `print`, `Option`/`Some`/`None`,
 ## 21. Memory model summary
 
 - Ordinary heap assignment (`T`) retains; scope exit releases.
-- `:T` currently uses the same ARC representation as `T` (§3.2); Stage 2
-  enforces its ownership rules, while unrefcounted lowering remains open.
+- `:T` uses an unrefcounted unique allocation; moves do not retain, final
+  destruction frees the sole allocation, and `:T -> T` promotes into ARC.
 - `weak T` never affects its referent's retain count.
 - Atomic ARC (thread-safe refcounting) is specified for the full language
   but not yet implemented — the runtime remains single-threaded until
@@ -769,13 +766,15 @@ Full retain/release insertion rules live in
 | Move/use-after-move checking (§8.6.1) | **Stage 2 — done** |
 | Callable `:&T`/`:&mut T` parameters, call-scoped exclusivity (§3.1, §8.1) | **Stage 2 — done** |
 | Calling a *method* (not just field access) through a `:&T`/`:&mut T` receiver (§3.1) | **Stage 2 — done** |
-| `to(value)` domain conversion, target-inferred form, 3 of 4 transitions (§9) | **Stage 2 — done** |
-| `to<T>(value)`'s explicit-target form; `T -> :T` (needs `Clone`, §10) | Stage 2/3 — remaining |
+| `to(value)` / `to<T>(value)`, 3 sound transitions (§9) | **Stage 2 — done** |
+| `T -> :T` deep copy (needs `Clone`, §10) | Stage 3 |
 | Lexically scoped stored heap borrows; interprocedural named-function origin summaries; safe storage of returned references; ambiguous-origin diagnostics | **Stage 2 — done** |
 | Method/closure origin summaries and ordinary last-use shortening | **Stage 2 — done** |
-| Loop/capture-sensitive region precision, `move () => {}` closures, `:T`'s unrefcounted runtime representation | Stage 2 — remaining |
-| Reference-to-inline-value codegen | Stage 2 — remaining |
-| Associated types, const generics, specialization, `any`/`some`, multi-bound generics, derivable traits, `#[allow_pascal_case]` | Stage 3 |
+| Loop/local-closure-sensitive regions and `move () => {}` closures | **Stage 2 — done** |
+| Reference-to-inline-value codegen | **Stage 2 — done** |
+| `:T` unrefcounted allocation, move transfer and ARC promotion | **Stage 2 — done** |
+| `#[allow_pascal_case]` on type aliases | **Stage 3 — done** |
+| Associated types, const generics, specialization, `any`/`some`, multi-bound generics, derivable traits | Stage 3 |
 | Development-mode witness-table generics dispatch | Stage 3 |
 | async/await, Tokio runtime bridge | Stage 4 |
 | unsafe, raw pointers, C ABI FFI | Stage 5 |

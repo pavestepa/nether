@@ -198,7 +198,7 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
     pub(super) fn gen_field_read(&self, base: &Operand, index: u32, dest_ty: &Type) -> Value<'ctx> {
         let base_ty = self.operand_ty(base);
         let base_val = self.gen_operand(base);
-        let addr = self.struct_field_address(&base_ty, base_val, index);
+        let addr = self.struct_field_address(base_ty.strip_indirection(), base_val, index);
         self.load_value(addr, dest_ty)
     }
 

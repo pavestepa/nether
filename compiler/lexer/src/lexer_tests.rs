@@ -167,12 +167,26 @@ mod tests {
     #[test]
     fn invalid_character_recovers_with_error_token() {
         let mut map = SourceMap::new();
-        let source = "let a = 1 # 2";
+        let source = "let a = 1 @ 2";
         let file = map.add_file("test.nr", source);
         let (tokens, diags) = tokenize(source, file);
         assert_eq!(diags.len(), 1);
         assert!(tokens.iter().any(|t| t.token == Token::Error));
         // lexing continues past the bad character:
         assert!(tokens.iter().any(|t| t.token == Token::Int(2)));
+    }
+
+    #[test]
+    fn item_attribute_punctuation_is_tokenized() {
+        assert_eq!(
+            tokens_of("#[allow_pascal_case]"),
+            vec![
+                Token::Punct(Punct::Hash),
+                Token::Punct(Punct::LBracket),
+                Token::Ident("allow_pascal_case".into()),
+                Token::Punct(Punct::RBracket),
+                Token::Eof,
+            ]
+        );
     }
 }

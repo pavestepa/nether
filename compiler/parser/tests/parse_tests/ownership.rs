@@ -6,6 +6,33 @@ use super::*;
 use nether_ast::{SelfParam, TypeExpr};
 
 #[test]
+fn allow_pascal_case_attribute_is_recorded_on_type_alias() {
+    let module = parse_ok(
+        r#"
+#[allow_pascal_case]
+pub type Coord = i32;
+"#,
+    );
+    let Item::TypeAlias(alias) = &module.items[0] else {
+        panic!("expected TypeAliasDecl")
+    };
+    assert!(alias.allow_pascal_case);
+}
+
+#[test]
+fn item_attributes_reject_unknown_names_and_wrong_targets() {
+    let (_, unknown) = parse_with_diagnostics("#[mystery]\ntype Alias = i32;");
+    assert!(unknown.iter().any(|diagnostic| diagnostic
+        .message
+        .contains("unknown item attribute `mystery`")));
+
+    let (_, wrong_target) = parse_with_diagnostics("#[allow_pascal_case]\nstruct Point { x i32 }");
+    assert!(wrong_target.iter().any(|diagnostic| diagnostic
+        .message
+        .contains("only valid on a type alias declaration")));
+}
+
+#[test]
 fn let_binding_forms_distinguish_arc_owned_and_inline() {
     let module = parse_ok(
         r#"
@@ -198,7 +225,28 @@ type color = (u32, u32, u32);
 #[test]
 fn owned_type_alias_is_reported_as_not_yet_supported() {
     let (_, diags) = parse_with_diagnostics("type: color = :(u32, u32, u32);\n");
-    assert!(diags.iter().any(|d| d.message.contains("not yet supported")));
+    assert!(diags
+        .iter()
+        .any(|d| d.message.contains("not yet supported")));
+}
+
+#[test]
+fn parses_explicit_move_closure() {
+    let (module, diags) = parse_with_diagnostics("fn main() { let f = move () => { 1 }; }\n");
+    assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
+    let Item::Fn(main) = &module.items[0] else {
+        panic!("expected function");
+    };
+    let Stmt::Let(binding) = &main.body.as_ref().unwrap().stmts[0] else {
+        panic!("expected let binding");
+    };
+    assert!(matches!(
+        binding.value.kind,
+        ExprKind::Closure {
+            move_capture: true,
+            ..
+        }
+    ));
 }
 
 #[test]

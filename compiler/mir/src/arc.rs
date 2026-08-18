@@ -87,7 +87,15 @@ fn insert_arc_fn(f: &mut MirFunction, mutable_params: &HashMap<MonoFnId, Vec<boo
                         .iter()
                         .flatten()
                         .filter_map(|op| match op {
-                            Operand::Local(l) if f.locals[l.0 as usize].needs_drop => Some(*l),
+                            Operand::Local(l)
+                                if f.locals[l.0 as usize].needs_drop
+                                    && !matches!(
+                                        f.locals[l.0 as usize].ty,
+                                        nether_typecheck::Type::Unique(_)
+                                    ) =>
+                            {
+                                Some(*l)
+                            }
                             _ => None,
                         })
                         .collect();
@@ -97,6 +105,10 @@ fn insert_arc_fn(f: &mut MirFunction, mutable_params: &HashMap<MonoFnId, Vec<boo
                     let dest_local = place.local;
                     let retain_dest = place.projection.is_empty()
                         && f.locals[dest_local.0 as usize].needs_drop
+                        && !matches!(
+                            f.locals[dest_local.0 as usize].ty,
+                            nether_typecheck::Type::Unique(_)
+                        )
                         && is_aliasing(&rvalue);
                     new_instrs.push(Instr::Assign(place, rvalue));
                     if releases_after_call {

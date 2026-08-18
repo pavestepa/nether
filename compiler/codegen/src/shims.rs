@@ -253,6 +253,13 @@ impl<'ctx> ShimCx<'_, 'ctx> {
     /// heap-kind, otherwise `ty`'s own inline structure.
     fn emit_walk(&self, base: nether_llvm::Value<'ctx>, ty: &Type) {
         let (m, layout) = (self.m, self.layout);
+        if matches!(ty, Type::Unique(inner) if alloc_kind(inner, layout.defs) == AllocKind::Heap) {
+            if !self.retain {
+                let ptr = m.load(m.ptr_type(), base, "unique_leaf");
+                m.call(self.runtime.unique_free, &[ptr], "");
+            }
+            return;
+        }
         if let Type::Weak(_) = ty {
             // A `weak T` slot's own weak count, never its referent's
             // strong count (spec §13) — see `runtime/arc`'s own module
@@ -392,6 +399,7 @@ impl<'ctx> ShimCx<'_, 'ctx> {
 /// look *inside* one — see this module's doc comment.
 fn has_heap_content(ty: &Type, defs: &Definitions, sigs: &Signatures) -> bool {
     match ty {
+        Type::Unique(inner) => alloc_kind(inner, defs) == AllocKind::Heap,
         Type::String | Type::Array(_) | Type::Function(_, _) | Type::Weak(_) => true,
         Type::Struct(_, _) | Type::TupleStruct(_, _) => match alloc_kind(ty, defs) {
             AllocKind::Heap => true,

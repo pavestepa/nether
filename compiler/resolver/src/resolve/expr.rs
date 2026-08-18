@@ -133,7 +133,7 @@ impl Resolver<'_> {
                     self.resolve_expr(v);
                 }
             }
-            ExprKind::Closure { params, body } => {
+            ExprKind::Closure { params, body, .. } => {
                 self.scopes.push();
                 for param in params {
                     self.resolve_type_expr(&param.ty);

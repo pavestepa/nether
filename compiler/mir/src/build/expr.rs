@@ -9,9 +9,10 @@ impl FnBuilder<'_> {
         &mut self,
         args: &[MonoExpr],
         params: &[Type],
-    ) -> (Vec<Operand>, Vec<Option<Operand>>) {
+    ) -> (Vec<Operand>, Vec<Option<Operand>>, Vec<Local>) {
         let mut operands = Vec::with_capacity(args.len());
         let mut weak_sources = Vec::with_capacity(args.len());
+        let mut moved_sources = Vec::new();
         for (index, arg) in args.iter().enumerate() {
             let constructs_weak = matches!(params.get(index), Some(Type::Weak(_)))
                 && !matches!(&arg.ty, Type::Weak(_));
@@ -31,11 +32,19 @@ impl FnBuilder<'_> {
                 }
                 weak_sources.push(Some(strong));
             } else {
-                operands.push(self.lower_expr(arg));
+                let operand = self.lower_expr(arg);
+                if matches!(params.get(index), Some(Type::Unique(_))) {
+                    if let Operand::Local(local) = &operand {
+                        if is_trivial_local_alias(arg) {
+                            moved_sources.push(*local);
+                        }
+                    }
+                }
+                operands.push(operand);
                 weak_sources.push(None);
             }
         }
-        (operands, weak_sources)
+        (operands, weak_sources, moved_sources)
     }
 
     pub(super) fn release_call_arg_temporaries(
@@ -148,6 +157,27 @@ impl FnBuilder<'_> {
                 }
             }
             MonoExprKind::Local(id) => Operand::Local(self.local_for(*id)),
+            MonoExprKind::Borrow(place) => {
+                let place = self.lower_place(place);
+                Operand::Local(self.materialize(Rvalue::AddressOf(place), expr.ty.clone()))
+            }
+            MonoExprKind::Deref(reference) => {
+                let reference = self.lower_expr(reference);
+                Operand::Local(self.materialize(Rvalue::Deref(reference), expr.ty.clone()))
+            }
+            MonoExprKind::PromoteUnique(value) => {
+                let value = self.lower_expr(value);
+                let source = match &value {
+                    Operand::Local(local) => Some(*local),
+                    _ => None,
+                };
+                let promoted =
+                    Operand::Local(self.materialize(Rvalue::PromoteUnique(value), expr.ty.clone()));
+                if let Some(source) = source {
+                    self.push_instr(Instr::Clear(source));
+                }
+                promoted
+            }
             MonoExprKind::FnRef(id) => Operand::Local(self.materialize(
                 Rvalue::Closure {
                     function: *id,
@@ -205,7 +235,7 @@ impl FnBuilder<'_> {
                     Type::Function(params, _) => params.clone(),
                     _ => Vec::new(),
                 };
-                let (arg_ops, weak_sources) = self.lower_call_args(args, &params);
+                let (arg_ops, weak_sources, moved_sources) = self.lower_call_args(args, &params);
                 let target = match callee_op {
                     Operand::Fn(id) => CallTarget::Fn(id),
                     ref other => CallTarget::Dynamic(other.clone()),
@@ -219,6 +249,9 @@ impl FnBuilder<'_> {
                 ));
                 self.release_temporary_value(callee, &callee_op);
                 self.release_call_arg_temporaries(args, &arg_ops, &weak_sources);
+                for source in moved_sources {
+                    self.push_instr(Instr::Clear(source));
+                }
                 result
             }
             MonoExprKind::CallStatic { fn_id, args } => {
@@ -228,7 +261,7 @@ impl FnBuilder<'_> {
                     params.push(target.self_ty.clone().unwrap_or(Type::Error));
                 }
                 params.extend(target.params.iter().map(|param| param.ty.clone()));
-                let (arg_ops, weak_sources) = self.lower_call_args(args, &params);
+                let (arg_ops, weak_sources, moved_sources) = self.lower_call_args(args, &params);
                 let result = Operand::Local(self.materialize(
                     Rvalue::Call {
                         target: CallTarget::Fn(*fn_id),
@@ -237,6 +270,9 @@ impl FnBuilder<'_> {
                     expr.ty.clone(),
                 ));
                 self.release_call_arg_temporaries(args, &arg_ops, &weak_sources);
+                for source in moved_sources {
+                    self.push_instr(Instr::Clear(source));
+                }
                 result
             }
             MonoExprKind::CallBuiltin { name, args } => {

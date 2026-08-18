@@ -4,6 +4,11 @@ impl FnBuilder<'_> {
     pub(super) fn lower_place(&mut self, expr: &MonoExpr) -> Place {
         match &expr.kind {
             MonoExprKind::Local(id) => Place::local(self.local_for(*id)),
+            MonoExprKind::Deref(reference) => {
+                let mut place = self.lower_place(reference);
+                place.projection.push(Projection::Deref);
+                place
+            }
             MonoExprKind::Field { base, index } => {
                 let mut place = self.lower_place(base);
                 place.projection.push(Projection::Field(*index));
@@ -41,6 +46,7 @@ impl FnBuilder<'_> {
                     }
                 });
             let rvalue = match projection {
+                Projection::Deref => Rvalue::Deref(current.clone()),
                 Projection::Field(index) => Rvalue::Field {
                     base: current.clone(),
                     index: *index,
@@ -73,7 +79,15 @@ impl FnBuilder<'_> {
     }
 
     pub(super) fn projected_type(&self, base: &Type, projection: &Projection) -> Option<Type> {
+        if matches!(projection, Projection::Deref) {
+            return match base {
+                Type::Ref(inner) | Type::MutRef(inner) => Some((**inner).clone()),
+                _ => None,
+            };
+        }
+        let base = base.strip_indirection();
         match projection {
+            Projection::Deref => unreachable!(),
             Projection::Field(index) => match base {
                 Type::Tuple(items) => items.get(*index as usize).cloned(),
                 _ => self.sigs.type_fields(base)?.get(*index as usize).cloned(),

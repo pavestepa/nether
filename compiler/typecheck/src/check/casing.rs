@@ -19,6 +19,9 @@ pub(super) fn validate_alias_casing(
         let Item::TypeAlias(alias) = item else {
             continue;
         };
+        if alias.allow_pascal_case {
+            continue;
+        }
         let resolved_ty = lower_type_expr(&alias.ty, resolved, decls, diagnostics);
         if resolved_ty.is_error() || matches!(resolved_ty, Type::Enum(_, _) | Type::Tuple(_)) {
             continue;

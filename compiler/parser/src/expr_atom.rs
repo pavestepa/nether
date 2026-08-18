@@ -44,6 +44,13 @@ impl Parser {
                 self.path_expr_from_ident(Ident::new(name, start))
             }
             Token::Punct(Punct::LParen) => self.parse_paren_or_closure(start),
+            Token::Keyword(Keyword::Move) => {
+                self.bump();
+                if !matches!(self.peek(), Token::Punct(Punct::LParen)) {
+                    self.error(self.peek_span(), "expected `(` after `move`");
+                }
+                self.parse_closure_with_mode(start, true)
+            }
             Token::Punct(Punct::LBracket) => self.parse_array_expr(start),
             Token::Punct(Punct::Colon) => {
                 self.bump();
@@ -306,6 +313,14 @@ impl Parser {
     }
 
     pub(super) fn parse_closure(&mut self, start: nether_diagnostics::Span) -> Expr {
+        self.parse_closure_with_mode(start, false)
+    }
+
+    fn parse_closure_with_mode(
+        &mut self,
+        start: nether_diagnostics::Span,
+        move_capture: bool,
+    ) -> Expr {
         self.expect_punct(Punct::LParen, "to start a closure's parameters");
         let mut params = Vec::new();
         while !matches!(self.peek(), Token::Punct(Punct::RParen)) && !self.is_eof() {
@@ -322,6 +337,7 @@ impl Parser {
         Expr {
             id,
             kind: ExprKind::Closure {
+                move_capture,
                 params,
                 body: Box::new(body),
             },

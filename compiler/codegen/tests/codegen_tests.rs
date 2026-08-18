@@ -136,6 +136,28 @@ fn main() {
 }
 
 #[test]
+fn unique_heap_values_use_the_unrc_runtime_and_promote_explicitly() {
+    let (_cg, ir) = compile(
+        r#"
+struct Dog { name String }
+fn main() {
+    let dog: Dog = :Dog { name = "Rex" };
+    let arc Dog = to<Dog>(dog);
+    println(arc.name);
+}
+"#,
+    );
+    assert!(
+        ir.contains("call ptr @nether_rt_unique_alloc"),
+        "owned construction must use the unrefcounted allocator:\n{ir}"
+    );
+    assert!(
+        ir.contains("call ptr @nether_rt_unique_promote"),
+        "`:T -> T` must explicitly promote the allocation into ARC:\n{ir}"
+    );
+}
+
+#[test]
 fn closure_with_stack_and_heap_captures_compiles_to_an_indirect_call() {
     let (_cg, ir) = compile(
         r#"

@@ -131,7 +131,10 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
         for (i, &local) in self.mir_fn.params.iter().enumerate() {
             let param_val = self.m.param(self.llvm_fn, (i + param_offset) as u32);
             let ty = self.local_ty(local);
-            if self.mir_fn.local_decl(local).mutable || is_aggregate(&ty, self.defs()) {
+            if (self.mir_fn.local_decl(local).mutable
+                && !matches!(ty, Type::Ref(_) | Type::MutRef(_)))
+                || is_aggregate(&ty, self.defs())
+            {
                 // Aggregates and `mut` parameters are passed by pointer
                 // (see `crate::declare`'s matching signature choice).
                 // In particular, a mutable scalar aliases the caller's
@@ -176,6 +179,10 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
     fn gen_instr(&mut self, instr: &Instr) {
         match instr {
             Instr::Assign(place, rvalue) => self.gen_assign(place, rvalue),
+            Instr::Clear(local) => {
+                self.m
+                    .store(self.locals[local.index()], self.m.const_null_ptr());
+            }
             Instr::Retain(local) => self.gen_reference_change(*local, true),
             Instr::Release(local) => self.gen_reference_change(*local, false),
             Instr::WeakRetain(local) => {
@@ -193,7 +200,10 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
         let ty = self.local_ty(local);
         if alloc_kind(&ty, self.defs()) == AllocKind::Heap {
             let ptr = self.load_scalar(local);
-            let function = if retain {
+            let function = if matches!(ty, Type::Unique(_)) {
+                debug_assert!(!retain, "unique heap values are never retained");
+                self.runtime.unique_free
+            } else if retain {
                 self.runtime.retain
             } else {
                 self.runtime.release
@@ -314,6 +324,7 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
                 .projection_type(&current_ty, projection)
                 .unwrap_or(Type::Error);
             current_addr = match projection {
+                Projection::Deref => current_addr,
                 Projection::Field(index) => {
                     self.struct_field_address(&current_ty, current_addr, *index)
                 }
@@ -339,8 +350,35 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
         current_addr
     }
 
+    /// Address used to form a Nether reference. Stack values borrow their
+    /// alloca directly; heap values already are pointers, so borrowing them
+    /// yields the object pointer stored in the local slot.
+    fn address_of_place(&self, place: &Place) -> Value<'ctx> {
+        if !place.projection.is_empty() {
+            return self.place_address(place);
+        }
+        let ty = self.local_ty(place.local);
+        if alloc_kind(&ty, self.defs()) == AllocKind::Heap {
+            self.m.load(
+                self.m.ptr_type(),
+                self.locals[place.local.index()],
+                "borrow",
+            )
+        } else {
+            self.locals[place.local.index()]
+        }
+    }
+
     fn projection_type(&self, base: &Type, projection: &Projection) -> Option<Type> {
+        if matches!(projection, Projection::Deref) {
+            return match base {
+                Type::Ref(inner) | Type::MutRef(inner) => Some((**inner).clone()),
+                _ => None,
+            };
+        }
+        let base = base.strip_indirection();
         match projection {
+            Projection::Deref => unreachable!(),
             Projection::Field(index) => match base {
                 Type::Tuple(items) => items.get(*index as usize).cloned(),
                 _ => self
@@ -382,6 +420,7 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
         base_addr: Value<'ctx>,
         index: u32,
     ) -> Value<'ctx> {
+        let base_ty = base_ty.strip_indirection();
         let struct_ty = match base_ty {
             Type::Struct(_, _) | Type::TupleStruct(_, _) => self.layout.struct_layout(base_ty).ty,
             Type::Tuple(items) => {

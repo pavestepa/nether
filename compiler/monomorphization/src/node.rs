@@ -84,6 +84,9 @@ pub struct MonoExpr {
 pub enum MonoExprKind {
     Literal(Literal),
     Local(HirLocalId),
+    Borrow(Box<MonoExpr>),
+    Deref(Box<MonoExpr>),
+    PromoteUnique(Box<MonoExpr>),
     FnRef(MonoFnId),
     Unit,
     Tuple(Vec<MonoExpr>),

@@ -106,7 +106,7 @@ impl Lowerer<'_> {
                 kind: HirExprKind::Return(value.as_ref().map(|v| Box::new(self.lower_expr(v)))),
                 ty,
             },
-            ExprKind::Closure { params, body } => self.lower_closure(params, body, ty),
+            ExprKind::Closure { params, body, .. } => self.lower_closure(params, body, ty),
             ExprKind::StructLit {
                 path,
                 fields,

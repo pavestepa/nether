@@ -142,6 +142,13 @@ pub struct HirExpr {
 pub enum HirExprKind {
     Literal(Literal),
     Local(HirLocalId),
+    /// Forms a non-owning reference to an addressable local/place.
+    Borrow(Box<HirExpr>),
+    /// Reads the referent of an inline reference (Nether has no `*expr`
+    /// surface operator; this is inserted for value-context reads).
+    Deref(Box<HirExpr>),
+    /// Transfers a unique heap allocation into the ARC domain (`to<T>`).
+    PromoteUnique(Box<HirExpr>),
     /// A reference to a function/method value that isn't being called
     /// directly here. Monomorphization turns it into a closure-ABI adapter.
     FnRef(HirFnId),

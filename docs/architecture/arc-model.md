@@ -14,12 +14,16 @@ in lifetime insertion. This includes direct heap values and stack/value
 tuples, structs, and enums containing managed fields; aggregates use
 generated deep retain/drop shims. `weak T` has separate weak
 retain/release operations and never increments its referent's strong count.
+Unique heap `:T` locals are outside ARC alias accounting: they use a
+count-free allocation, move one ownership credit, and receive only a final
+`unique_free`-backed release.
 
 ## 2. MIR instructions this pass introduces
 
 ```rust
 pub enum Instr {
     // ... ordinary instructions (Assign, Call, ...) ...
+    Clear(Local),
     Retain(Local),
     Release(Local),
     WeakRetain(Local),
@@ -32,6 +36,21 @@ path-sensitive scope, mutation, weak, and temporary cleanup while source
 structure is known. `insert_arc` then adds uniform alias/call binding
 retains over the finished CFG. Nothing upstream of MIR reasons about
 reference counts.
+
+`Clear` is the ownership-transfer marker for a unique heap move. Codegen
+stores null into the moved-from slot after its pointer has reached the
+destination. Lexical cleanup can therefore remain structural: releasing a
+moved-from slot is harmless, while the destination remains the sole owner.
+
+### 2.1 Unique allocation and ARC promotion
+
+Constructing `:T` calls `nether_rt_unique_alloc`, whose header stores only
+payload size and the drop callback—no strong or weak counters. Moves insert no
+`Retain`; final destruction dispatches to `nether_rt_unique_free`. The explicit
+`:T -> T` conversion calls `nether_rt_unique_promote`, which moves payload bytes
+into a fresh ARC block, deallocates the unique block without dropping the
+moved fields, and clears the source slot. `T -> :T` remains a Stage 3 `Clone`
+operation and is never implemented as relabeling.
 
 ## 3. Insertion rules
 

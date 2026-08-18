@@ -27,7 +27,10 @@ pub(super) fn collect_closure_locals(
                 collect_closure_locals(item, used, bound);
             }
         }
-        HirExprKind::ToString(inner)
+        HirExprKind::Borrow(inner)
+        | HirExprKind::Deref(inner)
+        | HirExprKind::PromoteUnique(inner)
+        | HirExprKind::ToString(inner)
         | HirExprKind::Unary { expr: inner, .. }
         | HirExprKind::Field { base: inner, .. }
         | HirExprKind::Loop { body: inner } => collect_closure_locals(inner, used, bound),

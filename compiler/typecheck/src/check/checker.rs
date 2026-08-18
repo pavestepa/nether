@@ -44,6 +44,10 @@ pub(super) struct Checker<'a> {
     pub(super) reference_origins: HashMap<LocalId, BorrowOrigin>,
     pub(super) closure_origins: HashMap<NodeId, Vec<ClosureOrigin>>,
     pub(super) local_callable_origins: HashMap<LocalId, Vec<ClosureOrigin>>,
+    pub(super) closure_captured_reference_uses: HashMap<NodeId, Vec<(LocalId, usize)>>,
+    pub(super) local_callable_capture_uses: HashMap<LocalId, Vec<(LocalId, usize)>>,
+    pub(super) deferred_closure_uses: Vec<HashSet<LocalId>>,
+    pub(super) pending_callable_releases: HashSet<LocalId>,
     pub(super) remaining_reference_uses: HashMap<LocalId, usize>,
     pub(super) nll_pinned: HashSet<LocalId>,
     pub(super) pending_nll_releases: HashSet<LocalId>,
@@ -88,6 +92,10 @@ impl<'a> Checker<'a> {
             reference_origins: HashMap::new(),
             closure_origins: HashMap::new(),
             local_callable_origins: HashMap::new(),
+            closure_captured_reference_uses: HashMap::new(),
+            local_callable_capture_uses: HashMap::new(),
+            deferred_closure_uses: Vec::new(),
+            pending_callable_releases: HashSet::new(),
             remaining_reference_uses: HashMap::new(),
             nll_pinned: HashSet::new(),
             pending_nll_releases: HashSet::new(),
@@ -131,6 +139,7 @@ impl<'a> Checker<'a> {
         for local in locals.into_iter().rev() {
             self.reference_origins.remove(&local);
             self.local_callable_origins.remove(&local);
+            self.release_callable_captures(local);
             if let Some((origin, mutable)) = self.borrow_origins.remove(&local) {
                 let mut remove_origin = false;
                 if let Some((shared, exclusive)) = self.active_borrows.get_mut(&origin) {
@@ -341,12 +350,6 @@ impl<'a> Checker<'a> {
             self.expr_types.insert(value.id, Type::Error);
             return Some((Type::Error, None, mutable));
         };
-        if alloc_kind(actual_inner, &self.resolved.definitions) != AllocKind::Heap {
-            self.err(
-                value.span,
-                "stored references to inline values are not implemented yet",
-            );
-        }
         if !actual_inner.compatible(expected_inner) {
             let expected = self.describe(expected_inner);
             let found = self.describe(actual_inner);
@@ -392,6 +395,10 @@ impl<'a> Checker<'a> {
         self.reference_origins.clear();
         self.closure_origins.clear();
         self.local_callable_origins.clear();
+        self.closure_captured_reference_uses.clear();
+        self.local_callable_capture_uses.clear();
+        self.deferred_closure_uses.clear();
+        self.pending_callable_releases.clear();
         self.remaining_reference_uses.clear();
         self.nll_pinned.clear();
         self.pending_nll_releases.clear();
@@ -472,7 +479,13 @@ impl<'a> Checker<'a> {
     }
 
     pub(super) fn note_local_use(&mut self, local: LocalId) {
-        if self.suppress_diagnostics || self.nll_pinned.contains(&local) {
+        if self.suppress_diagnostics
+            || self
+                .deferred_closure_uses
+                .iter()
+                .rev()
+                .any(|deferred| deferred.contains(&local))
+        {
             return;
         }
         let Some(remaining) = self.remaining_reference_uses.get_mut(&local) else {
@@ -482,27 +495,55 @@ impl<'a> Checker<'a> {
         if *remaining != 0 {
             return;
         }
-        self.pending_nll_releases.insert(local);
+        if self.local_callable_capture_uses.contains_key(&local) {
+            self.pending_callable_releases.insert(local);
+        }
+        if !self.nll_pinned.contains(&local) {
+            self.pending_nll_releases.insert(local);
+        }
     }
 
     fn flush_nll_releases(&mut self) {
+        let callable_releases = std::mem::take(&mut self.pending_callable_releases);
+        for callable in callable_releases {
+            self.release_callable_captures(callable);
+        }
         let releases = std::mem::take(&mut self.pending_nll_releases);
         for local in releases {
-            let Some((origin, mutable)) = self.borrow_origins.remove(&local) else {
-                continue;
-            };
-            let mut remove_origin = false;
-            if let Some((shared, exclusive)) = self.active_borrows.get_mut(&origin) {
-                if mutable {
-                    *exclusive = None;
-                } else {
-                    *shared = shared.saturating_sub(1);
+            self.release_reference_local(local);
+        }
+    }
+
+    fn release_callable_captures(&mut self, callable: LocalId) {
+        let Some(captures) = self.local_callable_capture_uses.remove(&callable) else {
+            return;
+        };
+        for (reference, uses) in captures {
+            if let Some(remaining) = self.remaining_reference_uses.get_mut(&reference) {
+                *remaining = remaining.saturating_sub(uses);
+                if *remaining == 0 {
+                    self.nll_pinned.remove(&reference);
+                    self.release_reference_local(reference);
                 }
-                remove_origin = *shared == 0 && exclusive.is_none();
             }
-            if remove_origin {
-                self.active_borrows.remove(&origin);
+        }
+    }
+
+    fn release_reference_local(&mut self, local: LocalId) {
+        let Some((origin, mutable)) = self.borrow_origins.remove(&local) else {
+            return;
+        };
+        let mut remove_origin = false;
+        if let Some((shared, exclusive)) = self.active_borrows.get_mut(&origin) {
+            if mutable {
+                *exclusive = None;
+            } else {
+                *shared = shared.saturating_sub(1);
             }
+            remove_origin = *shared == 0 && exclusive.is_none();
+        }
+        if remove_origin {
+            self.active_borrows.remove(&origin);
         }
     }
 
@@ -626,6 +667,25 @@ impl<'a> Checker<'a> {
                     if let Some(origins) = self.closure_origins.get(&let_stmt.value.id).cloned() {
                         self.local_callable_origins.insert(local, origins);
                     }
+                    if let Some(captures) = self
+                        .closure_captured_reference_uses
+                        .get(&let_stmt.value.id)
+                        .cloned()
+                    {
+                        for (reference, _) in &captures {
+                            self.nll_pinned.remove(reference);
+                        }
+                        self.local_callable_capture_uses.insert(local, captures);
+                        if self
+                            .remaining_reference_uses
+                            .get(&local)
+                            .copied()
+                            .unwrap_or(0)
+                            == 0
+                        {
+                            self.pending_callable_releases.insert(local);
+                        }
+                    }
                 }
                 let stored_origin = stored_borrow
                     .and_then(|(_, origin, mutable)| origin.map(|origin| (origin, mutable)))
@@ -691,7 +751,7 @@ fn count_local_uses_in_block(
     }
 }
 
-fn count_local_uses_in_expr(
+pub(super) fn count_local_uses_in_expr(
     expr: &Expr,
     resolved: &ResolvedNames,
     counts: &mut HashMap<LocalId, usize>,
@@ -772,14 +832,18 @@ fn count_local_uses_in_expr(
         }
         ExprKind::Block(block) => count_local_uses_in_block(block, resolved, counts, pinned, pin),
         ExprKind::While { cond, body } => {
-            count_local_uses_in_expr(cond, resolved, counts, pinned, true);
-            count_local_uses_in_block(body, resolved, counts, pinned, true);
+            // A loop may execute its subtree repeatedly, but the borrow only
+            // has to remain live through the loop expression itself. The
+            // checker re-walks the body silently and then once for real, so
+            // one static use count is sufficient and can expire afterward.
+            count_local_uses_in_expr(cond, resolved, counts, pinned, pin);
+            count_local_uses_in_block(body, resolved, counts, pinned, pin);
         }
         ExprKind::ForIn { iter, body, .. } => {
-            count_local_uses_in_expr(iter, resolved, counts, pinned, true);
-            count_local_uses_in_block(body, resolved, counts, pinned, true);
+            count_local_uses_in_expr(iter, resolved, counts, pinned, pin);
+            count_local_uses_in_block(body, resolved, counts, pinned, pin);
         }
-        ExprKind::Loop { body } => count_local_uses_in_block(body, resolved, counts, pinned, true),
+        ExprKind::Loop { body } => count_local_uses_in_block(body, resolved, counts, pinned, pin),
         ExprKind::Break(value) | ExprKind::Return(value) => {
             if let Some(value) = value {
                 count_local_uses_in_expr(value, resolved, counts, pinned, pin);

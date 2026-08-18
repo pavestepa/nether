@@ -87,6 +87,39 @@ fn main() {
 }
 
 #[test]
+fn unique_heap_moves_transfer_without_retain_and_clear_the_source() {
+    let functions = build(
+        r#"
+struct Dog { name String }
+fn consume(d: Dog) {}
+fn main() {
+    let first: Dog = :Dog { name = "Rex" };
+    let second: Dog = first;
+    consume(second);
+}
+"#,
+    );
+    let main = find_fn(&functions, "main");
+    assert!(
+        all_instrs(main)
+            .iter()
+            .any(|instr| matches!(instr, Instr::Clear(_))),
+        "a unique ownership transfer must clear its moved-from slot"
+    );
+    for instr in all_instrs(main) {
+        if let Instr::Retain(local) = instr {
+            assert!(
+                !matches!(
+                    main.local_decl(*local).ty,
+                    nether_typecheck::Type::Unique(_)
+                ),
+                "unique heap locals must never be retained"
+            );
+        }
+    }
+}
+
+#[test]
 fn explicit_early_return_with_no_tail_expression_terminates_correctly() {
     // A fn body consisting only of `return a;` (no trailing tail
     // expression) used to lower its dead fallthrough block's terminator

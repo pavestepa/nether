@@ -6,6 +6,15 @@ impl Mono<'_> {
         let kind = match &expr.kind {
             HirExprKind::Literal(l) => MonoExprKind::Literal(l.clone()),
             HirExprKind::Local(id) => MonoExprKind::Local(*id),
+            HirExprKind::Borrow(place) => {
+                MonoExprKind::Borrow(Box::new(self.subst_expr(place, subst)))
+            }
+            HirExprKind::Deref(reference) => {
+                MonoExprKind::Deref(Box::new(self.subst_expr(reference, subst)))
+            }
+            HirExprKind::PromoteUnique(value) => {
+                MonoExprKind::PromoteUnique(Box::new(self.subst_expr(value, subst)))
+            }
             HirExprKind::FnRef(fn_id) => {
                 let hir_fn = self.hir.get(*fn_id);
                 assert!(hir_fn.generics.is_empty(), "monomorphization: cannot take a bare reference to generic function `{}` without a call site to infer its type arguments from (see this crate's module docs)", hir_fn.name);
@@ -332,7 +341,7 @@ impl Mono<'_> {
         } else {
             domain
         };
-        let receiver_stripped_ty = receiver.ty.strip_unique();
+        let receiver_stripped_ty = receiver.ty.strip_indirection();
         if !is_static && method_name.as_str() == "into_string" && args.is_empty() {
             match receiver_stripped_ty {
                 Type::Primitive(_) => return MonoExprKind::ToString(Box::new(receiver)),
@@ -340,7 +349,7 @@ impl Mono<'_> {
                 _ => {}
             }
         }
-        let owner = owner_def_id(&receiver.ty, self.hir.array_owner).unwrap_or_else(|| {
+        let owner = owner_def_id(receiver_stripped_ty, self.hir.array_owner).unwrap_or_else(|| {
             panic!("monomorphization: generic method call's receiver substituted to non-nominal type {:?} (see this crate's module docs)", receiver.ty)
         });
         // `receiver.ty` is already fully substituted here (the caller

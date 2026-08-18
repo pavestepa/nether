@@ -95,6 +95,9 @@ pub enum ExprKind {
     /// `(a: i32, b: i32) => { a + b }` — language-spec §11. Nether has no
     /// nested named functions, only closures.
     Closure {
+        /// `move (...) => ...` explicitly transfers captured unique values
+        /// into the closure environment at closure creation.
+        move_capture: bool,
         params: Vec<Param>,
         body: Box<Expr>,
     },

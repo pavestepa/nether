@@ -138,6 +138,15 @@ impl Lowerer<'_> {
             }
             _ => return self.lower_value_path(path, None, &[], ty),
         };
+        if res.consumed == total
+            && matches!(current_ty, Type::MutRef(_))
+            && !matches!(ty, Type::Ref(_) | Type::MutRef(_))
+        {
+            return HirExpr {
+                kind: HirExprKind::Deref(Box::new(current)),
+                ty,
+            };
+        }
         for i in res.consumed..total {
             let seg = &path.segments[i];
             if i + 1 == total {
@@ -165,7 +174,7 @@ impl Lowerer<'_> {
         base_ty: &Type,
         ident: &Ident,
     ) -> (HirExpr, Type) {
-        let base_ty = base_ty.strip_unique();
+        let base_ty = base_ty.strip_indirection();
         if let Type::Struct(_, _) = base_ty {
             if let Some(fields) = self.sigs.named_type_fields(base_ty) {
                 if let Some(idx) = fields.iter().position(|(n, _)| n == &ident.name) {

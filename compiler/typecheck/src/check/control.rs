@@ -1,3 +1,4 @@
+use super::checker::count_local_uses_in_expr;
 use super::*;
 
 impl Checker<'_> {
@@ -686,10 +687,33 @@ impl Checker<'_> {
     pub(super) fn check_closure(
         &mut self,
         closure_id: NodeId,
+        move_capture: bool,
         params: &[nether_ast::Param],
         body: &Expr,
         expected: Option<&Type>,
     ) -> Type {
+        let outer_reference_locals = self
+            .locals
+            .iter()
+            .filter_map(|(local, (ty, _))| {
+                matches!(ty, Type::Ref(_) | Type::MutRef(_)).then_some(*local)
+            })
+            .collect::<HashSet<_>>();
+        let mut capture_counts = HashMap::new();
+        let mut ignored_pins = HashSet::new();
+        count_local_uses_in_expr(
+            body,
+            self.resolved,
+            &mut capture_counts,
+            &mut ignored_pins,
+            false,
+        );
+        capture_counts.retain(|local, _| outer_reference_locals.contains(local));
+        let captured_references = capture_counts.keys().copied().collect::<HashSet<_>>();
+        if !capture_counts.is_empty() {
+            self.closure_captured_reference_uses
+                .insert(closure_id, capture_counts.into_iter().collect());
+        }
         self.push_local_scope();
         let param_tys: Vec<Type> = params
             .iter()
@@ -716,9 +740,33 @@ impl Checker<'_> {
             }
             _ => None,
         };
+        let moved_before = self.moved.clone();
         let outer_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
+        self.deferred_closure_uses.push(captured_references);
         let ret_ty = self.check_expr_with_expected(body, expected_ret);
+        self.deferred_closure_uses.pop();
         self.loop_depth = outer_loop_depth;
+        if !move_capture {
+            let parameter_locals = params
+                .iter()
+                .filter_map(|param| self.resolved.locals.get(&param.id).copied())
+                .collect::<HashSet<_>>();
+            let implicit_moves = self
+                .moved
+                .iter()
+                .filter(|(local, _)| {
+                    !moved_before.contains_key(local) && !parameter_locals.contains(local)
+                })
+                .map(|(local, span)| (*local, *span))
+                .collect::<Vec<_>>();
+            for (local, span) in implicit_moves {
+                self.err(
+                    span,
+                    "capturing an owned value requires an explicit `move` closure",
+                );
+                self.moved.remove(&local);
+            }
+        }
         if matches!(ret_ty, Type::Ref(_) | Type::MutRef(_)) {
             let param_indices = params
                 .iter()

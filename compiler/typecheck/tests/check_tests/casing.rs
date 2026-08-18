@@ -80,6 +80,36 @@ fn main() {
 }
 
 #[test]
+fn allow_pascal_case_suppresses_only_the_alias_casing_diagnostic() {
+    assert_ok(
+        r#"
+struct point {
+    x f32,
+    y f32
+}
+#[allow_pascal_case]
+type Coord = point;
+
+fn main() {
+}
+"#,
+    );
+
+    assert_ok(
+        r#"
+struct Dog {
+    name String
+}
+#[allow_pascal_case]
+type pet = Dog;
+
+fn main() {
+}
+"#,
+    );
+}
+
+#[test]
 fn enum_aliases_are_exempt_from_casing_validation_even_when_lowercase() {
     // `Option`/`Result`-shaped enums stay PascalCase-by-convention and
     // inline regardless of an alias's own casing (the same exemption

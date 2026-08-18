@@ -12,7 +12,6 @@ use crate::sig::{
     EnumSig, FnSig, GenericBound, MethodSet, ReceiverDomain, ReturnOrigin, Signatures, TypeShape,
 };
 use crate::ty::{PrimitiveKind, Type};
-use crate::{alloc_kind, AllocKind};
 
 mod call;
 mod casing;

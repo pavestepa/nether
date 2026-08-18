@@ -34,11 +34,11 @@ orthogonal to representation category (§3 below), not a replacement for
 it. `typecheck` uses them for ownership-domain compatibility, move checking,
 borrow exclusivity, returned-reference origins, and last-use shortening.
 `HirLowerer::ty_of`/`local_ty`/`lower_fn`'s parameter and return handling
-still strip `Unique` before MIR/codegen because the current lowering gives
-`:T` the same runtime representation as `T` (§3.2); an unrefcounted `:T`
-representation remains Stage 2 work. `Ref`/`MutRef` are not stripped the
-same way (they are pointer representations), but codegen currently supports
-them only for heap-category referents — see the language spec.
+preserve heap `Unique` through MIR/codegen so it selects the unrefcounted
+unique allocator and move-without-retain rules. `Ref`/`MutRef` are pointer
+representations; inline references lower through explicit HIR/MIR
+address-of/dereference operations, while heap references reuse the object
+pointer ABI — see the language spec.
 
 `Struct`/`TupleStruct`/`Enum` carry their concrete type arguments.
 `Option<T>` and `Result<T, E>` are represented exactly as `Enum` values;

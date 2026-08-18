@@ -361,8 +361,8 @@ fn main() {
 }
 
 #[test]
-fn loop_and_closure_uses_remain_lexically_pinned() {
-    assert_err(
+fn closure_capture_borrow_ends_after_the_closures_last_use() {
+    assert_ok(
         r#"
 struct Dog { name String }
 fn consume(d: Dog) {}
@@ -374,6 +374,25 @@ fn main() {
     consume(dog);
 }
 "#,
-        "while it is borrowed",
+    );
+}
+
+#[test]
+fn nll_releases_a_borrow_after_its_last_loop_use() {
+    assert_ok(
+        r#"
+struct Dog { name String }
+fn consume(d: Dog) {}
+fn main() {
+    let dog: Dog = :Dog { name = "Rex" };
+    let view: &Dog = dog;
+    let mut running = true;
+    while running {
+        println(view.name);
+        running = false;
+    }
+    consume(dog);
+}
+"#,
     );
 }

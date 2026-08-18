@@ -71,7 +71,7 @@ use nether_llvm::{Codegen, Func, ModuleCx};
 use nether_mir::MirFunction;
 use nether_monomorphization::MonoFnId;
 use nether_resolver::{DefId, Definitions};
-use nether_typecheck::Signatures;
+use nether_typecheck::{Signatures, Type};
 
 pub use layout::Layout;
 pub use runtime::Runtime;
@@ -159,7 +159,9 @@ fn declare<'ctx>(m: &ModuleCx<'ctx>, layout: &Layout<'_, 'ctx>, f: &MirFunction)
     }
     param_tys.extend(f.params.iter().map(|&p| {
         let decl = f.local_decl(p);
-        if decl.mutable || function::is_aggregate(&decl.ty, layout.defs) {
+        if (decl.mutable && !matches!(decl.ty, Type::Ref(_) | Type::MutRef(_)))
+            || function::is_aggregate(&decl.ty, layout.defs)
+        {
             m.ptr_type()
         } else {
             layout.llvm_type(&decl.ty)
