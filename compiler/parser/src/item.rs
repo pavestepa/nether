@@ -53,7 +53,16 @@ impl Parser {
             Token::Keyword(Keyword::Type) => self
                 .parse_type_alias_decl(doc, visibility, start, allow_pascal_case)
                 .map(Item::TypeAlias),
-            Token::Keyword(Keyword::Impl) => self.parse_impl_block().map(Item::Impl),
+            Token::Keyword(Keyword::Impl) => self.parse_impl_block(false, start).map(Item::Impl),
+            Token::Keyword(Keyword::Default) => {
+                self.bump();
+                if !matches!(self.peek(), Token::Keyword(Keyword::Impl)) {
+                    self.error(self.peek_span(), "`default` is only valid before `impl`");
+                    None
+                } else {
+                    self.parse_impl_block(true, start).map(Item::Impl)
+                }
+            }
             Token::Keyword(Keyword::Enum) => self
                 .parse_enum_decl(doc, visibility, start, derived_traits)
                 .map(Item::Enum),
@@ -155,6 +164,7 @@ impl Parser {
                 Token::Keyword(Keyword::Struct)
                     | Token::Keyword(Keyword::Type)
                     | Token::Keyword(Keyword::Impl)
+                    | Token::Keyword(Keyword::Default)
                     | Token::Keyword(Keyword::Enum)
                     | Token::Keyword(Keyword::Trait)
                     | Token::Keyword(Keyword::Fn)
@@ -289,8 +299,8 @@ impl Parser {
         }
     }
 
-    fn parse_impl_block(&mut self) -> Option<ImplBlock> {
-        let start = self.expect_keyword(Keyword::Impl);
+    fn parse_impl_block(&mut self, is_default: bool, start: Span) -> Option<ImplBlock> {
+        self.expect_keyword(Keyword::Impl);
         let id = self.next_id();
         let mut generics = self.parse_optional_generic_params();
         let target = self.expect_ident();
@@ -311,6 +321,7 @@ impl Parser {
         let end = self.expect_punct(Punct::RBrace, "to close an impl body");
         Some(ImplBlock {
             id,
+            is_default,
             generics,
             target,
             target_args,

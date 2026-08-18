@@ -69,7 +69,7 @@ fn concrete_specialization_overrides_the_generic_impl() {
     std::fs::write(
         &entry,
         r#"
-impl<T> Option<T> {
+default impl<T> Option<T> {
     describe(self) String {
         return "generic";
     }

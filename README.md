@@ -18,6 +18,7 @@ The compiler implements:
   generic monomorphization;
 - multiple generic bounds with canonical `<T TraitA + TraitB>` syntax;
 - equivalent `where T TraitA + TraitB` clauses on generic declarations;
+- explicit `default impl` fallbacks with concrete instance-method specialization;
 - HIR, closure conversion, CFG-based MIR, and ARC insertion;
 - structs, tuples, enums/match, arrays, weak references, and closures;
 - local multi-file modules through `use`;
@@ -202,10 +203,9 @@ Async, threads, unsafe code, and dynamic trait dispatch are not implemented; see
 [`docs/architecture/roadmap.md`](docs/architecture/roadmap.md) for which
 stage adds each of those.
 
-Current deliberate limits are local generic inference (no
-where-clauses or associated types; concrete specialization exists but is
-scoped to instance methods only, see `docs/generics.md`), one bound per
-generic parameter, no general import aliases/globs/re-exports (bundled
+Current deliberate limits are local generic inference (no associated types;
+concrete specialization is scoped to instance methods only, see
+`docs/generics.md`), no general import aliases/globs/re-exports (bundled
 `stdlib/mod.nr` is a special-cased exception, see "Modules and standard
 library" above), a flattened/non-union enum layout, and native linking
 only for the host target. Cross-target object emission is supported.

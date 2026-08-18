@@ -221,9 +221,9 @@ The end-to-end native pipeline is implemented. The compiler is an
 experimental alpha/MVP rather than a production toolchain: it has no
 package manager or incremental compilation, imports have no aliases,
 globs or re-exports, inline modules are absent,
-generics intentionally omit where-clauses/associated types/const generics
-(instance-method specialization for one concrete instantiation is
-supported — see `../generics.md`), the standard library is small, enums use
+generics intentionally omit associated types/const generics
+(`where` clauses, multiple bounds, and `default impl` instance-method
+specialization are supported — see `../generics.md`), the standard library is small, enums use
 a space-inefficient flat layout, and linking is host-only (cross-target
 object emission is supported).
 

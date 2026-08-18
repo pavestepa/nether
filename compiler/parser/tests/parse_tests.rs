@@ -367,7 +367,7 @@ fn explicit_generic_impl_block_parses_generics_and_target_args() {
     // with both new fields empty.
     let module = parse_ok(
         r#"
-impl<T> Option<T> {
+default impl<T> Option<T> {
     is_some(self) bool {
         true
     }
@@ -388,6 +388,7 @@ impl Boxed {
         panic!("expected ImplBlock")
     };
     assert_eq!(explicit.target.name.as_str(), "Option");
+    assert!(explicit.is_default);
     assert_eq!(explicit.generics.len(), 1);
     assert_eq!(explicit.generics[0].name.name.as_str(), "T");
     assert_eq!(explicit.target_args.len(), 1);
@@ -401,6 +402,7 @@ impl Boxed {
         panic!("expected ImplBlock")
     };
     assert_eq!(implicit.target.name.as_str(), "Boxed");
+    assert!(!implicit.is_default);
     assert!(implicit.generics.is_empty());
     assert!(implicit.target_args.is_empty());
 }

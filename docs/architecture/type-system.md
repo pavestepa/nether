@@ -87,8 +87,9 @@ the same substitution map before expected-return and ordinary-argument
 inference; receiver-fixed owner parameters are excluded from the explicit
 method list. The fully resolved arguments are recorded by call `NodeId` so
 HIR and monomorphization do not need to re-infer an otherwise opaque
-parameter. There are no higher-kinded types, associated types,
-where-clauses, specialization, or blanket implementations.
+parameter. There are no higher-kinded types, associated types, const generics,
+or blanket implementations. Multiple bounds, `where` clauses, and concrete
+instance-method specialization through `default impl` are supported.
 
 ## 3. Allocation classification
 

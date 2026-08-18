@@ -116,7 +116,7 @@ pub struct Field {
     pub visibility: Visibility,
 }
 
-/// `impl Dog { ... }` or `impl Dog: Sound { ... }` (language-spec §6-7).
+/// `impl Dog { ... }` or `impl Dog Sound { ... }` (language-spec §6-7).
 ///
 /// A target's own generic parameters are normally implicit — declared once
 /// on the `type`/`enum` and automatically in scope in every `impl` block
@@ -125,11 +125,14 @@ pub struct Field {
 /// only way to bind a type parameter for an owner with no local
 /// declaration to point at (the compiler-builtin `Option`/`Result`). Both
 /// are empty for the implicit form. When present, `target_args` must be
-/// exactly a permutation of `generics`' names — positional renaming only,
-/// not specialization (`impl Option<i32>` stays unsupported).
+/// exactly a permutation of `generics`' names — positional renaming. A
+/// concrete target such as `impl Option<i32>` is a specialization; it may
+/// override instance methods only when the generic fallback is `default`.
 #[derive(Debug, Clone)]
 pub struct ImplBlock {
     pub id: NodeId,
+    /// A generic fallback which explicitly permits concrete overrides.
+    pub is_default: bool,
     pub generics: Vec<GenericParam>,
     pub target: Ident,
     pub target_args: Vec<TypeExpr>,

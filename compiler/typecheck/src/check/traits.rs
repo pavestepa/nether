@@ -171,6 +171,7 @@ pub(super) fn build_impl_methods(
         name: Symbol,
         name_span: Span,
         specialization: Option<Vec<Type>>,
+        is_default: bool,
         sig: FnSig,
     }
     let mut raw = Vec::new();
@@ -181,6 +182,12 @@ pub(super) fn build_impl_methods(
         };
         let owner_generics = owner_generics_for_impl(b, owner, decls, resolved, diags);
         let specialization = impl_specialization_args(b, owner, decls, resolved, diags);
+        if b.is_default && (specialization.is_some() || owner_generics.is_empty()) {
+            diags.push(
+                Diagnostic::error("`default impl` must be a generic fallback implementation")
+                    .with_label(b.span, "this implementation is not a generic fallback"),
+            );
+        }
         if let Some(args) = &specialization {
             sigs.impl_specializations.insert(b.id, args.clone());
             if !b.traits.is_empty() {
@@ -212,6 +219,7 @@ pub(super) fn build_impl_methods(
                 name: m.name.name.clone(),
                 name_span: m.name.span,
                 specialization: specialization.clone(),
+                is_default: b.is_default,
                 sig,
             });
         }
@@ -282,6 +290,21 @@ pub(super) fn build_impl_methods(
         let Some(generic_sig) = sets.get(&key).and_then(|set| set.generic.as_ref()) else {
             continue;
         };
+        if raw.iter().any(|generic| {
+            generic.owner == entry.owner
+                && generic.name == entry.name
+                && generic.specialization.is_none()
+                && ReceiverDomain::of_self_param(generic.sig.self_param.as_ref()) == domain
+                && !generic.is_default
+        }) {
+            diags.push(
+                Diagnostic::error(format!(
+                    "method `{}` cannot be specialized because its generic implementation is not `default`",
+                    entry.name
+                ))
+                .with_label(entry.name_span, "concrete override declared here"),
+            );
+        }
         if !specialization_matches_generic(entry.owner, decls, generic_sig, args, &entry.sig) {
             diags.push(
                 Diagnostic::error(format!(

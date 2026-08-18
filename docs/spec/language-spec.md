@@ -653,8 +653,7 @@ impl Dog Sound {
 }
 ```
 
-Not yet implemented: associated types/constants, const generics,
-specialization, existential
+Not yet implemented: associated types/constants, const generics, existential
 (`any Trait`) and opaque (`some Trait`) types, blanket/conditional impls —
 all **Stage 3**. A trait name still cannot be used as a bare value
 type today; it may only appear as a generic bound. Multiple traits on one
@@ -797,7 +796,8 @@ Full retain/release insertion rules live in
 | `#[allow_pascal_case]` on type aliases | **Stage 3 — done** |
 | Multiple inline generic bounds (`T A + B`) | **Stage 3 — done** |
 | `where` clauses on generic declarations | **Stage 3 — done** |
-| Associated types, const generics, specialization, `any`/`some` | Stage 3 |
+| `default impl` with concrete instance-method specialization | **Stage 3 — done** |
+| Associated types, const generics, `any`/`some` | Stage 3 |
 | Development-mode witness-table generics dispatch | Stage 3 |
 | async/await, Tokio runtime bridge | Stage 4 |
 | unsafe, raw pointers, C ABI FFI | Stage 5 |

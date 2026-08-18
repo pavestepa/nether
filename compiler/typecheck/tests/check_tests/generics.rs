@@ -356,7 +356,7 @@ fn impl_concrete_specialization_type_checks_and_runs() {
     // the generic one once substituted (below).
     assert_ok(
         r#"
-impl<T> Option<T> {
+default impl<T> Option<T> {
     describe(self) String {
         return "generic";
     }
@@ -423,7 +423,7 @@ impl Option<i32> { double(self) i32 { 1 } }
 fn impl_specialization_rejects_a_signature_mismatch_with_the_generic_impl() {
     assert_err(
         r#"
-impl<T> Option<T> {
+default impl<T> Option<T> {
     describe(self) String { return "generic"; }
 }
 impl Option<i32> {
@@ -452,5 +452,20 @@ impl Option<i32> Sound {
 }
 "#,
         "cannot also implement a trait",
+    );
+}
+
+#[test]
+fn specialization_requires_an_explicit_default_generic_impl() {
+    assert_err(
+        r#"
+impl<T> Option<T> { describe(self) String { return "generic"; } }
+impl Option<i32> { describe(self) String { return "int"; } }
+"#,
+        "generic implementation is not `default`",
+    );
+    assert_err(
+        "default impl Option<i32> { describe(self) String { return \"int\"; } }",
+        "must be a generic fallback implementation",
     );
 }

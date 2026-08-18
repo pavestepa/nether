@@ -114,9 +114,10 @@ Front-end-invalid programs stop here. In particular, mismatched pattern
 kind/arity/enum and recursively infinite stack layouts are diagnostics,
 not late MIR/codegen failures.
 
-Current generic limits: one inline bound per parameter and no where
-clauses, associated types, specialization or first-class unspecialized
-generic function values.
+Current generic limits: no associated types, const generics, blanket
+implementations, static/trait specialization, or first-class unspecialized
+generic function values. Multiple bounds, `where` clauses, and concrete
+instance-method overrides of an explicit `default impl` are supported.
 
 ## `compiler/hir`
 

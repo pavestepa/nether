@@ -43,9 +43,10 @@
 //!   expected return type, but remains local to one call.
 //! - `loop`'s own type is always `()` — a `break value` inside a `loop` is
 //!   type-checked but not unified into the loop expression's result type.
-//! - The source grammar permits one trait bound per generic
-//!   parameter; there are no where-clauses, associated types, blanket
-//!   implementations, or specialization.
+//! - Generic parameters permit multiple inline bounds and `where` clauses.
+//!   Associated types, blanket implementations, and specialization of static
+//!   methods or trait conformance remain unsupported; instance methods support
+//!   explicit `default impl` plus concrete overrides.
 
 mod alloc;
 mod check;

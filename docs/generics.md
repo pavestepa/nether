@@ -18,7 +18,7 @@ otherwise exercise.
 | Generic structs and tuple structs | Supported |
 | Generic enums | Supported |
 | Generic traits | Supported |
-| Bounds such as `T: Sound` and `T: Convert<String>` | Supported |
+| Bounds such as `T Sound` and `T Convert<String>` | Supported |
 | Generic trait inheritance | Supported |
 | Multiple effective bounds through trait inheritance | Supported |
 | Local type-argument inference | Supported |
@@ -26,10 +26,10 @@ otherwise exercise.
 | Monomorphization | Supported |
 | Explicit call arguments such as `f<i32>()` | Supported |
 | Explicit `impl<T> Boxed<T> { ... }` (positional renaming only) | Supported |
-| Concrete specialization (`impl Boxed<i32> { ... }`), instance methods only | Supported |
+| `default impl` + concrete specialization, instance methods only | Supported |
 | Non-generic type aliases (`type Name = TypeExpr;`) | Supported |
-| `where` clauses | Not supported |
-| Multiple inline bounds such as `T: A + B` | Not supported |
+| `where` clauses | Supported |
+| Multiple inline bounds such as `T A + B` | Supported |
 | Associated types | Not supported |
 | Specialization of static methods or trait conformance | Not supported |
 | Blanket implementations | Not supported |
@@ -741,7 +741,7 @@ concrete argument list after the target — overrides a generic impl's
 method for exactly one instantiation:
 
 ```nether
-impl<T> Boxed<T> {
+default impl<T> Boxed<T> {
     describe(self) String {
         "generic"
     }
@@ -777,7 +777,9 @@ concrete receiver or is itself still inside another generic function
 that later gets monomorphized for a matching concrete type.
 
 A specialization's method must have the same signature as the generic
-version when both exist (only the body may differ) — specialization
+version when both exist (only the body may differ), and that generic
+fallback must be declared with `default impl`. An ordinary generic `impl`
+cannot be overridden. Specialization
 overrides behavior, not the type a caller sees, since a still-generic
 caller can only ever check against the one generic signature. Static
 methods and trait conformance cannot yet be specialized — a
