@@ -109,7 +109,7 @@ pub struct HirFunction {
     /// function's entry block — has no other way to discover which local
     /// that is.
     pub self_local: Option<HirLocalId>,
-    pub generics: Vec<(Symbol, Option<GenericBound>)>,
+    pub generics: Vec<(Symbol, Vec<GenericBound>)>,
     pub params: Vec<HirParam>,
     pub ret: Type,
     pub body: HirExpr,
@@ -149,6 +149,10 @@ pub enum HirExprKind {
     Deref(Box<HirExpr>),
     /// Transfers a unique heap allocation into the ARC domain (`to<T>`).
     PromoteUnique(Box<HirExpr>),
+    /// Structurally clones an ARC heap object into a fresh unique allocation.
+    CloneToUnique(Box<HirExpr>),
+    /// Computes a compiler-derived deterministic structural hash.
+    Hash(Box<HirExpr>),
     /// A reference to a function/method value that isn't being called
     /// directly here. Monomorphization turns it into a closure-ABI adapter.
     FnRef(HirFnId),

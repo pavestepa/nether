@@ -35,12 +35,22 @@ fn builtin_definitions() -> Definitions {
     // `print` above: no real `FnSig` backs it, `nether_typecheck::check::
     // call::resolve_fn_value` special-cases the name directly.
     defs.insert_builtin(Symbol::new("to"), DefKind::Fn);
+    // `hash(value)` computes the compiler-derived structural hash of a
+    // type which explicitly opts into the `Hash` marker below.
+    defs.insert_builtin(Symbol::new("hash"), DefKind::Fn);
 
     // `Into<T>` is the compiler-known conversion trait from
     // language-spec §7.1. Its concrete `Into<String>` convention is used
     // by interpolation and the print builtins; user-defined conversions
     // still use ordinary `impl Type: Into<T>` blocks.
     defs.insert_builtin(Symbol::new("Into"), DefKind::Trait);
+    // `Clone` is a compiler-known marker trait. An implementation opts a
+    // user struct into the synthesized structural clone used by `T -> :T`.
+    defs.insert_builtin(Symbol::new("Clone"), DefKind::Trait);
+    // `Eq` opts a type into compiler-derived structural `==`/`!=`.
+    defs.insert_builtin(Symbol::new("Eq"), DefKind::Trait);
+    // `Hash` opts a type into compiler-derived structural hashing.
+    defs.insert_builtin(Symbol::new("Hash"), DefKind::Trait);
 
     defs
 }

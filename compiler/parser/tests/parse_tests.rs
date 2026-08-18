@@ -247,7 +247,7 @@ enum Result<T, E> {
     };
     assert_eq!(result.generics.len(), 2);
     assert_eq!(result.generics[0].name.name.as_str(), "T");
-    assert!(result.generics[0].bound.is_none());
+    assert!(result.generics[0].bounds.is_empty());
 }
 
 #[test]
@@ -289,7 +289,7 @@ fn generic_bound_on_fn() {
         panic!("expected FnDecl")
     };
     assert_eq!(f.generics.len(), 1);
-    let bound = f.generics[0].bound.as_ref().expect("expected a bound");
+    let bound = f.generics[0].bounds.first().expect("expected a bound");
     let nether_ast::TypeExpr::Named { path, .. } = bound else {
         panic!("expected a Named bound")
     };
@@ -303,12 +303,30 @@ fn generic_bound_can_itself_be_generic() {
     let Item::Fn(f) = &module.items[0] else {
         panic!("expected FnDecl")
     };
-    let bound = f.generics[0].bound.as_ref().expect("expected a bound");
+    let bound = f.generics[0].bounds.first().expect("expected a bound");
     let nether_ast::TypeExpr::Named { path, generics, .. } = bound else {
         panic!("expected a Named bound")
     };
     assert_eq!(path.segments[0].name.as_str(), "Into");
     assert_eq!(generics.len(), 1);
+}
+
+#[test]
+fn generic_parameter_accepts_multiple_bounds() {
+    let module = parse_ok("fn describe<T Sound + Named>(value T) {}\n");
+    let Item::Fn(f) = &module.items[0] else {
+        panic!("expected FnDecl")
+    };
+    assert_eq!(f.generics[0].bounds.len(), 2);
+    let names: Vec<_> = f.generics[0]
+        .bounds
+        .iter()
+        .map(|bound| match bound {
+            nether_ast::TypeExpr::Named { path, .. } => path.segments[0].name.as_str(),
+            _ => panic!("expected named bound"),
+        })
+        .collect();
+    assert_eq!(names, ["Sound", "Named"]);
 }
 
 #[test]

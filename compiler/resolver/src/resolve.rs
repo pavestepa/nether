@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use nether_ast::{
     Block, EnumDecl, Expr, ExprKind, FnDecl, GenericParam, ImplBlock, Item, Module, NodeId, Param,
-    Path, Pattern, Stmt, Symbol, StructDecl, TypeExpr, UseDecl,
+    Path, Pattern, Stmt, StructDecl, Symbol, TypeExpr, UseDecl,
 };
 use nether_diagnostics::Diagnostic;
 
@@ -193,7 +193,7 @@ impl Resolver<'_> {
             Item::Trait(i) => {
                 self.push_generics(&i.generics);
                 for generic in &i.generics {
-                    if let Some(bound) = &generic.bound {
+                    for bound in &generic.bounds {
                         self.resolve_type_expr(bound);
                     }
                 }
@@ -217,7 +217,7 @@ impl Resolver<'_> {
     fn resolve_struct_decl(&mut self, t: &StructDecl) {
         self.push_generics(&t.generics);
         for g in &t.generics {
-            if let Some(bound) = &g.bound {
+            for bound in &g.bounds {
                 self.resolve_type_expr(bound);
             }
         }
@@ -243,7 +243,7 @@ impl Resolver<'_> {
     fn resolve_enum_decl(&mut self, e: &EnumDecl) {
         self.push_generics(&e.generics);
         for g in &e.generics {
-            if let Some(bound) = &g.bound {
+            for bound in &g.bounds {
                 self.resolve_type_expr(bound);
             }
         }
@@ -268,7 +268,7 @@ impl Resolver<'_> {
         if !b.generics.is_empty() || !b.target_args.is_empty() {
             self.push_generics(&b.generics);
             for g in &b.generics {
-                if let Some(bound) = &g.bound {
+                for bound in &g.bounds {
                     self.resolve_type_expr(bound);
                 }
             }
@@ -307,7 +307,7 @@ impl Resolver<'_> {
     fn resolve_fn_decl(&mut self, f: &FnDecl) {
         self.push_generics(&f.generics);
         for g in &f.generics {
-            if let Some(bound) = &g.bound {
+            for bound in &g.bounds {
                 self.resolve_type_expr(bound);
             }
         }

@@ -21,9 +21,10 @@ pub(super) fn build_type_shapes(
                 .iter()
                 .map(|generic| {
                     generic
-                        .bound
-                        .as_ref()
-                        .and_then(|bound| lower_generic_bound(bound, resolved, decls, diags))
+                        .bounds
+                        .iter()
+                        .filter_map(|bound| lower_generic_bound(bound, resolved, decls, diags))
+                        .collect()
                 })
                 .collect(),
         );
@@ -73,9 +74,10 @@ pub(super) fn build_enum_sigs(
                 .iter()
                 .map(|generic| {
                     generic
-                        .bound
-                        .as_ref()
-                        .and_then(|bound| lower_generic_bound(bound, resolved, decls, diags))
+                        .bounds
+                        .iter()
+                        .filter_map(|bound| lower_generic_bound(bound, resolved, decls, diags))
+                        .collect()
                 })
                 .collect(),
         );
@@ -406,14 +408,17 @@ pub(super) fn specialize_fn_sig(sig: &FnSig, subst: &HashMap<Symbol, Type>) -> F
             .map(|(name, bound)| {
                 (
                     name.clone(),
-                    bound.as_ref().map(|bound| GenericBound {
-                        trait_id: bound.trait_id,
-                        args: bound
-                            .args
-                            .iter()
-                            .map(|arg| substitute_generic(arg, subst))
-                            .collect(),
-                    }),
+                    bound
+                        .iter()
+                        .map(|bound| GenericBound {
+                            trait_id: bound.trait_id,
+                            args: bound
+                                .args
+                                .iter()
+                                .map(|arg| substitute_generic(arg, subst))
+                                .collect(),
+                        })
+                        .collect(),
                 )
             })
             .collect(),
@@ -440,7 +445,7 @@ pub(super) fn owner_generic_params(
     decls: &DeclIndex,
     resolved: &ResolvedNames,
     diags: &mut Vec<Diagnostic>,
-) -> Vec<(Symbol, Option<GenericBound>)> {
+) -> Vec<(Symbol, Vec<GenericBound>)> {
     let generics = decls
         .type_decls
         .get(&owner)
@@ -458,9 +463,10 @@ pub(super) fn owner_generic_params(
             (
                 generic.name.name.clone(),
                 generic
-                    .bound
-                    .as_ref()
-                    .and_then(|bound| lower_generic_bound(bound, resolved, decls, diags)),
+                    .bounds
+                    .iter()
+                    .filter_map(|bound| lower_generic_bound(bound, resolved, decls, diags))
+                    .collect(),
             )
         })
         .collect()
@@ -498,7 +504,7 @@ pub(super) fn explicit_impl_owner_generics(
     decls: &DeclIndex,
     resolved: &ResolvedNames,
     diags: &mut Vec<Diagnostic>,
-) -> Vec<(Symbol, Option<GenericBound>)> {
+) -> Vec<(Symbol, Vec<GenericBound>)> {
     let owner_name = resolved.definitions.get(owner).name.clone();
     let expected = owner_arity(owner, decls);
 
@@ -509,9 +515,10 @@ pub(super) fn explicit_impl_owner_generics(
             .map(|g| {
                 (
                     g.name.name.clone(),
-                    g.bound
-                        .as_ref()
-                        .and_then(|bound| lower_generic_bound(bound, resolved, decls, diags)),
+                    g.bounds
+                        .iter()
+                        .filter_map(|bound| lower_generic_bound(bound, resolved, decls, diags))
+                        .collect(),
                 )
             })
             .collect::<Vec<_>>()
@@ -575,13 +582,18 @@ pub(super) fn explicit_impl_owner_generics(
     ordered_names
         .into_iter()
         .map(|name| {
-            let bound = block
+            let bounds = block
                 .generics
                 .iter()
                 .find(|g| g.name.name == name)
-                .and_then(|g| g.bound.as_ref())
-                .and_then(|bound| lower_generic_bound(bound, resolved, decls, diags));
-            (name, bound)
+                .map(|g| {
+                    g.bounds
+                        .iter()
+                        .filter_map(|bound| lower_generic_bound(bound, resolved, decls, diags))
+                        .collect()
+                })
+                .unwrap_or_default();
+            (name, bounds)
         })
         .collect()
 }
@@ -598,7 +610,7 @@ pub(super) fn owner_generics_for_impl(
     decls: &DeclIndex,
     resolved: &ResolvedNames,
     diags: &mut Vec<Diagnostic>,
-) -> Vec<(Symbol, Option<GenericBound>)> {
+) -> Vec<(Symbol, Vec<GenericBound>)> {
     if !block.generics.is_empty() {
         explicit_impl_owner_generics(block, owner, decls, resolved, diags)
     } else if block.target_args.is_empty() {

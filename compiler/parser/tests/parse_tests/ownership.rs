@@ -33,6 +33,24 @@ fn item_attributes_reject_unknown_names_and_wrong_targets() {
 }
 
 #[test]
+fn prefix_trait_list_lowers_into_declaration_trait_opt_ins() {
+    let module = parse_ok(
+        r#"
+Clone + Equatable struct Point { x i32 }
+Clone enum State { Ready }
+"#,
+    );
+    let Item::Struct(point) = &module.items[0] else {
+        panic!("expected StructDecl")
+    };
+    assert_eq!(point.traits.len(), 2);
+    let Item::Enum(state) = &module.items[1] else {
+        panic!("expected EnumDecl")
+    };
+    assert_eq!(state.traits.len(), 1);
+}
+
+#[test]
 fn let_binding_forms_distinguish_arc_owned_and_inline() {
     let module = parse_ok(
         r#"

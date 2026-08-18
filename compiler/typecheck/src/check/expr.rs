@@ -277,6 +277,13 @@ impl Checker<'_> {
                         rhs.span,
                         "both operands of `==`/`!=` must have the same type",
                     );
+                } else if self.sigs.declares_eq(&lhs_ty, &self.resolved.definitions)
+                    && !self.sigs.can_derive_eq(&lhs_ty, &self.resolved.definitions)
+                {
+                    self.err(
+                        lhs.span,
+                        "cannot derive `Eq` for this type — every field must be primitive or another finite `Eq` struct",
+                    );
                 }
                 Type::Primitive(PrimitiveKind::Bool)
             }

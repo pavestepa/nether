@@ -110,6 +110,23 @@ impl Lang Into<String> {
 }
 
 #[test]
+fn clone_to_unique_allocates_and_retains_copied_fields() {
+    let (_cg, ir) = compile(
+        r#"
+Clone struct Dog { name String }
+fn main() {
+    let original = Dog { name = "Rex" };
+    let owned: Dog = to(original);
+    println(owned.name);
+}
+"#,
+    );
+    assert!(ir.contains("nether_rt_unique_alloc"), "{ir}");
+    assert!(ir.contains("nether_shim_retain"), "{ir}");
+    assert!(ir.contains("llvm.memcpy"), "{ir}");
+}
+
+#[test]
 fn arithmetic_and_control_flow_compiles() {
     let (_cg, ir) = compile(
         r#"

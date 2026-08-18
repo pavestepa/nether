@@ -151,7 +151,15 @@ impl Lowerer<'_> {
                     },
                 }
             }
-            Type::Generic(name) => match self.generics.get(name).cloned().flatten() {
+            Type::Generic(name) => match self.generics.get(name).and_then(|bounds| {
+                bounds
+                    .iter()
+                    .find(|bound| {
+                        self.resolved.definitions.get(bound.trait_id).name.as_str() == "Into"
+                            && bound.args == [Type::String]
+                    })
+                    .cloned()
+            }) {
                 Some(bound) => HirExpr {
                     ty: Type::String,
                     kind: HirExprKind::CallGenericMethod {

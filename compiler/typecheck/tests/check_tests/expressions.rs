@@ -266,3 +266,65 @@ fn main() {
         "found `String`",
     );
 }
+
+#[test]
+fn derived_eq_accepts_structural_fields_and_rejects_unsupported_fields() {
+    assert_ok(
+        r#"
+Eq struct Point { x i32, y i32 }
+fn main() {
+    let a = Point { x = 1, y = 2 };
+    let b = Point { x = 1, y = 2 };
+    println(`${a == b}`);
+}
+"#,
+    );
+
+    assert_err(
+        r#"
+Eq struct Named { name String }
+fn main() {
+    let a = Named { name = "same" };
+    let b = Named { name = "same" };
+    println(`${a == b}`);
+}
+"#,
+        "cannot derive `Eq`",
+    );
+}
+
+#[test]
+fn derived_hash_accepts_structural_fields_and_rejects_unsupported_fields() {
+    assert_ok(
+        r#"
+Hash struct Point { x i32, y i32 }
+Hash struct Wrapped { point: Point }
+fn main() {
+    let value = Wrapped { point = :Point { x = 1, y = 2 } };
+    let fingerprint u64 = hash(value);
+}
+"#,
+    );
+
+    assert_err(
+        r#"
+Hash struct Named { name String }
+fn main() {
+    let value = Named { name = "same" };
+    let fingerprint = hash(value);
+}
+"#,
+        "cannot derive `Hash`",
+    );
+
+    assert_err(
+        r#"
+struct Point { x i32 }
+fn main() {
+    let value = Point { x = 1 };
+    let fingerprint = hash(value);
+}
+"#,
+        "cannot derive `Hash`",
+    );
+}

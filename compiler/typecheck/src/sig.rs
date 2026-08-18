@@ -78,9 +78,9 @@ pub struct FnSig {
     pub self_param: Option<SelfParam>,
     pub params: Vec<ParamSig>,
     pub ret: Type,
-    /// This item's own generic parameters: name plus an optional bound
-    /// trait, used for call-site bound checking (`check.rs`).
-    pub generics: Vec<(Symbol, Option<GenericBound>)>,
+    /// This item's own generic parameters and their bounds, used for
+    /// call-site bound checking (`check.rs`).
+    pub generics: Vec<(Symbol, Vec<GenericBound>)>,
     /// Reference-return origin summary: zero-based parameter indices the
     /// returned reference may originate from. Empty for non-reference
     /// returns or while no safe origin can be inferred.
@@ -175,7 +175,7 @@ pub struct Signatures {
     pub type_generics: HashMap<DefId, Vec<Symbol>>,
     /// Bounds corresponding to generic type/enum parameters, in the same
     /// declaration order as `type_generics` / `EnumSig::generics`.
-    pub generic_type_bounds: HashMap<DefId, Vec<Option<GenericBound>>>,
+    pub generic_type_bounds: HashMap<DefId, Vec<Vec<GenericBound>>>,
     pub enum_sigs: HashMap<DefId, EnumSig>,
     /// Standalone `fn` signatures, keyed by their own `DefId`.
     pub fns: HashMap<DefId, FnSig>,
@@ -220,6 +220,165 @@ pub struct Signatures {
 }
 
 impl Signatures {
+    /// Whether `ty` opts into compiler-derived structural equality and all
+    /// of its fields can participate in that comparison.
+    pub fn can_derive_eq(&self, ty: &Type, defs: &Definitions) -> bool {
+        let ty = match ty {
+            Type::Unique(inner) => inner.as_ref(),
+            _ => ty,
+        };
+        self.can_derive_eq_inner(ty, defs, &mut HashSet::new())
+    }
+
+    pub fn declares_eq(&self, ty: &Type, defs: &Definitions) -> bool {
+        let ty = match ty {
+            Type::Unique(inner) => inner.as_ref(),
+            _ => ty,
+        };
+        self.implements_marker(ty, defs, "Eq")
+    }
+
+    fn can_derive_eq_inner(
+        &self,
+        ty: &Type,
+        defs: &Definitions,
+        visiting: &mut HashSet<Type>,
+    ) -> bool {
+        let (Type::Struct(_, _) | Type::TupleStruct(_, _)) = ty else {
+            return false;
+        };
+        if !visiting.insert(ty.clone()) {
+            return false;
+        }
+        let implements_eq = self.implements_marker(ty, defs, "Eq");
+        let result = implements_eq
+            && self.type_fields(ty).is_some_and(|fields| {
+                fields
+                    .iter()
+                    .all(|field| eq_field_is_structural(self, field, defs, visiting))
+            });
+        visiting.remove(ty);
+        result
+    }
+
+    fn implements_marker(&self, ty: &Type, defs: &Definitions, name: &str) -> bool {
+        let Some((trait_id, _)) = defs.iter().find(|(_, def)| {
+            def.kind == nether_resolver::DefKind::Trait && def.name.as_str() == name
+        }) else {
+            return false;
+        };
+        self.satisfies(
+            ty,
+            &GenericBound {
+                trait_id,
+                args: Vec::new(),
+            },
+        )
+    }
+
+    /// Whether `ty` opts into compiler-derived deterministic structural
+    /// hashing. Floating-point fields are deliberately excluded until the
+    /// language specifies normalization of NaNs and signed zero.
+    pub fn can_derive_hash(&self, ty: &Type, defs: &Definitions) -> bool {
+        let ty = match ty {
+            Type::Unique(inner) => inner.as_ref(),
+            _ => ty,
+        };
+        self.can_derive_hash_inner(ty, defs, &mut HashSet::new())
+    }
+
+    fn can_derive_hash_inner(
+        &self,
+        ty: &Type,
+        defs: &Definitions,
+        visiting: &mut HashSet<Type>,
+    ) -> bool {
+        let (Type::Struct(_, _) | Type::TupleStruct(_, _)) = ty else {
+            return false;
+        };
+        if !visiting.insert(ty.clone()) {
+            return false;
+        }
+        let result = self.implements_marker(ty, defs, "Hash")
+            && self.type_fields(ty).is_some_and(|fields| {
+                fields
+                    .iter()
+                    .all(|field| hash_field_is_structural(self, field, defs, visiting))
+            });
+        visiting.remove(ty);
+        result
+    }
+
+    /// Whether `ty` may be structurally copied into a fresh unique heap
+    /// allocation for `to<:T>(value)`. The outer type must explicitly
+    /// implement the compiler-known `Clone` marker. Unique fields remain
+    /// excluded until recursive user-defined clone bodies are available:
+    /// bit-copying one would create two owners of the same allocation.
+    pub fn can_clone_to_unique(&self, ty: &Type, defs: &Definitions) -> bool {
+        self.can_clone_to_unique_inner(ty, defs, &mut HashSet::new())
+    }
+
+    fn can_clone_to_unique_inner(
+        &self,
+        ty: &Type,
+        defs: &Definitions,
+        visiting: &mut HashSet<Type>,
+    ) -> bool {
+        let (Type::Struct(_, _) | Type::TupleStruct(_, _)) = ty else {
+            return false;
+        };
+        if !visiting.insert(ty.clone()) {
+            return false;
+        }
+        let Some((clone_id, _)) = defs.iter().find(|(_, def)| {
+            def.kind == nether_resolver::DefKind::Trait && def.name.as_str() == "Clone"
+        }) else {
+            return false;
+        };
+        let bound = GenericBound {
+            trait_id: clone_id,
+            args: Vec::new(),
+        };
+        let implements_clone = self.satisfies(ty, &bound);
+        let has_override = self.has_user_clone_candidate(ty);
+        let cloneable = implements_clone
+            && if has_override {
+                self.has_user_clone_method(ty)
+            } else {
+                self.type_fields(ty).is_some_and(|fields| {
+                    fields
+                        .iter()
+                        .all(|field| clone_field_is_structural(self, field, defs, visiting))
+                })
+            };
+        visiting.remove(ty);
+        cloneable
+    }
+
+    /// A user override of structural cloning. For now it is deliberately
+    /// non-generic: `clone(: &self): Owner`, with no additional parameters.
+    /// The returned `:Owner` already owns its allocation, so lowering can
+    /// call this method directly without a synthesized clone shim.
+    pub fn has_user_clone_method(&self, ty: &Type) -> bool {
+        let Some(owner) = type_owner(ty) else {
+            return false;
+        };
+        self.method(owner, &Symbol::new("clone"), ReceiverDomain::Owned)
+            .is_some_and(|signature| {
+                signature.self_param == Some(SelfParam::OwnedRef)
+                    && signature.params.is_empty()
+                    && signature.generics.is_empty()
+                    && signature.ret == Type::Unique(Box::new(ty.clone()))
+            })
+    }
+
+    pub fn has_user_clone_candidate(&self, ty: &Type) -> bool {
+        type_owner(ty).is_some_and(|owner| {
+            self.methods
+                .contains_key(&(owner, Symbol::new("clone"), ReceiverDomain::Owned))
+        })
+    }
+
     /// The generic/non-specialized signature for `(owner, name, domain)` —
     /// every caller that isn't resolving an actual instance-method call
     /// site (static-member calls, trait-conformance checks, `Into<String>`
@@ -437,6 +596,91 @@ impl Signatures {
             .zip(args.iter().cloned())
             .collect();
         Some(payload.iter().map(|ty| substitute(ty, &subst)).collect())
+    }
+}
+
+fn eq_field_is_structural(
+    sigs: &Signatures,
+    ty: &Type,
+    defs: &Definitions,
+    visiting: &mut HashSet<Type>,
+) -> bool {
+    match ty {
+        Type::Primitive(_) => true,
+        Type::Unique(inner) => eq_field_is_structural(sigs, inner, defs, visiting),
+        Type::Struct(_, _) | Type::TupleStruct(_, _) => {
+            sigs.can_derive_eq_inner(ty, defs, visiting)
+        }
+        Type::Tuple(items) => items
+            .iter()
+            .all(|item| eq_field_is_structural(sigs, item, defs, visiting)),
+        _ => false,
+    }
+}
+
+fn hash_field_is_structural(
+    sigs: &Signatures,
+    ty: &Type,
+    defs: &Definitions,
+    visiting: &mut HashSet<Type>,
+) -> bool {
+    match ty {
+        Type::Primitive(kind) => !kind.is_float(),
+        Type::Unique(inner) => hash_field_is_structural(sigs, inner, defs, visiting),
+        Type::Struct(_, _) | Type::TupleStruct(_, _) => {
+            sigs.can_derive_hash_inner(ty, defs, visiting)
+        }
+        Type::Tuple(items) => items
+            .iter()
+            .all(|item| hash_field_is_structural(sigs, item, defs, visiting)),
+        _ => false,
+    }
+}
+
+fn type_owner(ty: &Type) -> Option<DefId> {
+    match ty {
+        Type::Struct(owner, _) | Type::TupleStruct(owner, _) => Some(*owner),
+        _ => None,
+    }
+}
+
+fn clone_field_is_structural(
+    sigs: &Signatures,
+    ty: &Type,
+    defs: &Definitions,
+    visiting: &mut HashSet<Type>,
+) -> bool {
+    match ty {
+        Type::Unique(inner) if alloc_kind(inner, defs) == AllocKind::Heap => {
+            sigs.can_clone_to_unique_inner(inner, defs, visiting)
+        }
+        Type::Unique(inner) => matches!(inner.as_ref(), Type::Primitive(_)),
+        Type::Generic(_) | Type::Error => false,
+        Type::Tuple(items) => items
+            .iter()
+            .all(|item| clone_field_is_structural(sigs, item, defs, visiting)),
+        Type::Struct(_, _) | Type::TupleStruct(_, _)
+            if alloc_kind(ty, defs) == AllocKind::Stack =>
+        {
+            sigs.type_fields(ty).is_some_and(|fields| {
+                fields
+                    .iter()
+                    .all(|field| clone_field_is_structural(sigs, field, defs, visiting))
+            })
+        }
+        Type::Enum(id, _) => sigs.enum_sigs.get(id).is_some_and(|signature| {
+            signature.variants.iter().enumerate().all(|(variant, _)| {
+                sigs.enum_payload(ty, variant as u32).is_some_and(|fields| {
+                    fields
+                        .iter()
+                        .all(|field| clone_field_is_structural(sigs, field, defs, visiting))
+                })
+            })
+        }),
+        Type::Struct(_, _) | Type::TupleStruct(_, _) => true,
+        Type::Array(_) | Type::Weak(_) | Type::String | Type::Function(_, _) => true,
+        Type::Ref(_) | Type::MutRef(_) => false,
+        _ => true,
     }
 }
 

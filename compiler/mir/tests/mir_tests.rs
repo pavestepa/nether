@@ -97,6 +97,7 @@ fn main() {
     let second: Dog = first;
     consume(second);
 }
+
 "#,
     );
     let main = find_fn(&functions, "main");
@@ -117,6 +118,25 @@ fn main() {
             );
         }
     }
+}
+
+#[test]
+fn clone_to_unique_has_an_explicit_non_consuming_mir_operation() {
+    let functions = build(
+        r#"
+Clone struct Dog { name String }
+fn main() {
+    let original = Dog { name = "Rex" };
+    let owned: Dog = to(original);
+    println(original.name);
+    println(owned.name);
+}
+"#,
+    );
+    let main = find_fn(&functions, "main");
+    assert!(all_instrs(main)
+        .iter()
+        .any(|instruction| matches!(instruction, Instr::Assign(_, Rvalue::CloneToUnique(_)))));
 }
 
 #[test]

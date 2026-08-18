@@ -178,6 +178,14 @@ impl FnBuilder<'_> {
                 }
                 promoted
             }
+            MonoExprKind::CloneToUnique(value) => {
+                let value = self.lower_expr(value);
+                Operand::Local(self.materialize(Rvalue::CloneToUnique(value), expr.ty.clone()))
+            }
+            MonoExprKind::Hash(value) => {
+                let value = self.lower_expr(value);
+                Operand::Local(self.materialize(Rvalue::Hash(value), expr.ty.clone()))
+            }
             MonoExprKind::FnRef(id) => Operand::Local(self.materialize(
                 Rvalue::Closure {
                     function: *id,

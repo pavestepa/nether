@@ -16,11 +16,16 @@ The compiler implements:
   uniquely owned heap value, inline value, uniquely owned inline value);
 - traits with static dispatch, multiple inheritance, defaults, and
   generic monomorphization;
+- multiple generic bounds with canonical `<T TraitA + TraitB>` syntax;
 - HIR, closure conversion, CFG-based MIR, and ARC insertion;
 - structs, tuples, enums/match, arrays, weak references, and closures;
 - local multi-file modules through `use`;
 - default-private declarations with explicit `pub` APIs and re-exports;
 - the narrow `#[allow_pascal_case]` escape hatch for exceptional type aliases;
+- structural `Clone` conversion into an independent unique outer object;
+- user-defined `clone(: &self): T` overrides for custom clone behavior;
+- derived structural `Eq` for ARC and unique structs with comparable fields;
+- deterministic derived structural `Hash` through `hash(value) u64`;
 - LLVM object emission, optimization levels, and native linking;
 - a small Nether-source Option/Result/Array standard library.
 

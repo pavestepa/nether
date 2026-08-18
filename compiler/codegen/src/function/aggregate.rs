@@ -1,6 +1,65 @@
 use super::*;
 
 impl<'ctx> FnCodegen<'_, 'ctx> {
+    pub(super) fn gen_clone_to_unique(&mut self, source: &Operand, dest_ty: &Type) -> Value<'ctx> {
+        let Type::Unique(inner) = dest_ty else {
+            panic!("CloneToUnique requires a unique destination, found {dest_ty:?}");
+        };
+        let source_ty = (**inner).clone();
+        let source = self.gen_operand(source);
+        self.gen_structural_clone_to_unique(source, &source_ty)
+    }
+
+    /// Clones one heap struct payload. The byte copy is followed by new
+    /// ARC/weak credits, then every direct unique heap field is overwritten
+    /// with its own recursively cloned allocation.
+    fn gen_structural_clone_to_unique(
+        &mut self,
+        source: Value<'ctx>,
+        source_ty: &Type,
+    ) -> Value<'ctx> {
+        let sl = self.layout.struct_layout(source_ty);
+        let size = self.m.size_of(sl.ty.into());
+        let drop_fn = self.func_ptr_or_null(self.shims.own_drop_shim(
+            self.m,
+            self.layout,
+            self.runtime,
+            source_ty,
+        ));
+        let clone = self
+            .m
+            .call(self.runtime.unique_alloc, &[size, drop_fn], "unique_clone")
+            .expect("nether_rt_unique_alloc returns a value");
+        self.m.memcpy(clone, source, size);
+        if let Some(retain_fields) =
+            self.shims
+                .own_retain_shim(self.m, self.layout, self.runtime, source_ty)
+        {
+            self.m.call(retain_fields, &[clone], "");
+        }
+        let field_tys = self.layout.sigs.type_fields(source_ty).unwrap_or_default();
+        for (index, field_ty) in field_tys.iter().enumerate() {
+            let Type::Unique(inner) = field_ty else {
+                continue;
+            };
+            if alloc_kind(inner, self.defs()) != AllocKind::Heap {
+                continue;
+            }
+            let source_field =
+                self.m
+                    .struct_gep(sl.ty, source, index as u32, "clone_source_unique");
+            let source_value =
+                self.m
+                    .load(self.m.ptr_type(), source_field, "clone_source_unique_value");
+            let nested = self.gen_structural_clone_to_unique(source_value, inner);
+            let dest_field = self
+                .m
+                .struct_gep(sl.ty, clone, index as u32, "clone_dest_unique");
+            self.m.store(dest_field, nested);
+        }
+        clone
+    }
+
     pub(super) fn gen_construct(
         &mut self,
         _id: nether_resolver::DefId,

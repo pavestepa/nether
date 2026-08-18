@@ -155,6 +155,8 @@ pub enum Rvalue {
     AddressOf(Place),
     Deref(Operand),
     PromoteUnique(Operand),
+    CloneToUnique(Operand),
+    Hash(Operand),
     Unary(UnaryOp, Operand),
     Binary(BinaryOp, Operand, Operand),
     Call {

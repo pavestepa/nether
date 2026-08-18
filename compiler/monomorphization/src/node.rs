@@ -87,6 +87,8 @@ pub enum MonoExprKind {
     Borrow(Box<MonoExpr>),
     Deref(Box<MonoExpr>),
     PromoteUnique(Box<MonoExpr>),
+    CloneToUnique(Box<MonoExpr>),
+    Hash(Box<MonoExpr>),
     FnRef(MonoFnId),
     Unit,
     Tuple(Vec<MonoExpr>),

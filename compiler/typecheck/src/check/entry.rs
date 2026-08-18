@@ -94,14 +94,18 @@ pub fn check(module: &Module, resolved: &ResolvedNames) -> (TypedTables, Vec<Dia
                             let trait_generics = i.generics.iter().map(|generic| {
                                 (
                                     generic.name.name.clone(),
-                                    generic.bound.as_ref().and_then(|bound| {
-                                        lower_generic_bound(
-                                            bound,
-                                            resolved,
-                                            &decls,
-                                            &mut diagnostics,
-                                        )
-                                    }),
+                                    generic
+                                        .bounds
+                                        .iter()
+                                        .filter_map(|bound| {
+                                            lower_generic_bound(
+                                                bound,
+                                                resolved,
+                                                &decls,
+                                                &mut diagnostics,
+                                            )
+                                        })
+                                        .collect(),
                                 )
                             });
                             checking_sig.generics.splice(0..0, trait_generics);

@@ -62,7 +62,7 @@ pub(super) struct Checker<'a> {
     /// everything, without double-reporting what both passes would
     /// otherwise flag identically).
     pub(super) suppress_diagnostics: bool,
-    pub(super) generics: HashMap<Symbol, Option<GenericBound>>,
+    pub(super) generics: HashMap<Symbol, Vec<GenericBound>>,
     pub(super) return_ty: Type,
     pub(super) loop_depth: usize,
 }

@@ -263,6 +263,32 @@ impl Checker<'_> {
         if name.as_str() == "to" {
             return self.check_to_conversion(span, call_args, expected, generic_args);
         }
+        if name.as_str() == "hash" {
+            if !generic_args.is_empty() {
+                self.err(span, "builtin function `hash` is not generic");
+            }
+            let Some(args) = call_args else {
+                self.err(span, "`hash` must be called");
+                return Type::Error;
+            };
+            if args.len() != 1 {
+                self.err(
+                    span,
+                    format!("`hash` takes exactly 1 argument, found {}", args.len()),
+                );
+            }
+            for arg in args {
+                let ty = self.check_expr(arg);
+                if !self.sigs.can_derive_hash(&ty, &self.resolved.definitions) {
+                    let ty = self.describe(&ty);
+                    self.err(
+                        arg.span,
+                        format!("cannot derive `Hash` for `{ty}`: every field must be structurally hashable"),
+                    );
+                }
+            }
+            return Type::Primitive(PrimitiveKind::U64);
+        }
         match self.sigs.fns.get(&id).cloned() {
             Some(sig) => match call_args {
                 Some(args) => {
@@ -299,13 +325,11 @@ impl Checker<'_> {
     /// conversion (language-spec §9). The target comes from the explicit
     /// type argument when present and otherwise from the surrounding context.
     ///
-    /// Three transitions are sound: inline `:t -> t` / `t -> :t` are
-    /// type-system relabeling, while heap `:T -> T` transfers the payload
-    /// into an ARC allocation during lowering. `T -> :T` is different:
-    /// the source may have other live
-    /// ARC aliases, so relabeling it `:T` without an actual deep copy
-    /// would produce a "uniquely owned" value that isn't — that direction
-    /// stays rejected until `Clone` exists (spec §10, Stage 3).
+    /// Inline `:t -> t` / `t -> :t` are type-system relabeling and heap
+    /// `:T -> T` promotes the payload into ARC. Stage 3's fourth direction,
+    /// `T -> :T`, requires the source struct to implement `Clone`; lowering
+    /// creates a distinct unique allocation and grants copied ARC/weak fields
+    /// independent ownership credits.
     fn check_to_conversion(
         &mut self,
         span: Span,
@@ -380,13 +404,27 @@ impl Checker<'_> {
                 } else if crate::alloc::alloc_kind(&arg_ty, &self.resolved.definitions)
                     == crate::alloc::AllocKind::Heap
                 {
-                    self.err(
-                        args[0].span,
-                        format!(
-                            "`to()` cannot convert `{}` to its owned form yet — this direction requires `Clone`, not yet implemented (language-spec §10, Stage 3)",
-                            self.describe(&arg_ty)
-                        ),
-                    );
+                    if !self
+                        .sigs
+                        .can_clone_to_unique(&arg_ty, &self.resolved.definitions)
+                    {
+                        let described = self.describe(&arg_ty);
+                        if self.sigs.has_user_clone_candidate(&arg_ty) {
+                            self.err(
+                                args[0].span,
+                                format!(
+                                    "invalid `clone` override for `{described}` — expected `clone(: &self): {described}` with no additional parameters or generics"
+                                ),
+                            );
+                        } else {
+                            self.err(
+                                args[0].span,
+                                format!(
+                                    "`to()` cannot clone `{described}` into its owned form — every structurally cloned heap type, including unique fields, must implement `Clone` and the clone graph must be finite"
+                                ),
+                            );
+                        }
+                    }
                 }
             }
             _ if arg_ty.is_error() || target.is_error() => {}

@@ -114,6 +114,13 @@ impl<'ctx> ModuleCx<'ctx> {
             .into()
     }
 
+    pub fn int_xor(&self, a: Value<'ctx>, b: Value<'ctx>, name: &str) -> Value<'ctx> {
+        self.builder
+            .build_xor(a.into_int_value(), b.into_int_value(), name)
+            .expect("build_xor")
+            .into()
+    }
+
     pub fn int_compare(
         &self,
         pred: IntPredicate,

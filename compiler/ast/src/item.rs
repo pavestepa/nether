@@ -159,16 +159,16 @@ pub struct EnumDecl {
 }
 
 /// A generic parameter as written, e.g. the `T` in `<T>` or the `T: Sound`
-/// / `T: Into<String>` in `<T: Sound>` / `<T: Into<String>>`. `bound` names
-/// an [`trait`](TraitDecl), possibly itself generic — a full
+/// / `T: Into<String>` in `<T: Sound>` / `<T: Into<String>>`. `bounds` name
+/// [`trait`](TraitDecl)s, possibly themselves generic — full
 /// [`TypeExpr`] rather than a bare [`Path`], for the same reason as
 /// [`ImplBlock::trait`]. Language-spec §8 generics are resolved via
 /// monomorphization, so this is purely syntactic — `resolver`/`typecheck`
-/// turn `bound` into an actual constraint check.
+/// turn them into actual constraint checks.
 #[derive(Debug, Clone)]
 pub struct GenericParam {
     pub name: Ident,
-    pub bound: Option<TypeExpr>,
+    pub bounds: Vec<TypeExpr>,
 }
 
 #[derive(Debug, Clone)]

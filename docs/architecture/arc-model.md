@@ -49,8 +49,11 @@ payload size and the drop callback—no strong or weak counters. Moves insert no
 `Retain`; final destruction dispatches to `nether_rt_unique_free`. The explicit
 `:T -> T` conversion calls `nether_rt_unique_promote`, which moves payload bytes
 into a fresh ARC block, deallocates the unique block without dropping the
-moved fields, and clears the source slot. `T -> :T` remains a Stage 3 `Clone`
-operation and is never implemented as relabeling.
+moved fields, and clears the source slot. Stage 3's structural `T -> :T`
+clone allocates a distinct unique outer payload, byte-copies its fields, then
+runs a generated field-retain shim so copied ARC/weak fields own independent
+credits. A direct unique heap field is recursively cloned when its inner type
+also implements `Clone`; a non-Clone or cyclic clone graph is rejected.
 
 ## 3. Insertion rules
 

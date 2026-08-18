@@ -395,8 +395,8 @@ impl Checker<'_> {
         span: Span,
         call_id: Option<NodeId>,
     ) -> Type {
-        let bound = self.generics.get(name).cloned().flatten();
-        if let Some(bound) = bound {
+        let bounds = self.generics.get(name).cloned().unwrap_or_default();
+        for bound in bounds {
             let bound_name = self.resolved.definitions.get(bound.trait_id).name.as_str();
             if bound_name == "Into"
                 && bound.args == [Type::String]

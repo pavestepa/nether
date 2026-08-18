@@ -272,20 +272,20 @@ impl Checker<'_> {
                 );
                 continue;
             };
-            let Some(bound) = bound else { continue };
-            let concrete_bound = GenericBound {
-                trait_id: bound.trait_id,
-                args: bound
-                    .args
-                    .iter()
-                    .map(|arg| substitute_generic(arg, &subst))
-                    .collect(),
-            };
-            let satisfies = self.type_satisfies_bound(concrete, &concrete_bound);
-            if !satisfies {
-                let concrete_s = self.describe(concrete);
-                let iface_name = self.describe_bound(&concrete_bound);
-                self.err(call_span, format!("`{concrete_s}` does not implement `{iface_name}`, required by generic parameter `{name}`"));
+            for bound in bound {
+                let concrete_bound = GenericBound {
+                    trait_id: bound.trait_id,
+                    args: bound
+                        .args
+                        .iter()
+                        .map(|arg| substitute_generic(arg, &subst))
+                        .collect(),
+                };
+                if !self.type_satisfies_bound(concrete, &concrete_bound) {
+                    let concrete_s = self.describe(concrete);
+                    let iface_name = self.describe_bound(&concrete_bound);
+                    self.err(call_span, format!("`{concrete_s}` does not implement `{iface_name}`, required by generic parameter `{name}`"));
+                }
             }
         }
         if let Some(call_id) = call_id {
@@ -321,30 +321,26 @@ impl Checker<'_> {
                 let subst: HashMap<Symbol, Type> =
                     names.into_iter().zip(args.iter().cloned()).collect();
                 for (index, bound) in bounds.into_iter().enumerate() {
-                    let Some(bound) = bound else { continue };
                     let Some(actual) = args.get(index) else {
                         continue;
                     };
                     if actual.contains_error() {
                         continue;
                     }
-                    let concrete_bound = GenericBound {
-                        trait_id: bound.trait_id,
-                        args: bound
-                            .args
-                            .iter()
-                            .map(|arg| substitute_generic(arg, &subst))
-                            .collect(),
-                    };
-                    if !self.type_satisfies_bound(actual, &concrete_bound) {
-                        let actual = self.describe(actual);
-                        let bound = self.describe_bound(&concrete_bound);
-                        self.err(
-                            span,
-                            format!(
-                                "`{actual}` does not implement `{bound}`, required by this generic type"
-                            ),
-                        );
+                    for bound in bound {
+                        let concrete_bound = GenericBound {
+                            trait_id: bound.trait_id,
+                            args: bound
+                                .args
+                                .iter()
+                                .map(|arg| substitute_generic(arg, &subst))
+                                .collect(),
+                        };
+                        if !self.type_satisfies_bound(actual, &concrete_bound) {
+                            let actual = self.describe(actual);
+                            let bound = self.describe_bound(&concrete_bound);
+                            self.err(span, format!("`{actual}` does not implement `{bound}`, required by this generic type"));
+                        }
                     }
                 }
                 for arg in args {
@@ -404,11 +400,11 @@ impl Checker<'_> {
             Type::Struct(_, _) | Type::TupleStruct(_, _) | Type::Enum(_, _) => {
                 self.sigs.satisfies(ty, bound)
             }
-            Type::Generic(name) => self
-                .generics
-                .get(name)
-                .and_then(Option::as_ref)
-                .is_some_and(|actual| self.sigs.bound_satisfies(actual, bound)),
+            Type::Generic(name) => self.generics.get(name).is_some_and(|actual| {
+                actual
+                    .iter()
+                    .any(|actual| self.sigs.bound_satisfies(actual, bound))
+            }),
             Type::Error => true,
             _ => false,
         }
@@ -435,8 +431,7 @@ impl Checker<'_> {
             Type::Generic(name) => self
                 .generics
                 .get(name)
-                .and_then(Option::as_ref)
-                .is_some_and(|bound| self.is_into_string_bound(bound)),
+                .is_some_and(|bounds| bounds.iter().any(|bound| self.is_into_string_bound(bound))),
             _ => false,
         }
     }

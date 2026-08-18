@@ -43,7 +43,7 @@ pub(super) fn owner_as_type_from_generics(
     id: DefId,
     resolved: &ResolvedNames,
     decls: &DeclIndex,
-    owner_generics: &[(Symbol, Option<GenericBound>)],
+    owner_generics: &[(Symbol, Vec<GenericBound>)],
 ) -> Type {
     let args: Vec<Type> = owner_generics
         .iter()

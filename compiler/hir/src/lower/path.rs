@@ -176,6 +176,48 @@ impl Lowerer<'_> {
                                     kind: HirExprKind::PromoteUnique(Box::new(lowered)),
                                     ty: result_ty.clone(),
                                 };
+                            } else {
+                                let clones_heap_to_unique =
+                                    self.expr_types.get(&arg.id).is_some_and(|ty| {
+                                        alloc_kind(ty, &self.resolved.definitions)
+                                            == AllocKind::Heap
+                                            && !matches!(ty, Type::Unique(_))
+                                            && matches!(result_ty, Type::Unique(_))
+                                    });
+                                if clones_heap_to_unique {
+                                    let source_ty = self.expr_types.get(&arg.id).cloned();
+                                    let user_clone = source_ty.as_ref().and_then(|ty| {
+                                        if !self.sigs.has_user_clone_method(ty) {
+                                            return None;
+                                        }
+                                        let owner = match ty {
+                                            Type::Struct(owner, _)
+                                            | Type::TupleStruct(owner, _) => *owner,
+                                            _ => return None,
+                                        };
+                                        self.methods
+                                            .get(&(
+                                                owner,
+                                                Symbol::new("clone"),
+                                                ReceiverDomain::Owned,
+                                            ))
+                                            .and_then(|set| set.generic)
+                                    });
+                                    lowered = match user_clone {
+                                        Some(fn_id) => HirExpr {
+                                            kind: HirExprKind::CallStatic {
+                                                fn_id,
+                                                generic_args: Vec::new(),
+                                                args: vec![lowered],
+                                            },
+                                            ty: result_ty.clone(),
+                                        },
+                                        None => HirExpr {
+                                            kind: HirExprKind::CloneToUnique(Box::new(lowered)),
+                                            ty: result_ty.clone(),
+                                        },
+                                    };
+                                }
                             }
                             lowered.ty = result_ty.clone();
                             (lowered, result_ty.clone())
@@ -183,6 +225,25 @@ impl Lowerer<'_> {
                         // typecheck already rejected a missing/wrong-arity
                         // argument list — unreachable for a program that
                         // type-checked successfully.
+                        None => (
+                            HirExpr {
+                                kind: HirExprKind::Unit,
+                                ty: Type::Error,
+                            },
+                            Type::Error,
+                        ),
+                    };
+                }
+                if name.as_str() == "hash" {
+                    let arg = call_args.and_then(|args| args.first());
+                    return match arg {
+                        Some(arg) => (
+                            HirExpr {
+                                kind: HirExprKind::Hash(Box::new(self.lower_expr(arg))),
+                                ty: result_ty.clone(),
+                            },
+                            result_ty.clone(),
+                        ),
                         None => (
                             HirExpr {
                                 kind: HirExprKind::Unit,
@@ -371,7 +432,16 @@ impl Lowerer<'_> {
             }
         }
         if let Type::Generic(name) = receiver_ty {
-            let bound = self.generics.get(name).cloned().flatten();
+            let bound = self.generics.get(name).and_then(|bounds| {
+                bounds
+                    .iter()
+                    .find(|bound| {
+                        self.sigs
+                            .trait_methods
+                            .contains_key(&(bound.trait_id, method.name.clone()))
+                    })
+                    .cloned()
+            });
             let is_static = bound
                 .as_ref()
                 .and_then(|bound| {

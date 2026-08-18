@@ -183,10 +183,12 @@ impl<'a> ModuleLoader<'a> {
                         Some(crate_root.clone()),
                     )?;
                 }
-                None => self.diagnostics.push(legacy_extension_or_missing_child_diagnostic(
-                    &normalized,
-                    &mod_decl.name,
-                )),
+                None => self
+                    .diagnostics
+                    .push(legacy_extension_or_missing_child_diagnostic(
+                        &normalized,
+                        &mod_decl.name,
+                    )),
             }
         }
 

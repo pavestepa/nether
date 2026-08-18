@@ -42,7 +42,7 @@ rebuilding.
 started with the narrow `#[allow_pascal_case]` type-alias attribute, including
 focused diagnostics for unknown attributes and invalid targets. Stage 2 has
 flow-sensitive move checking, reference parameters and receiver calls,
-lexically scoped stored heap borrows, plus three sound `to(value)`
+lexically scoped stored heap borrows, plus the first three `to(value)`
 ownership-domain conversions. Returned-reference origins are checked and
 propagated through named-function call chains, including storage in `let`;
 default-private visibility with explicit `pub` is implemented for declarations,
@@ -167,7 +167,7 @@ borrow and prevents moves, mutation, and conflicting borrows until scope exit.
 Instance/static methods carry the same summaries, with `self` represented as a
 distinct origin, and closure summaries preserve parameter and captured origins.
 
-*`to(value)` domain conversion — 3 of 4 transitions done.* Checked each of
+*`to(value)` domain conversion — Stage 2 delivered 3 of 4 transitions.* Checked each of
 the spec's four transitions (spec §9) against what's actually sound without
 `Clone` (`Copy`/`Clone` don't exist yet — spec §10, Stage 3): `:T -> T`,
 `:t -> t`, and `t -> :t` are supported. Inline transitions are pure
@@ -177,11 +177,12 @@ ARC allocation without cloning its fields. These three are implemented as a
 (`nether_resolver`'s `def/collect.rs` registers `"to"` as a builtin `Fn`
 the same way; `nether_typecheck::check::call::resolve_fn_value` and
 `nether_hir`'s `lower_def_value` both special-case the name). `T -> :T`
-stays rejected with a dedicated diagnostic: the source may have other live
+stayed rejected during Stage 2 with a dedicated diagnostic: the source may have other live
 ARC aliases, so relabeling it `:T` without an actual deep copy would
 produce a "uniquely owned" value that isn't — genuinely needs `Clone`, not
-a shortcut worth taking early. HIR/MIR carry an explicit unique-promotion
-node for the heap transition. Both target-inferred `to(value)` and explicit
+a shortcut worth taking early. Stage 3 now implements that fourth transition
+for structural `Clone` structs without unique fields. HIR/MIR carry an explicit
+unique-promotion node for the opposite heap transition. Both target-inferred `to(value)` and explicit
 `to<T>(value)` forms are implemented, including ownership-qualified inline
 targets such as `to<:i32>(value)`.
 
@@ -198,13 +199,25 @@ retain, and `to<T>` promotes it into a fresh ARC allocation. The reverse
 and belongs with `Clone` in Stage 3.
 
 **Stage 3 — trait system extensions + dev-mode generics — in progress.** The
-narrow `#[allow_pascal_case]` type-alias escape hatch is implemented. Remaining:
+narrow `#[allow_pascal_case]` type-alias escape hatch is implemented. The
+compiler-known `Clone` marker also enables structural `T -> :T` conversion for
+user structs: codegen allocates an independent unique outer object, retains
+copied ARC/weak fields, and recursively clones direct unique heap fields whose
+inner types also implement `Clone`. Prefix trait derivation syntax such as
+`Clone + Eq struct Value` lowers through the same trait pipeline. User-written
+clone overrides with signature `clone(: &self): T` are dispatched directly by
+`to<:T>`. `Eq struct Value` now derives structural `==`/`!=` for both ARC and
+unique values, recursively comparing primitive, tuple, nested `Eq`, and unique
+fields; unsupported or cyclic field graphs are diagnosed. Derived `Hash`
+is implemented for integer/bool/char, tuple, nested `Hash`, and unique fields;
+the compiler builtin `hash(value)` returns a deterministic `u64`, while
+unsupported and cyclic graphs are diagnosed. String and floating-point fields
+remain excluded until their stable hashing semantics are specified. Remaining:
 associated
-types/constants, const generics, multiple inline bounds (`T A + B`), `where`
+types/constants, const generics, `where`
 clauses, specialization (`default impl` + concrete override), existential
 (`any Trait`) and opaque (`some Trait`) types with existential-safety
-checking, derivable-traits syntax (`Clone + Eq + Hash` before a
-declaration), and development-mode
+checking, and development-mode
 witness-table/dictionary generics dispatch (so `nether build` stops
 monomorphizing every generic body — release retains full
 monomorphization/devirtualization/specialization). Also folds in the

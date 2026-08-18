@@ -556,7 +556,7 @@ follow-up work (roadmap §3).
 
 ---
 
-## 9. Universal `to(value)` conversion **[3 transitions: Stage 2; `T -> :T`: Stage 3 with `Clone`]**
+## 9. Universal `to(value)` conversion **[all transitions implemented; structural `Clone` limitations below]**
 
 The full language specifies a universal, explicit domain-conversion
 operation (`to(value)`, or `to<T>(value)` with an explicit target) covering
@@ -574,23 +574,36 @@ into ARC by moving its payload without cloning fields. It consumes the source
 the same way passing it to another owned parameter would (§8.6.1); `to(n)`
 for an ordinary inline `n` does not consume `n`.
 
-**`T -> :T` stays rejected**, with a dedicated diagnostic rather than
-silent unsoundness: the source may have other live ARC aliases, so
-relabeling it `:T` without an actual deep copy would produce a "uniquely
-owned" value that isn't. This direction needs `Clone` (§10), not yet
-implemented — Stage 3.
+**`T -> :T` is implemented for structurally cloneable user structs.** The
+source type must explicitly implement the compiler-known `Clone` marker
+(`Clone struct Dog { ... }`). The operation allocates a distinct unique outer
+object, copies its fields, and grants copied ARC/weak fields independent
+ownership credits. Direct unique heap fields are recursively cloned when their
+inner types also implement `Clone`; missing implementations and cyclic clone
+graphs receive a diagnostic rather than duplicating unique pointer bits. A
+type can replace synthesis with `clone(: &self): T` returning `:T`; `to<:T>`
+dispatches directly to that method and validates its receiver, parameters, and
+return type.
 
 ---
 
-## 10. Copy and Clone **[not yet implemented — Stage 3]**
+## 10. Copy and Clone **[structural Clone slice implemented — Stage 3]**
 
 `Copy` is reserved for inline-category values; heap/reference-category
 types may implement `Clone` but must not implement `Copy` (assignment of an
 ordinary heap type already means "copy the ARC reference," not "deep-copy
 the object" — conflating the two would be a silent correctness hazard).
-Derivable traits are written directly before a declaration (`Clone + Eq +
-Hash`, not Rust's `#[derive(...)]`). Not yet implemented — Stage 1 has no
-derive mechanism at all yet.
+The compiler-known `Clone` marker synthesizes the structural clone used by
+`T -> :T`. Prefix derivation syntax (traits joined with `+` directly before a
+declaration, not Rust's `#[derive(...)]`) lowers into the ordinary trait opt-in
+list. Thus `Clone struct Dog` works today, and `Clone + Eq + Hash struct Dog`
+combines all three compiler-derived operations. `Eq` recursively compares
+supported fields for both ARC and unique values and diagnoses unsupported or
+cyclic derive graphs. `Hash` feeds the same structural family into the
+compiler builtin `hash(value) u64`, using a deterministic unkeyed fold. Integer,
+bool, char, tuple, nested `Hash`, and unique fields are supported; strings and
+floating-point fields remain rejected until their stable hashing semantics are
+specified. Generic user-defined clone overrides remain Stage 3 work.
 
 ---
 
@@ -640,15 +653,16 @@ impl Dog Sound {
 }
 ```
 
-Not yet implemented: associated types/constants, const generics, multiple
-inline bounds (`T A + B`), `where` clauses, specialization, existential
+Not yet implemented: associated types/constants, const generics, `where`
+clauses, specialization, existential
 (`any Trait`) and opaque (`some Trait`) types, blanket/conditional impls —
 all **Stage 3**. A trait name still cannot be used as a bare value
 type today; it may only appear as a generic bound. Multiple traits on one
-`impl` are comma-separated (`impl Dog Sound, Clone { ... }`), and generic
-bounds (`<T: Sound>`, §13) still use the pre-existing colon form for
-now — unifying that with the trait-list's no-colon convention is tracked
-as unstaged follow-up work, not yet done.
+`impl` are comma-separated (`impl Dog Sound, Clone { ... }`). Generic
+parameters accept one or more `+`-separated inline bounds, canonically
+`<T Sound + Named>`; the earlier `<T: Sound + Named>` spelling remains
+accepted for source compatibility. Every bound is checked at instantiation,
+and methods declared by any bound are available in the generic body.
 
 ---
 
@@ -767,14 +781,17 @@ Full retain/release insertion rules live in
 | Callable `:&T`/`:&mut T` parameters, call-scoped exclusivity (§3.1, §8.1) | **Stage 2 — done** |
 | Calling a *method* (not just field access) through a `:&T`/`:&mut T` receiver (§3.1) | **Stage 2 — done** |
 | `to(value)` / `to<T>(value)`, 3 sound transitions (§9) | **Stage 2 — done** |
-| `T -> :T` deep copy (needs `Clone`, §10) | Stage 3 |
+| Structural `T -> :T` clone, including recursively `Clone` direct unique fields (§10) | **Stage 3 — done** |
+| Prefix trait derivation and structural `Eq` for ARC/unique structs (§10) | **Stage 3 — done** |
+| Derived structural `Hash` and `hash(value) u64` (§10) | **Stage 3 — done** |
 | Lexically scoped stored heap borrows; interprocedural named-function origin summaries; safe storage of returned references; ambiguous-origin diagnostics | **Stage 2 — done** |
 | Method/closure origin summaries and ordinary last-use shortening | **Stage 2 — done** |
 | Loop/local-closure-sensitive regions and `move () => {}` closures | **Stage 2 — done** |
 | Reference-to-inline-value codegen | **Stage 2 — done** |
 | `:T` unrefcounted allocation, move transfer and ARC promotion | **Stage 2 — done** |
 | `#[allow_pascal_case]` on type aliases | **Stage 3 — done** |
-| Associated types, const generics, specialization, `any`/`some`, multi-bound generics, derivable traits | Stage 3 |
+| Multiple inline generic bounds (`T A + B`) | **Stage 3 — done** |
+| Associated types, const generics, specialization, `any`/`some` | Stage 3 |
 | Development-mode witness-table generics dispatch | Stage 3 |
 | async/await, Tokio runtime bridge | Stage 4 |
 | unsafe, raw pointers, C ABI FFI | Stage 5 |

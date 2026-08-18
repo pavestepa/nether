@@ -394,9 +394,10 @@ fn build_fn_sig(
         .map(|g| {
             (
                 g.name.name.clone(),
-                g.bound
-                    .as_ref()
-                    .and_then(|bound| lower_generic_bound(bound, resolved, decls, diags)),
+                g.bounds
+                    .iter()
+                    .filter_map(|bound| lower_generic_bound(bound, resolved, decls, diags))
+                    .collect(),
             )
         })
         .collect();

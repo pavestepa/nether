@@ -120,6 +120,65 @@ fn main() {
 }
 
 #[test]
+fn clone_to_unique_allocates_an_independent_outer_object() {
+    run_returned_reference_program(
+        "nether_clone_to_unique_test",
+        r#"
+Clone struct Dog { name String }
+fn main() {
+    let original = Dog { name = "Rex" };
+    let mut owned: Dog = to(original);
+    owned.name = "Max";
+    println(original.name);
+    println(owned.name);
+}
+"#,
+        "Rex\nMax\n",
+    );
+}
+
+#[test]
+fn clone_to_unique_recursively_clones_unique_fields() {
+    run_returned_reference_program(
+        "nether_recursive_clone_to_unique_test",
+        r#"
+Clone struct Collar { size i32 }
+Clone struct Dog { collar: Collar }
+fn main() {
+    let original = Dog { collar = :Collar { size = 4 } };
+    let mut owned: Dog = to(original);
+    owned.collar.size = 7;
+    println(`${original.collar.size}`);
+    println(`${owned.collar.size}`);
+}
+"#,
+        "4\n7\n",
+    );
+}
+
+#[test]
+fn to_unique_uses_a_user_defined_clone_override() {
+    run_returned_reference_program(
+        "nether_user_clone_to_unique_test",
+        r#"
+Clone struct Dog { name String }
+impl Dog {
+    clone(: &self): Dog {
+        return :Dog { name = `copy of ${self.name}` };
+    }
+}
+fn main() {
+    let original = Dog { name = "Rex" };
+    let owned: Dog = to(original);
+    println(original.name);
+    println(owned.name);
+}
+"#,
+        "Rex\ncopy of Rex\n",
+    );
+}
+
+#[test]
 fn move_closure_owns_and_drops_a_unique_heap_capture() {
     run_returned_reference_program(
         "nether_move_closure_unique_capture_test",
@@ -132,5 +191,59 @@ fn main() {
 }
 "#,
         "Rex\n",
+    );
+}
+
+#[test]
+fn derived_eq_compares_values_instead_of_outer_object_addresses() {
+    run_returned_reference_program(
+        "nether_derived_eq_test",
+        r#"
+Eq struct Point { x i32, y i32 }
+Eq struct BoxedPoint { point: Point }
+fn main() {
+    let a = Point { x = 1, y = 2 };
+    let b = Point { x = 1, y = 2 };
+    let c = Point { x = 1, y = 3 };
+    println(`${a == b}`);
+    println(`${a != c}`);
+
+    let boxed_a = BoxedPoint { point = :Point { x = 4, y = 5 } };
+    let boxed_b = BoxedPoint { point = :Point { x = 4, y = 5 } };
+    println(`${boxed_a == boxed_b}`);
+
+    let owned_a: Point = :Point { x = 8, y = 9 };
+    let owned_b: Point = :Point { x = 8, y = 9 };
+    println(`${owned_a == owned_b}`);
+}
+"#,
+        "true\ntrue\ntrue\ntrue\n",
+    );
+}
+
+#[test]
+fn derived_hash_is_structural_for_arc_nested_and_unique_values() {
+    run_returned_reference_program(
+        "nether_derived_hash_test",
+        r#"
+Hash struct Point { x i32, y i32 }
+Hash struct BoxedPoint { point: Point }
+fn main() {
+    let a = Point { x = 1, y = 2 };
+    let b = Point { x = 1, y = 2 };
+    let c = Point { x = 1, y = 3 };
+    println(`${hash(a) == hash(b)}`);
+    println(`${hash(a) != hash(c)}`);
+
+    let boxed_a = BoxedPoint { point = :Point { x = 4, y = 5 } };
+    let boxed_b = BoxedPoint { point = :Point { x = 4, y = 5 } };
+    println(`${hash(boxed_a) == hash(boxed_b)}`);
+
+    let owned_a: Point = :Point { x = 8, y = 9 };
+    let owned_b: Point = :Point { x = 8, y = 9 };
+    println(`${hash(owned_a) == hash(owned_b)}`);
+}
+"#,
+        "true\ntrue\ntrue\ntrue\n",
     );
 }

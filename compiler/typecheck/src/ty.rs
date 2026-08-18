@@ -177,7 +177,10 @@ impl Type {
             | Type::TupleStruct(_, args)
             | Type::Tuple(args)
             | Type::Enum(_, args) => args.iter().any(Type::contains_error),
-            Type::Array(inner) | Type::Weak(inner) | Type::Unique(inner) | Type::Ref(inner)
+            Type::Array(inner)
+            | Type::Weak(inner)
+            | Type::Unique(inner)
+            | Type::Ref(inner)
             | Type::MutRef(inner) => inner.contains_error(),
             Type::Function(params, ret) => {
                 params.iter().any(Type::contains_error) || ret.contains_error()
@@ -195,7 +198,10 @@ impl Type {
             | Type::TupleStruct(_, args)
             | Type::Tuple(args)
             | Type::Enum(_, args) => args.iter().any(Type::contains_generic),
-            Type::Array(inner) | Type::Weak(inner) | Type::Unique(inner) | Type::Ref(inner)
+            Type::Array(inner)
+            | Type::Weak(inner)
+            | Type::Unique(inner)
+            | Type::Ref(inner)
             | Type::MutRef(inner) => inner.contains_generic(),
             Type::Function(params, ret) => {
                 params.iter().any(Type::contains_generic) || ret.contains_generic()

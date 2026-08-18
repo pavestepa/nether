@@ -300,7 +300,7 @@ pub(super) fn build_impl_methods(
         owner_ty: Type,
         owner_name: Symbol,
         owner_span: Span,
-        owner_generics: Vec<(Symbol, Option<GenericBound>)>,
+        owner_generics: Vec<(Symbol, Vec<GenericBound>)>,
         bound: GenericBound,
         allow_defaults: bool,
     }

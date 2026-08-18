@@ -12,7 +12,7 @@ pub(super) struct Lowerer<'a> {
     pub(super) methods: &'a HashMap<(DefId, Symbol, ReceiverDomain), MethodFnSet>,
     pub(super) locals_map: HashMap<ResolverLocalId, HirLocalId>,
     pub(super) next_local: u32,
-    pub(super) generics: HashMap<Symbol, Option<GenericBound>>,
+    pub(super) generics: HashMap<Symbol, Vec<GenericBound>>,
     pub(super) type_subst: HashMap<Symbol, Type>,
     pub(super) self_override: Option<(ResolverLocalId, Type)>,
     pub(super) array_owner: Option<DefId>,

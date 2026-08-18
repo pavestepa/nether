@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use nether_ast::{
-    BinaryOp, Block, Expr, ExprKind, FieldAccessor, FnDecl, Ident, TraitDecl, Item, Literal,
-    MatchArm, Module, NodeId, Param, Path, Pattern, Stmt, Symbol, TemplatePart,
+    BinaryOp, Block, Expr, ExprKind, FieldAccessor, FnDecl, Ident, Item, Literal, MatchArm, Module,
+    NodeId, Param, Path, Pattern, Stmt, Symbol, TemplatePart, TraitDecl,
 };
 use nether_resolver::{DefId, LocalId as ResolverLocalId, Resolution, ResolvedNames};
 use nether_typecheck::{
@@ -119,10 +119,7 @@ pub fn lower(module: &Module, resolved: &ResolvedNames, tables: TypedTables) -> 
     }
 }
 
-fn index_traits<'a>(
-    module: &'a Module,
-    resolved: &ResolvedNames,
-) -> HashMap<DefId, &'a TraitDecl> {
+fn index_traits<'a>(module: &'a Module, resolved: &ResolvedNames) -> HashMap<DefId, &'a TraitDecl> {
     let mut map = HashMap::new();
     for item in &module.items {
         if let Item::Trait(i) = item {

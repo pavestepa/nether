@@ -1,6 +1,6 @@
 use nether_ast::{
-    EnumDecl, EnumVariant, Field, FnDecl, GenericParam, ImplBlock, Item, ModDecl, Param, SelfParam,
-    StructDecl, StructDeclKind, TraitDecl, TypeAliasDecl, UseDecl, Visibility,
+    EnumDecl, EnumVariant, Field, FnDecl, GenericParam, ImplBlock, Item, ModDecl, Param, Path,
+    SelfParam, StructDecl, StructDeclKind, TraitDecl, TypeAliasDecl, TypeExpr, UseDecl, Visibility,
 };
 use nether_diagnostics::Span;
 use nether_lexer::{Keyword, Punct, Token};
@@ -28,6 +28,18 @@ impl Parser {
         } else {
             Visibility::Private
         };
+        let derived_traits = self.parse_prefix_trait_list();
+        if !derived_traits.is_empty()
+            && !matches!(
+                self.peek(),
+                Token::Keyword(Keyword::Struct) | Token::Keyword(Keyword::Enum)
+            )
+        {
+            self.error(
+                start,
+                "a prefix trait/derive list is only valid before `struct` or `enum`",
+            );
+        }
         if allow_pascal_case && !matches!(self.peek(), Token::Keyword(Keyword::Type)) {
             self.error(
                 start,
@@ -36,15 +48,15 @@ impl Parser {
         }
         match self.peek() {
             Token::Keyword(Keyword::Struct) => self
-                .parse_struct_decl(doc, visibility, start)
+                .parse_struct_decl(doc, visibility, start, derived_traits)
                 .map(Item::Struct),
             Token::Keyword(Keyword::Type) => self
                 .parse_type_alias_decl(doc, visibility, start, allow_pascal_case)
                 .map(Item::TypeAlias),
             Token::Keyword(Keyword::Impl) => self.parse_impl_block().map(Item::Impl),
-            Token::Keyword(Keyword::Enum) => {
-                self.parse_enum_decl(doc, visibility, start).map(Item::Enum)
-            }
+            Token::Keyword(Keyword::Enum) => self
+                .parse_enum_decl(doc, visibility, start, derived_traits)
+                .map(Item::Enum),
             Token::Keyword(Keyword::Trait) => self
                 .parse_trait_decl(doc, visibility, start)
                 .map(Item::Trait),
@@ -62,6 +74,36 @@ impl Parser {
                 None
             }
         }
+    }
+
+    /// `Clone + Eq struct Value { ... }` — Stage 3's prefix derivation
+    /// spelling. It lowers directly into the declaration's ordinary trait
+    /// opt-in list, so resolver/typecheck use one implementation mechanism.
+    fn parse_prefix_trait_list(&mut self) -> Vec<TypeExpr> {
+        let Token::Ident(first) = self.peek() else {
+            return Vec::new();
+        };
+        // Trait names follow the type-level PascalCase convention. Besides
+        // removing ambiguity, this preserves the dedicated migration error
+        // for the removed lowercase `private` modifier.
+        if !first.chars().next().is_some_and(char::is_uppercase) {
+            return Vec::new();
+        }
+        let mut traits = Vec::new();
+        loop {
+            let ident = self.expect_ident();
+            let span = ident.span;
+            let path = Path::single(self.next_id(), ident);
+            traits.push(TypeExpr::Named {
+                path,
+                generics: Vec::new(),
+                span,
+            });
+            if !self.eat_punct(Punct::Plus) {
+                break;
+            }
+        }
+        traits
     }
 
     /// Stage 3's first item attribute. Attributes are parsed centrally so
@@ -132,12 +174,14 @@ impl Parser {
         doc: Option<String>,
         visibility: Visibility,
         start: Span,
+        mut derived_traits: Vec<TypeExpr>,
     ) -> Option<StructDecl> {
         self.expect_keyword(Keyword::Struct);
         let id = self.next_id();
         let name = self.expect_ident();
         let generics = self.parse_optional_generic_params();
-        let traits = self.parse_trait_list();
+        derived_traits.extend(self.parse_trait_list());
+        let traits = derived_traits;
         let kind = match self.peek() {
             Token::Punct(Punct::LBrace) => {
                 self.bump();
@@ -279,12 +323,14 @@ impl Parser {
         doc: Option<String>,
         visibility: Visibility,
         start: Span,
+        mut derived_traits: Vec<TypeExpr>,
     ) -> Option<EnumDecl> {
         self.expect_keyword(Keyword::Enum);
         let id = self.next_id();
         let name = self.expect_ident();
         let generics = self.parse_optional_generic_params();
-        let traits = self.parse_trait_list();
+        derived_traits.extend(self.parse_trait_list());
+        let traits = derived_traits;
         self.expect_punct(Punct::LBrace, "to start an enum body");
         let mut variants = Vec::new();
         while !matches!(self.peek(), Token::Punct(Punct::RBrace)) && !self.is_eof() {
@@ -639,12 +685,19 @@ impl Parser {
         let mut params = Vec::new();
         while !matches!(self.peek(), Token::Punct(Punct::Gt)) && !self.is_eof() {
             let name = self.expect_ident();
-            let bound = if self.eat_punct(Punct::Colon) {
-                Some(self.parse_type_expr())
+            let has_legacy_colon = self.eat_punct(Punct::Colon);
+            let has_inline_bound =
+                has_legacy_colon || !matches!(self.peek(), Token::Punct(Punct::Comma | Punct::Gt));
+            let bounds = if has_inline_bound {
+                let mut bounds = vec![self.parse_type_expr()];
+                while self.eat_punct(Punct::Plus) {
+                    bounds.push(self.parse_type_expr());
+                }
+                bounds
             } else {
-                None
+                Vec::new()
             };
-            params.push(GenericParam { name, bound });
+            params.push(GenericParam { name, bounds });
             if !self.eat_punct(Punct::Comma) {
                 break;
             }

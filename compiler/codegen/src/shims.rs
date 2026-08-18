@@ -58,6 +58,9 @@ pub struct Shims<'ctx> {
     /// construction-time drop callback (see module docs' contrast with
     /// `reference`).
     own_drop: RefCell<HashMap<Type, Func<'ctx>>>,
+    /// Retains the fields of an already byte-copied heap payload. Used by
+    /// structural `Clone` after allocating a distinct outer object.
+    own_retain: RefCell<HashMap<Type, Func<'ctx>>>,
     closure_drop: RefCell<HashMap<Vec<Type>, Func<'ctx>>>,
     counter: RefCell<u32>,
 }
@@ -73,6 +76,7 @@ impl<'ctx> Shims<'ctx> {
         Shims {
             reference: RefCell::new(HashMap::new()),
             own_drop: RefCell::new(HashMap::new()),
+            own_retain: RefCell::new(HashMap::new()),
             closure_drop: RefCell::new(HashMap::new()),
             counter: RefCell::new(0),
         }
@@ -169,6 +173,46 @@ impl<'ctx> Shims<'ctx> {
             runtime,
             f,
             retain: false,
+        };
+        cx.emit_struct_fields(base, ty);
+        m.ret(None);
+        m.position_at_end(saved_block);
+        Some(f)
+    }
+
+    /// Retain counterpart of [`Self::own_drop_shim`], walking the fields
+    /// directly rather than retaining the outer object pointer. A structural
+    /// clone memcpy's the payload first, then uses this to establish the new
+    /// payload's independent ARC/weak ownership credits.
+    pub fn own_retain_shim(
+        &self,
+        m: &ModuleCx<'ctx>,
+        layout: &Layout<'_, 'ctx>,
+        runtime: &Runtime<'ctx>,
+        ty: &Type,
+    ) -> Option<Func<'ctx>> {
+        let field_tys = fields_of(ty, layout.sigs);
+        if !field_tys
+            .iter()
+            .any(|t| has_heap_content(t, layout.defs, layout.sigs))
+        {
+            return None;
+        }
+        if let Some(&f) = self.own_retain.borrow().get(ty) {
+            return Some(f);
+        }
+        let saved_block = m.current_block();
+        let f = self.declare_shim(m, true);
+        self.own_retain.borrow_mut().insert(ty.clone(), f);
+        let entry = m.append_block(f, "entry");
+        m.position_at_end(entry);
+        let base = m.param(f, 0);
+        let cx = ShimCx {
+            m,
+            layout,
+            runtime,
+            f,
+            retain: true,
         };
         cx.emit_struct_fields(base, ty);
         m.ret(None);

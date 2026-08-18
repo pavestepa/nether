@@ -2,9 +2,7 @@ use super::*;
 
 /// Stage 2, slice 4: `to(value)`, the universal ownership-domain
 /// conversion (language-spec §9), with inferred or explicit target. Three
-/// of the four transitions are sound pure relabeling
-/// (`:T -> T`, `:t -> t`, `t -> :t`); `T -> :T` (heap) stays rejected
-/// until `Clone` exists (spec §10, Stage 3).
+/// Stage 3 adds structural `Clone` for the fourth transition, `T -> :T`.
 
 #[test]
 fn owned_to_arc_conversion_consumes_the_source() {
@@ -74,7 +72,99 @@ fn main() {
     println(owned.name);
 }
 "#,
-        "requires `Clone`",
+        "must implement `Clone`",
+    );
+}
+
+#[test]
+fn ordinary_heap_to_owned_heap_uses_explicit_clone_opt_in() {
+    assert_ok(
+        r#"
+Clone struct Dog { name String }
+fn main() {
+    let d = Dog { name = "Rex" };
+    let owned: Dog = to(d);
+    println(d.name);
+    println(owned.name);
+}
+"#,
+    );
+}
+
+#[test]
+fn structural_clone_rejects_unique_fields() {
+    assert_err(
+        r#"
+struct Collar { size i32 }
+Clone struct Dog { collar: Collar }
+fn main() {
+    let d = Dog { collar = :Collar { size = 4 } };
+    let owned: Dog = to(d);
+}
+"#,
+        "every structurally cloned heap type",
+    );
+}
+
+#[test]
+fn structural_clone_accepts_recursively_cloneable_unique_fields() {
+    assert_ok(
+        r#"
+Clone struct Collar { size i32 }
+Clone struct Dog { collar: Collar }
+fn main() {
+    let d = Dog { collar = :Collar { size = 4 } };
+    let owned: Dog = to(d);
+    println(`${d.collar.size}`);
+    println(`${owned.collar.size}`);
+}
+"#,
+    );
+}
+
+#[test]
+fn structural_clone_rejects_a_cyclic_unique_clone_graph() {
+    assert_err(
+        r#"
+Clone struct Node { next: Node }
+fn clone_node(node Node): Node { return to(node); }
+fn main() {}
+"#,
+        "clone graph must be finite",
+    );
+}
+
+#[test]
+fn user_defined_clone_override_must_have_the_owned_return_signature() {
+    assert_err(
+        r#"
+Clone struct Dog { name String }
+impl Dog {
+    clone(: &self) Dog { return Dog { name = self.name }; }
+}
+fn main() {
+    let dog = Dog { name = "Rex" };
+    let owned: Dog = to(dog);
+}
+"#,
+        "invalid `clone` override",
+    );
+}
+
+#[test]
+fn user_defined_clone_override_is_accepted() {
+    assert_ok(
+        r#"
+Clone struct Dog { name String }
+impl Dog {
+    clone(: &self): Dog { return :Dog { name = self.name }; }
+}
+fn main() {
+    let dog = Dog { name = "Rex" };
+    let owned: Dog = to(dog);
+    println(owned.name);
+}
+"#,
     );
 }
 

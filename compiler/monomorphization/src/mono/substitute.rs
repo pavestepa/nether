@@ -15,6 +15,10 @@ impl Mono<'_> {
             HirExprKind::PromoteUnique(value) => {
                 MonoExprKind::PromoteUnique(Box::new(self.subst_expr(value, subst)))
             }
+            HirExprKind::CloneToUnique(value) => {
+                MonoExprKind::CloneToUnique(Box::new(self.subst_expr(value, subst)))
+            }
+            HirExprKind::Hash(value) => MonoExprKind::Hash(Box::new(self.subst_expr(value, subst))),
             HirExprKind::FnRef(fn_id) => {
                 let hir_fn = self.hir.get(*fn_id);
                 assert!(hir_fn.generics.is_empty(), "monomorphization: cannot take a bare reference to generic function `{}` without a call site to infer its type arguments from (see this crate's module docs)", hir_fn.name);

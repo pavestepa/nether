@@ -452,6 +452,35 @@ fn main() {
 }
 
 #[test]
+fn multiple_generic_bounds_are_all_checked_and_expose_their_methods() {
+    assert_ok(
+        r#"
+trait Sound { sound(self) String; }
+trait Named { name(self) String; }
+struct Dog;
+impl Dog Sound { sound(self) String { return "woof"; } }
+impl Dog Named { name(self) String { return "Rex"; } }
+fn describe<T Sound + Named>(value T) String {
+    return `${value.name()}: ${value.sound()}`;
+}
+fn main() { println(describe(Dog)); }
+"#,
+    );
+
+    assert_err(
+        r#"
+trait Sound { sound(self) String; }
+trait Named { name(self) String; }
+struct Bell;
+impl Bell Sound { sound(self) String { return "ding"; } }
+fn describe<T: Sound + Named>(value T) String { return value.sound(); }
+fn main() { describe(Bell); }
+"#,
+        "does not implement `Named`",
+    );
+}
+
+#[test]
 fn option_unit_variant_uses_context_and_never_leaks_an_unknown_type() {
     assert_ok(
         r#"
