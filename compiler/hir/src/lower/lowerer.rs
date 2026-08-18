@@ -202,6 +202,7 @@ impl Lowerer<'_> {
         HirFunction {
             id,
             name: p.name.clone(),
+            is_async: p.sig.is_async,
             owner: p.owner,
             self_param: p.decl.self_param,
             // A concrete specialization's `self` is already fully

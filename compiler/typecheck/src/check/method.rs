@@ -187,11 +187,11 @@ impl Checker<'_> {
             Some(args) => {
                 let subst =
                     self.check_call_args(&sig, args, span, None, None, generic_args, call_id);
-                substitute_generic(&sig.ret, &subst)
+                call_result_type(&sig, substitute_generic(&sig.ret, &subst))
             }
             None => Type::Function(
                 sig.params.iter().map(|p| p.ty.clone()).collect(),
-                Box::new(sig.ret),
+                Box::new(call_result_type(&sig, sig.ret.clone())),
             ),
         }
     }
@@ -279,7 +279,8 @@ impl Checker<'_> {
                 .collect::<HashMap<_, _>>();
             let signature = specialize_fn_sig(&signature, &trait_subst);
             self.check_call_args(&signature, args, span, None, None, generic_args, call_id);
-            return self.sigs.normalize_associated(&signature.ret);
+            let output = self.sigs.normalize_associated(&signature.ret);
+            return call_result_type(&signature, output);
         }
         let owner_id = match base_ty {
             Type::Struct(id, _) | Type::TupleStruct(id, _) => Some(*id),
@@ -430,7 +431,7 @@ impl Checker<'_> {
             generic_args,
             call_id,
         );
-        substitute_generic(&sig.ret, &subst)
+        call_result_type(&sig, substitute_generic(&sig.ret, &subst))
     }
 
     pub(super) fn check_generic_method_call(
@@ -501,7 +502,7 @@ impl Checker<'_> {
                 let sig = specialize_fn_sig(&raw_sig, &trait_subst);
                 let subst =
                     self.check_call_args(&sig, args, span, None, None, generic_args, call_id);
-                return substitute_generic(&sig.ret, &subst);
+                return call_result_type(&sig, substitute_generic(&sig.ret, &subst));
             }
         }
         self.err(

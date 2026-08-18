@@ -128,6 +128,23 @@ impl Checker<'_> {
                 )
             }
             ExprKind::Array(elems) => self.check_array(elems, expected, expr.span),
+            ExprKind::Await(inner) => {
+                if !self.in_async {
+                    self.err(expr.span, "`await` is only allowed inside an `async fn`");
+                }
+                match self.check_expr(inner) {
+                    Type::Task(output) => *output,
+                    Type::Error => Type::Error,
+                    other => {
+                        let found = self.describe(&other);
+                        self.err(
+                            inner.span,
+                            format!("cannot await `{found}`; expected a task"),
+                        );
+                        Type::Error
+                    }
+                }
+            }
             ExprKind::StringTemplate(parts) => {
                 for part in parts {
                     if let TemplatePart::Expr(e) = part {

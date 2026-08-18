@@ -4,6 +4,7 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
     pub(super) fn gen_rvalue(&mut self, rvalue: &Rvalue, dest_ty: &Type) -> Value<'ctx> {
         match rvalue {
             Rvalue::Use(op) => self.gen_operand(op),
+            Rvalue::Await(task) => self.gen_await(task, dest_ty),
             Rvalue::AddressOf(place) => self.address_of_place(place),
             Rvalue::Deref(reference) => {
                 let address = self.gen_operand(reference);
@@ -389,9 +390,23 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
                         }
                     })
                     .collect();
-                self.m
+                let result = self
+                    .m
                     .call(f, &arg_vals, "call")
-                    .unwrap_or_else(|| self.gen_unit())
+                    .unwrap_or_else(|| self.gen_unit());
+                if mir_target.is_async {
+                    let output = if is_aggregate(&mir_target.ret, self.defs()) {
+                        let slot = self
+                            .m
+                            .alloca(self.layout.llvm_type(&mir_target.ret), "async_output");
+                        self.m.store(slot, result);
+                        slot
+                    } else {
+                        result
+                    };
+                    return self.gen_completed_task(output, &mir_target.ret);
+                }
+                result
             }
             CallTarget::Dynamic(callee) => {
                 let arg_vals: Vec<Value<'ctx>> = args.iter().map(|a| self.gen_operand(a)).collect();

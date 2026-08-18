@@ -383,11 +383,11 @@ impl Checker<'_> {
                         generic_args,
                         call_id,
                     );
-                    substitute_generic(&sig.ret, &subst)
+                    call_result_type(&sig, substitute_generic(&sig.ret, &subst))
                 }
                 None if sig.generics.is_empty() => Type::Function(
                     sig.params.iter().map(|p| p.ty.clone()).collect(),
-                    Box::new(sig.ret),
+                    Box::new(call_result_type(&sig, sig.ret.clone())),
                 ),
                 None => {
                     self.err(

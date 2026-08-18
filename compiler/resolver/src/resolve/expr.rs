@@ -50,7 +50,9 @@ impl Resolver<'_> {
                     }
                 }
             }
-            ExprKind::Unary { expr, .. } | ExprKind::MutArg(expr) => self.resolve_expr(expr),
+            ExprKind::Unary { expr, .. } | ExprKind::MutArg(expr) | ExprKind::Await(expr) => {
+                self.resolve_expr(expr)
+            }
             ExprKind::Binary { lhs, rhs, .. } => {
                 self.resolve_expr(lhs);
                 self.resolve_expr(rhs);

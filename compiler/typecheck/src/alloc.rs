@@ -36,7 +36,9 @@ pub enum AllocKind {
 pub fn alloc_kind(ty: &Type, defs: &Definitions) -> AllocKind {
     match ty {
         Type::Primitive(_) | Type::Const(_) | Type::FixedArray(_, _) => AllocKind::Stack,
-        Type::String | Type::Array(_) | Type::Any(_, _) | Type::Some(_, _) => AllocKind::Heap,
+        Type::String | Type::Array(_) | Type::Any(_, _) | Type::Some(_, _) | Type::Task(_) => {
+            AllocKind::Heap
+        }
         Type::Struct(id, _) | Type::TupleStruct(id, _) => {
             if is_pascal_case(defs.get(*id).name.as_str()) {
                 AllocKind::Heap

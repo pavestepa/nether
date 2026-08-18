@@ -4,6 +4,8 @@ use nether_ast::{
 use nether_diagnostics::{Diagnostic, SourceMap};
 use nether_parser::parse_module;
 
+#[path = "parse_tests/async_syntax.rs"]
+mod async_syntax;
 #[path = "parse_tests/expressions.rs"]
 mod expressions;
 #[path = "parse_tests/ownership.rs"]

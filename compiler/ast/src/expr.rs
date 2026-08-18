@@ -24,6 +24,8 @@ pub enum ExprKind {
     Path(Path),
     Tuple(Vec<Expr>),
     Array(Vec<Expr>),
+    /// Prefix `await expr`. Type checking restricts it to async bodies.
+    Await(Box<Expr>),
     /// A backtick template string; see [`Literal::Str`] for the
     /// non-interpolating plain-string counterpart (language-spec §2.3).
     StringTemplate(Vec<TemplatePart>),

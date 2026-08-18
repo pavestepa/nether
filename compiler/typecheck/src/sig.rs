@@ -80,6 +80,7 @@ pub struct FnSig {
     pub visibility: Visibility,
     pub file: FileId,
     pub self_param: Option<SelfParam>,
+    pub is_async: bool,
     pub params: Vec<ParamSig>,
     pub ret: Type,
     /// This item's own generic parameters and their bounds, used for
@@ -689,7 +690,8 @@ impl Signatures {
             | Type::Function(_, _)
             | Type::Weak(_)
             | Type::Any(_, _)
-            | Type::Some(_, _) => true,
+            | Type::Some(_, _)
+            | Type::Task(_) => true,
             Type::Struct(_, _) | Type::TupleStruct(_, _) => {
                 if alloc_kind(ty, defs) == AllocKind::Heap {
                     true

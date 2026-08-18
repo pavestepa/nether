@@ -36,6 +36,14 @@ use entry::{
 use layout::*;
 use traits::*;
 
+pub(super) fn call_result_type(sig: &FnSig, output: Type) -> Type {
+    if sig.is_async {
+        Type::Task(Box::new(output))
+    } else {
+        output
+    }
+}
+
 pub use entry::check;
 
 /// Every result of one [`check`] call.
@@ -645,6 +653,7 @@ fn build_fn_sig(
         visibility: f.visibility,
         file: f.span.file,
         self_param: f.self_param,
+        is_async: f.is_async,
         params,
         ret,
         generics,

@@ -28,6 +28,7 @@ pub(super) fn collect_closure_locals(
             }
         }
         HirExprKind::Borrow(inner)
+        | HirExprKind::Await(inner)
         | HirExprKind::Deref(inner)
         | HirExprKind::PromoteUnique(inner)
         | HirExprKind::CloneToUnique(inner)

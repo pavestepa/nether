@@ -25,6 +25,10 @@ impl Lowerer<'_> {
     fn lower_expr_unpacked(&mut self, expr: &Expr) -> HirExpr {
         let ty = self.ty_of(expr.id);
         match &expr.kind {
+            ExprKind::Await(inner) => HirExpr {
+                kind: HirExprKind::Await(Box::new(self.lower_expr(inner))),
+                ty,
+            },
             ExprKind::Literal(lit) => HirExpr {
                 kind: HirExprKind::Literal(lit.clone()),
                 ty,

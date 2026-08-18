@@ -5,6 +5,8 @@ use nether_typecheck::check;
 mod associated_consts;
 #[path = "check_tests/associated_types.rs"]
 mod associated_types;
+#[path = "check_tests/async_check.rs"]
+mod async_check;
 #[path = "check_tests/borrows.rs"]
 mod borrows;
 #[path = "check_tests/casing.rs"]

@@ -94,6 +94,8 @@ pub enum Type {
     Any(DefId, Vec<Type>),
     /// `some Trait<...>` opaque value inside its declaring API.
     Some(DefId, Vec<Type>),
+    /// A suspended computation produced by calling an `async fn`.
+    Task(Box<Type>),
     /// An unsubstituted generic type parameter, scoped to the item
     /// currently being checked. Monomorphization substitutes a concrete
     /// `Type` for this once a generic item is
@@ -198,6 +200,7 @@ impl Type {
             | Type::Unique(inner)
             | Type::Ref(inner)
             | Type::MutRef(inner) => inner.contains_error(),
+            Type::Task(output) => output.contains_error(),
             Type::Function(params, ret) => {
                 params.iter().any(Type::contains_error) || ret.contains_error()
             }
@@ -224,6 +227,7 @@ impl Type {
             | Type::Unique(inner)
             | Type::Ref(inner)
             | Type::MutRef(inner) => inner.contains_generic(),
+            Type::Task(output) => output.contains_generic(),
             Type::Function(params, ret) => {
                 params.iter().any(Type::contains_generic) || ret.contains_generic()
             }
@@ -264,7 +268,9 @@ impl Type {
             | (Type::TupleStruct(a_id, a), Type::TupleStruct(b_id, b)) => {
                 a_id == b_id && a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.compatible(b))
             }
-            (Type::Array(a), Type::Array(b)) | (Type::Weak(a), Type::Weak(b)) => a.compatible(b),
+            (Type::Array(a), Type::Array(b))
+            | (Type::Weak(a), Type::Weak(b))
+            | (Type::Task(a), Type::Task(b)) => a.compatible(b),
             (Type::FixedArray(a_elem, a_len), Type::FixedArray(b_elem, b_len)) => {
                 a_len == b_len && a_elem.compatible(b_elem)
             }

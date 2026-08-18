@@ -243,6 +243,8 @@ pub struct FnDecl {
     pub id: NodeId,
     pub name: Ident,
     pub visibility: Visibility,
+    /// `async fn` (or `async method(...)` inside an impl/trait).
+    pub is_async: bool,
     pub generics: Vec<GenericParam>,
     /// `None` for a static method / standalone function; `Some(_)` for an
     /// instance method (language-spec §6).

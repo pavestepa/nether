@@ -52,6 +52,7 @@ pub struct MirFunction {
     pub name: Symbol,
     pub owner: Option<DefId>,
     pub is_closure: bool,
+    pub is_async: bool,
     /// Locals initialized from fields in the hidden closure environment
     /// parameter. Empty for ordinary functions.
     pub closure_captures: Vec<Local>,
@@ -151,6 +152,7 @@ pub enum CallTarget {
 #[derive(Debug, Clone)]
 pub enum Rvalue {
     Use(Operand),
+    Await(Operand),
     /// Address of an assignable place; no ownership credit is created.
     AddressOf(Place),
     Deref(Operand),

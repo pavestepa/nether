@@ -70,7 +70,19 @@ impl Parser {
             Token::Keyword(Keyword::Trait) => self
                 .parse_trait_decl(doc, visibility, start)
                 .map(Item::Trait),
-            Token::Keyword(Keyword::Fn) => self.parse_fn_decl(doc, visibility, start).map(Item::Fn),
+            Token::Keyword(Keyword::Fn) => self
+                .parse_fn_decl(doc, visibility, start, false)
+                .map(Item::Fn),
+            Token::Keyword(Keyword::Async) => {
+                self.bump();
+                if !matches!(self.peek(), Token::Keyword(Keyword::Fn)) {
+                    self.error(self.peek_span(), "`async` must be followed by `fn`");
+                    None
+                } else {
+                    self.parse_fn_decl(doc, visibility, start, true)
+                        .map(Item::Fn)
+                }
+            }
             Token::Keyword(Keyword::Use) => self.parse_use_decl(visibility, start).map(Item::Use),
             Token::Keyword(Keyword::Mod) => self.parse_mod_decl(visibility, start).map(Item::Mod),
             other => {
@@ -577,6 +589,7 @@ impl Parser {
         doc: Option<String>,
         visibility: Visibility,
         start: Span,
+        is_async: bool,
     ) -> Option<FnDecl> {
         self.expect_keyword(Keyword::Fn);
         let id = self.next_id();
@@ -602,6 +615,7 @@ impl Parser {
             id,
             name,
             visibility,
+            is_async,
             generics,
             self_param: None,
             params,
@@ -623,6 +637,7 @@ impl Parser {
         } else {
             Visibility::Private
         };
+        let is_async = self.eat_keyword(Keyword::Async);
         if !matches!(self.peek(), Token::Ident(_)) {
             let span = self.peek_span();
             self.error(
@@ -655,6 +670,7 @@ impl Parser {
             id,
             name,
             visibility,
+            is_async,
             generics,
             self_param,
             params,

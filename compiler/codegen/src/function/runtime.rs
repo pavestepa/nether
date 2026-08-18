@@ -1,6 +1,27 @@
 use super::*;
 
 impl<'ctx> FnCodegen<'_, 'ctx> {
+    pub(super) fn gen_completed_task(&self, output: Value<'ctx>, output_ty: &Type) -> Value<'ctx> {
+        let size = self.m.size_of(self.layout.llvm_type(output_ty));
+        let drop_fn = self.func_ptr_or_null(self.shims.drop_shim(
+            self.m,
+            self.layout,
+            self.runtime,
+            output_ty,
+        ));
+        let task = self
+            .m
+            .call(self.runtime.alloc, &[size, drop_fn], "completed_task")
+            .expect("task allocation returns a payload pointer");
+        self.store_at(task, output_ty, output);
+        task
+    }
+
+    pub(super) fn gen_await(&self, task: &Operand, output_ty: &Type) -> Value<'ctx> {
+        let task = self.gen_operand(task);
+        self.load_value(task, output_ty)
+    }
+
     pub(super) fn gen_pack_existential(&self, methods: &[Operand]) -> Value<'ctx> {
         let word = self.m.int_type(64);
         let size = self

@@ -67,6 +67,7 @@ pub(super) struct Checker<'a> {
     pub(super) const_generics: HashMap<Symbol, Type>,
     pub(super) opaque_witness: Option<Type>,
     pub(super) return_ty: Type,
+    pub(super) in_async: bool,
     pub(super) loop_depth: usize,
 }
 
@@ -111,6 +112,7 @@ impl<'a> Checker<'a> {
             const_generics: HashMap::new(),
             opaque_witness: None,
             return_ty: Type::unit(),
+            in_async: false,
             loop_depth: 0,
         }
     }
@@ -396,6 +398,7 @@ impl<'a> Checker<'a> {
     }
 
     pub(super) fn check_fn_decl(&mut self, f: &FnDecl, sig: &FnSig, self_ty: Option<Type>) {
+        self.in_async = f.is_async;
         self.generics = sig.generics.iter().cloned().collect();
         self.const_generics = sig.const_params.clone();
         self.opaque_witness = None;
@@ -797,7 +800,7 @@ pub(super) fn count_local_uses_in_expr(
                 }
             }
         }
-        ExprKind::Unary { expr, .. } | ExprKind::MutArg(expr) => {
+        ExprKind::Unary { expr, .. } | ExprKind::MutArg(expr) | ExprKind::Await(expr) => {
             count_local_uses_in_expr(expr, resolved, counts, pinned, pin)
         }
         ExprKind::Binary { lhs, rhs, .. }

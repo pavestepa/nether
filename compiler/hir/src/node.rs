@@ -95,6 +95,7 @@ impl HirModule {
 pub struct HirFunction {
     pub id: HirFnId,
     pub name: Symbol,
+    pub is_async: bool,
     /// `Some` for a method (the type/enum it belongs to), `None` for a
     /// standalone function.
     pub owner: Option<DefId>,
@@ -144,6 +145,7 @@ pub struct HirExpr {
 #[derive(Debug, Clone)]
 pub enum HirExprKind {
     Literal(Literal),
+    Await(Box<HirExpr>),
     /// A trait-associated constant selected by a still-generic owner.
     /// Monomorphization substitutes `owner` and selects the concrete impl.
     AssociatedConst {

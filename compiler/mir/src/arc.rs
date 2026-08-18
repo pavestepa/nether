@@ -177,6 +177,9 @@ fn releases_after_call(rvalue: &Rvalue) -> bool {
 fn is_aliasing(rvalue: &Rvalue) -> bool {
     matches!(
         rvalue,
-        Rvalue::Field { .. } | Rvalue::VariantField { .. } | Rvalue::Index { .. }
+        Rvalue::Field { .. }
+            | Rvalue::VariantField { .. }
+            | Rvalue::Index { .. }
+            | Rvalue::Await(_)
     )
 }

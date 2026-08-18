@@ -148,6 +148,14 @@ impl FnBuilder<'_> {
 
     pub(super) fn lower_expr(&mut self, expr: &MonoExpr) -> Operand {
         match &expr.kind {
+            MonoExprKind::Await(task) => {
+                let operand = self.lower_expr(task);
+                let result = Operand::Local(
+                    self.materialize(Rvalue::Await(operand.clone()), expr.ty.clone()),
+                );
+                self.release_temporary_value(task, &operand);
+                result
+            }
             MonoExprKind::Literal(l) => {
                 let operand = Operand::Literal(l.clone(), expr.ty.clone());
                 if self.sigs.has_managed_content(&expr.ty, self.defs) {

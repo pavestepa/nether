@@ -4,6 +4,7 @@ pub(super) fn placeholder_for(hir_fn: &HirFunction) -> MonoFunction {
     MonoFunction {
         id: MonoFnId(0),
         name: hir_fn.name.clone(),
+        is_async: hir_fn.is_async,
         owner: hir_fn.owner,
         is_closure: false,
         self_param: hir_fn.self_param,
@@ -61,6 +62,7 @@ pub(super) fn subst_type(ty: &Type, subst: &HashMap<Symbol, Type>) -> Type {
         Type::Some(id, args) => {
             Type::Some(*id, args.iter().map(|t| subst_type(t, subst)).collect())
         }
+        Type::Task(output) => Type::Task(Box::new(subst_type(output, subst))),
         Type::Array(elem) => Type::Array(Box::new(subst_type(elem, subst))),
         Type::FixedArray(element, length) => Type::FixedArray(
             Box::new(subst_type(element, subst)),
@@ -125,6 +127,11 @@ pub(super) fn collect_generic_bindings(
                 for (declared, concrete) in args.iter().zip(concrete_args) {
                     collect_generic_bindings(declared, concrete, out);
                 }
+            }
+        }
+        Type::Task(output) => {
+            if let Type::Task(concrete_output) = concrete {
+                collect_generic_bindings(output, concrete_output, out);
             }
         }
         Type::Struct(_, args) => {

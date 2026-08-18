@@ -149,6 +149,16 @@ impl Parser {
     fn parse_unary(&mut self) -> Expr {
         let start = self.peek_span();
         match self.peek() {
+            Token::Keyword(Keyword::Await) => {
+                self.bump();
+                let expr = self.parse_unary();
+                let span = start.to(expr.span);
+                Expr {
+                    id: self.next_id(),
+                    kind: ExprKind::Await(Box::new(expr)),
+                    span,
+                }
+            }
             Token::Punct(Punct::Minus) => {
                 self.bump();
                 let expr = self.parse_unary();

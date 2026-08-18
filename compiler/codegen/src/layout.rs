@@ -75,7 +75,8 @@ impl<'m, 'ctx> Layout<'m, 'ctx> {
             | Type::Function(_, _)
             | Type::Weak(_)
             | Type::Any(_, _)
-            | Type::Some(_, _) => self.m.ptr_type(),
+            | Type::Some(_, _)
+            | Type::Task(_) => self.m.ptr_type(),
             Type::Struct(_, _) | Type::TupleStruct(_, _) => match alloc_kind(ty, self.defs) {
                 AllocKind::Heap => self.m.ptr_type(),
                 AllocKind::Stack => self.struct_layout(ty).ty.into(),

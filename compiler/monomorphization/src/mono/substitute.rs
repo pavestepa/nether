@@ -5,6 +5,9 @@ impl Mono<'_> {
         let ty = self.subst_ty(&expr.ty, subst);
         let kind = match &expr.kind {
             HirExprKind::Literal(l) => MonoExprKind::Literal(l.clone()),
+            HirExprKind::Await(inner) => {
+                MonoExprKind::Await(Box::new(self.subst_expr(inner, subst)))
+            }
             HirExprKind::AssociatedConst { owner, name } => {
                 let owner = self.subst_ty(owner, subst);
                 let owner_id = owner_def_id(&owner, self.hir.array_owner).unwrap_or_else(|| {
@@ -370,6 +373,7 @@ impl Mono<'_> {
         self.functions.push(MonoFunction {
             id,
             name: Symbol::new(format!("closure_{}", id.0)),
+            is_async: false,
             owner: None,
             is_closure: true,
             self_param: None,
@@ -406,6 +410,7 @@ impl Mono<'_> {
         self.functions.push(MonoFunction {
             id,
             name: Symbol::new(format!("fn_adapter_{}", target.0)),
+            is_async: false,
             owner: None,
             is_closure: true,
             self_param: None,
@@ -500,6 +505,7 @@ impl Mono<'_> {
         self.functions.push(MonoFunction {
             id,
             name: Symbol::new(format!("witness_{}_{}", method_name, id.0)),
+            is_async: false,
             owner: None,
             is_closure: true,
             self_param: None,

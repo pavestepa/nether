@@ -284,6 +284,7 @@ pub(super) fn describe_type(ty: &Type, resolved: &ResolvedNames) -> String {
                 )
             }
         }
+        Type::Task(output) => format!("Task<{}>", describe_type(output, resolved)),
         Type::Generic(name) => name.to_string(),
         Type::Associated(owner, name) => {
             format!("{}.{name}", describe_type(owner, resolved))
@@ -343,6 +344,7 @@ pub(crate) fn substitute_generic(ty: &Type, subst: &HashMap<Symbol, Type>) -> Ty
                 .map(|arg| substitute_generic(arg, subst))
                 .collect(),
         ),
+        Type::Task(output) => Type::Task(Box::new(substitute_generic(output, subst))),
         Type::Function(params, ret) => Type::Function(
             params
                 .iter()

@@ -423,6 +423,7 @@ pub(super) fn specialize_fn_sig(sig: &FnSig, subst: &HashMap<Symbol, Type>) -> F
         visibility: sig.visibility,
         file: sig.file,
         self_param: sig.self_param,
+        is_async: sig.is_async,
         params: sig
             .params
             .iter()
@@ -461,6 +462,7 @@ pub(super) fn specialize_fn_sig(sig: &FnSig, subst: &HashMap<Symbol, Type>) -> F
 
 pub(super) fn method_signatures_match(actual: &FnSig, required: &FnSig) -> bool {
     actual.self_param == required.self_param
+        && actual.is_async == required.is_async
         && actual.params.len() == required.params.len()
         && actual.generics.len() == required.generics.len()
         && actual

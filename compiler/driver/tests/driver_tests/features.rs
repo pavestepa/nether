@@ -540,6 +540,42 @@ fn main() {
 }
 
 #[test]
+fn completed_async_tasks_and_await_run_end_to_end() {
+    ensure_runtime_built();
+    let dir = std::env::temp_dir().join(format!("nether_async_test_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.nr");
+    std::fs::write(
+        &entry,
+        r#"
+async fn fetch() String { return "ready"; }
+async fn answer() i32 { return 42; }
+async fn main() {
+    let text String = await fetch();
+    let value i32 = await answer();
+    println(`${text}:${value}`);
+}
+"#,
+    )
+    .unwrap();
+    let result = nether_driver::check(&entry).unwrap();
+    assert!(
+        !result
+            .diagnostics
+            .iter()
+            .any(nether_diagnostics::Diagnostic::is_error),
+        "unexpected diagnostics: {:?}",
+        result.diagnostics
+    );
+    let output = Command::new(result.executable_path.unwrap())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "status: {:?}", output.status);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "ready:42\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn stored_heap_borrows_run_end_to_end() {
     ensure_runtime_built();
     let dir =

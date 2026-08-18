@@ -186,6 +186,7 @@ impl<'a> FnBuilder<'a> {
             name: f.name.clone(),
             owner: f.owner,
             is_closure: f.is_closure,
+            is_async: f.is_async,
             closure_captures,
             params,
             ret: f.ret.clone(),

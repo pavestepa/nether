@@ -239,6 +239,7 @@ impl<'a> Mono<'a> {
         self.functions[id.0 as usize] = MonoFunction {
             id,
             name: hir_fn.name.clone(),
+            is_async: hir_fn.is_async,
             owner: hir_fn.owner,
             is_closure: false,
             self_param: hir_fn.self_param,
@@ -368,7 +369,8 @@ fn contains_erased_generic(ty: &Type, erased: &HashMap<Symbol, Type>) -> bool {
         | Type::Weak(inner)
         | Type::Unique(inner)
         | Type::Ref(inner)
-        | Type::MutRef(inner) => contains_erased_generic(inner, erased),
+        | Type::MutRef(inner)
+        | Type::Task(inner) => contains_erased_generic(inner, erased),
         Type::FixedArray(element, length) => {
             contains_erased_generic(element, erased) || contains_erased_generic(length, erased)
         }

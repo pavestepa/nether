@@ -164,6 +164,7 @@ pub(super) fn value_layout_reaches_cycle(
         | Type::Trait(_)
         | Type::Any(_, _)
         | Type::Some(_, _)
+        | Type::Task(_)
         | Type::Generic(_)
         | Type::Associated(_, _)
         | Type::Never

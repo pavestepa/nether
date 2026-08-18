@@ -40,6 +40,7 @@ impl MonoModule {
 pub struct MonoFunction {
     pub id: MonoFnId,
     pub name: Symbol,
+    pub is_async: bool,
     pub owner: Option<DefId>,
     pub is_closure: bool,
     pub self_param: Option<SelfParam>,
@@ -83,6 +84,7 @@ pub struct MonoExpr {
 #[derive(Debug, Clone)]
 pub enum MonoExprKind {
     Literal(Literal),
+    Await(Box<MonoExpr>),
     Local(HirLocalId),
     Borrow(Box<MonoExpr>),
     Deref(Box<MonoExpr>),
