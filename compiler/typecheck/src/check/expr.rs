@@ -162,6 +162,59 @@ impl Checker<'_> {
                 generic_args,
                 args,
             } => {
+                if let ExprKind::Path(path) = &callee.kind {
+                    if path.segments.len() == 2
+                        && path.segments[0].name.as_str() == "task"
+                        && path.segments[1].name.as_str() == "spawn"
+                    {
+                        if !generic_args.is_empty() {
+                            self.err(path.segments[1].span, "`task.spawn` is not generic");
+                        }
+                        if args.len() != 1 {
+                            self.err(
+                                expr.span,
+                                format!("`task.spawn` expects 1 argument, found {}", args.len()),
+                            );
+                            return Type::Error;
+                        }
+                        return match self.check_expr(&args[0]) {
+                            task @ Type::Task(_) => task,
+                            Type::Error => Type::Error,
+                            other => {
+                                let found = self.describe(&other);
+                                self.err(
+                                    args[0].span,
+                                    format!("`task.spawn` expects a task, found `{found}`"),
+                                );
+                                Type::Error
+                            }
+                        };
+                    }
+                    if path.segments.len() == 2
+                        && path.segments[0].name.as_str() == "timer"
+                        && path.segments[1].name.as_str() == "sleep"
+                    {
+                        if !generic_args.is_empty() {
+                            self.err(path.segments[1].span, "`timer.sleep` is not generic");
+                        }
+                        if args.len() != 1 {
+                            self.err(
+                                expr.span,
+                                format!("`timer.sleep` expects 1 argument, found {}", args.len()),
+                            );
+                        }
+                        for argument in args {
+                            let ty = self.check_expr(argument);
+                            if !matches!(ty, Type::Primitive(kind) if kind.is_integer()) {
+                                self.err(
+                                    argument.span,
+                                    "`timer.sleep` expects integer milliseconds",
+                                );
+                            }
+                        }
+                        return Type::Task(Box::new(Type::unit()));
+                    }
+                }
                 let generic_args = self.lower_call_generic_args(generic_args);
                 self.check_call(expr.id, callee, &generic_args, args, expected)
             }
@@ -172,6 +225,32 @@ impl Checker<'_> {
                 generic_args,
                 args,
             } => {
+                if let ExprKind::Path(path) = &receiver.kind {
+                    if path.segments.len() == 1
+                        && path.segments[0].name.as_str() == "timer"
+                        && method.name.as_str() == "sleep"
+                    {
+                        if !generic_args.is_empty() {
+                            self.err(method.span, "`timer.sleep` is not generic");
+                        }
+                        if args.len() != 1 {
+                            self.err(
+                                expr.span,
+                                format!("`timer.sleep` expects 1 argument, found {}", args.len()),
+                            );
+                        }
+                        for argument in args {
+                            let ty = self.check_expr(argument);
+                            if !matches!(ty, Type::Primitive(kind) if kind.is_integer()) {
+                                self.err(
+                                    argument.span,
+                                    "`timer.sleep` expects integer milliseconds",
+                                );
+                            }
+                        }
+                        return Type::Task(Box::new(Type::unit()));
+                    }
+                }
                 let generic_args = self.lower_call_generic_args(generic_args);
                 let receiver_ty = self.check_expr(receiver);
                 let receiver_mutable = self.place_root_mutable(receiver);

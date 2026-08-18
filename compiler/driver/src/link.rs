@@ -13,7 +13,8 @@ use std::process::Command;
 /// The `runtime/*` static libraries every emitted object needs, in link
 /// order (a library must come *after* whatever references its symbols —
 /// `io` calls into `string`, `string`/`array` call into `arc`).
-const RUNTIME_LIBS: [&str; 4] = [
+const RUNTIME_LIBS: [&str; 5] = [
+    "nether_rt_task",
     "nether_rt_io",
     "nether_rt_string",
     "nether_rt_array",
@@ -36,7 +37,7 @@ fn workspace_root() -> PathBuf {
 /// (those crates are meant to be *linked into* a compiled Nether program,
 /// never called into from inside the compiler itself), so nothing builds
 /// them automatically as a side effect of building `nether_driver` — run
-/// `cargo build --release -p nether-rt-arc -p nether-rt-string -p nether-rt-array -p nether-rt-io`
+/// `cargo build --release -p nether-rt-task -p nether-rt-arc -p nether-rt-string -p nether-rt-array -p nether-rt-io`
 /// once first.
 fn locate_runtime_libs() -> Option<Vec<PathBuf>> {
     let root = workspace_root();

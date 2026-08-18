@@ -72,7 +72,21 @@ impl Lowerer<'_> {
                 method,
                 args,
                 ..
-            } => self.lower_method_call(expr.id, receiver, method, args, ty),
+            } => {
+                if matches!(&receiver.kind, ExprKind::Path(path) if path.segments.len() == 1 && path.segments[0].name.as_str() == "timer")
+                    && method.name.as_str() == "sleep"
+                {
+                    HirExpr {
+                        kind: HirExprKind::CallBuiltin {
+                            name: Symbol::new("__timer_sleep"),
+                            args: args.iter().map(|arg| self.lower_expr(arg)).collect(),
+                        },
+                        ty,
+                    }
+                } else {
+                    self.lower_method_call(expr.id, receiver, method, args, ty)
+                }
+            }
             ExprKind::Field { base, field } => self.lower_field(base, field, ty),
             ExprKind::Index { base, index } => HirExpr {
                 kind: HirExprKind::Index {

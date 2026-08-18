@@ -25,6 +25,12 @@ pub struct Runtime<'ctx> {
     /// `nether_rt_arc::nether_rt_arc_release(ptr)`
     pub release: Func<'ctx>,
     pub existential_drop: Func<'ctx>,
+    pub task_completed_poll: Func<'ctx>,
+    pub task_drop: Func<'ctx>,
+    pub task_poll: Func<'ctx>,
+    pub task_block_on: Func<'ctx>,
+    pub task_spawn: Func<'ctx>,
+    pub timer_sleep: Func<'ctx>,
     /// `nether_rt_arc::nether_rt_arc_weak_retain(ptr)` -- bumps a `weak T`
     /// value's own weak count, never its referent's strong count (spec
     /// §13). Emitted for [`nether_mir::Instr::WeakRetain`].
@@ -105,6 +111,19 @@ impl<'ctx> Runtime<'ctx> {
             retain: m.declare_function("nether_rt_arc_retain", void_fn(&[ptr])),
             release: m.declare_function("nether_rt_arc_release", void_fn(&[ptr])),
             existential_drop: m.declare_function("nether_rt_existential_drop", void_fn(&[ptr])),
+            task_completed_poll: m.declare_function(
+                "nether_rt_task_completed_poll",
+                m.fn_type(&[ptr], Some(m.bool_type())),
+            ),
+            task_drop: m.declare_function("nether_rt_task_drop", void_fn(&[ptr])),
+            task_poll: m.declare_function(
+                "nether_rt_task_poll",
+                m.fn_type(&[ptr], Some(m.bool_type())),
+            ),
+            task_block_on: m.declare_function("nether_rt_task_block_on", void_fn(&[ptr])),
+            task_spawn: m.declare_function("nether_rt_task_spawn", m.fn_type(&[ptr], Some(ptr))),
+            timer_sleep: m
+                .declare_function("nether_rt_timer_sleep", m.fn_type(&[i64_ty], Some(ptr))),
             weak_retain: m.declare_function("nether_rt_arc_weak_retain", void_fn(&[ptr])),
             weak_release: m.declare_function("nether_rt_arc_weak_release", void_fn(&[ptr])),
             weak_upgrade: m.declare_function(

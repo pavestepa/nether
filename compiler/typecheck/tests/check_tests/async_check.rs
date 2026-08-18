@@ -5,7 +5,11 @@ fn async_calls_produce_tasks_and_await_extracts_the_output() {
     assert_ok(
         r#"
 async fn fetch() i32 { return 7; }
-async fn main() { let value i32 = await fetch(); }
+async fn main() {
+    await timer.sleep(1);
+    let pending = task.spawn(fetch());
+    let value i32 = await pending;
+}
 "#,
     );
 }

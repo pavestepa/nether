@@ -30,6 +30,8 @@ fn ensure_runtime_built() {
                 "nether-rt-array",
                 "-p",
                 "nether-rt-io",
+                "-p",
+                "nether-rt-task",
             ])
             .status()
             .expect("failed to invoke cargo to build the runtime crates");

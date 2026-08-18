@@ -8,6 +8,32 @@ impl Lowerer<'_> {
         args: &[Expr],
         result_ty: Type,
     ) -> HirExpr {
+        if let ExprKind::Path(path) = &callee.kind {
+            if path.segments.len() == 2
+                && path.segments[0].name.as_str() == "task"
+                && path.segments[1].name.as_str() == "spawn"
+            {
+                return HirExpr {
+                    kind: HirExprKind::CallBuiltin {
+                        name: Symbol::new("__task_spawn"),
+                        args: self.lower_args(args),
+                    },
+                    ty: result_ty,
+                };
+            }
+            if path.segments.len() == 2
+                && path.segments[0].name.as_str() == "timer"
+                && path.segments[1].name.as_str() == "sleep"
+            {
+                return HirExpr {
+                    kind: HirExprKind::CallBuiltin {
+                        name: Symbol::new("__timer_sleep"),
+                        args: self.lower_args(args),
+                    },
+                    ty: result_ty,
+                };
+            }
+        }
         let generic_args = self.generic_args_for(call_id);
         if let ExprKind::Path(path) = &callee.kind {
             self.lower_value_path(path, Some(args), &generic_args, result_ty)

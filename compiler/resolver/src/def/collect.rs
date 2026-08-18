@@ -14,6 +14,17 @@ fn builtin_definitions() -> Definitions {
         defs.insert_builtin(Symbol::new(name), DefKind::Primitive);
     }
     defs.insert_builtin(Symbol::new("String"), DefKind::Type);
+    // Stage 4 runtime namespaces. They are value-like method receivers in
+    // source (`timer.sleep(...)`, `task.spawn(...)`) and are recognized by
+    // typecheck/HIR rather than materialized as runtime values.
+    let timer = defs.insert_builtin(Symbol::new("timer"), DefKind::Type);
+    defs.defs[timer.0 as usize]
+        .methods
+        .push(Symbol::new("sleep"));
+    let task = defs.insert_builtin(Symbol::new("task"), DefKind::Type);
+    defs.defs[task.0 as usize]
+        .methods
+        .push(Symbol::new("spawn"));
 
     // `Array`, like `Option`/`Result`, is *not* seeded here — it's an
     // ordinary generic `type Array<T>;` declaration in

@@ -2,24 +2,54 @@ use super::*;
 
 impl<'ctx> FnCodegen<'_, 'ctx> {
     pub(super) fn gen_completed_task(&self, output: Value<'ctx>, output_ty: &Type) -> Value<'ctx> {
-        let size = self.m.size_of(self.layout.llvm_type(output_ty));
-        let drop_fn = self.func_ptr_or_null(self.shims.drop_shim(
+        let word = self.m.int_type(64);
+        let output_size = self.m.size_of(self.layout.llvm_type(output_ty));
+        let size = self
+            .m
+            .int_add(output_size, self.m.const_int(word, 16, false), "task_size");
+        let output_drop = self.func_ptr_or_null(self.shims.drop_shim(
             self.m,
             self.layout,
             self.runtime,
             output_ty,
         ));
+        let task_drop = self
+            .runtime
+            .task_drop
+            .as_global_value()
+            .as_pointer_value()
+            .into();
         let task = self
             .m
-            .call(self.runtime.alloc, &[size, drop_fn], "completed_task")
+            .call(self.runtime.alloc, &[size, task_drop], "completed_task")
             .expect("task allocation returns a payload pointer");
-        self.store_at(task, output_ty, output);
+        let poll = self
+            .runtime
+            .task_completed_poll
+            .as_global_value()
+            .as_pointer_value()
+            .into();
+        self.m.store(task, poll);
+        let drop_slot =
+            self.m
+                .gep_bytes(task, self.m.const_int(word, 8, false), "task_output_drop");
+        self.m.store(drop_slot, output_drop);
+        let output_slot = self
+            .m
+            .gep_bytes(task, self.m.const_int(word, 16, false), "task_output");
+        self.store_at(output_slot, output_ty, output);
         task
     }
 
     pub(super) fn gen_await(&self, task: &Operand, output_ty: &Type) -> Value<'ctx> {
         let task = self.gen_operand(task);
-        self.load_value(task, output_ty)
+        self.m.call(self.runtime.task_block_on, &[task], "");
+        let output = self.m.gep_bytes(
+            task,
+            self.m.const_int(self.m.int_type(64), 16, false),
+            "task_output",
+        );
+        self.load_value(output, output_ty)
     }
 
     pub(super) fn gen_pack_existential(&self, methods: &[Operand]) -> Value<'ctx> {
@@ -143,6 +173,21 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
         dest_ty: &Type,
     ) -> Value<'ctx> {
         match name.as_str() {
+            "__task_spawn" => {
+                let task = self.gen_operand(&args[0]);
+                self.m
+                    .call(self.runtime.task_spawn, &[task], "spawned_task")
+                    .expect("task spawn returns a task")
+            }
+            "__timer_sleep" => {
+                let millis = self.gen_operand(&args[0]);
+                let millis = self
+                    .m
+                    .int_cast(millis, self.m.int_type(64), false, "sleep_millis");
+                self.m
+                    .call(self.runtime.timer_sleep, &[millis], "timer_task")
+                    .expect("timer sleep returns a task")
+            }
             "__weak_upgrade" => {
                 let weak_ptr = self.gen_operand(&args[0]);
                 self.gen_weak_upgrade(dest_ty, weak_ptr)

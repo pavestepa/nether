@@ -551,7 +551,9 @@ fn completed_async_tasks_and_await_run_end_to_end() {
 async fn fetch() String { return "ready"; }
 async fn answer() i32 { return 42; }
 async fn main() {
-    let text String = await fetch();
+    await timer.sleep(1);
+    let pending = task.spawn(fetch());
+    let text String = await pending;
     let value i32 = await answer();
     println(`${text}:${value}`);
 }
@@ -570,7 +572,12 @@ async fn main() {
     let output = Command::new(result.executable_path.unwrap())
         .output()
         .unwrap();
-    assert!(output.status.success(), "status: {:?}", output.status);
+    assert!(
+        output.status.success(),
+        "status: {:?}, stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(String::from_utf8_lossy(&output.stdout), "ready:42\n");
     let _ = std::fs::remove_dir_all(&dir);
 }

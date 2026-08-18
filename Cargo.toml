@@ -17,6 +17,7 @@ members = [
     "runtime/string",
     "runtime/array",
     "runtime/io",
+    "runtime/task",
     "cli",
 ]
 
