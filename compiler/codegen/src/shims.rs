@@ -341,6 +341,21 @@ impl<'ctx> ShimCx<'_, 'ctx> {
                     self.emit_walk(field_ptr, elem_ty);
                 }
             }
+            Type::FixedArray(element, length) => {
+                let Type::Const(length) = length.as_ref() else {
+                    unreachable!("fixed-array length must be concrete before shim generation")
+                };
+                if has_heap_content(element, layout.defs, layout.sigs) {
+                    let array_ty = match layout.llvm_type(ty) {
+                        Ty::StructType(t) => t,
+                        _ => unreachable!("FixedArray always lowers to a struct type"),
+                    };
+                    for index in 0..*length as u32 {
+                        let field_ptr = m.struct_gep(array_ty, base, index, "element");
+                        self.emit_walk(field_ptr, element);
+                    }
+                }
+            }
             Type::Struct(_, _) | Type::TupleStruct(_, _) => self.emit_struct_fields(base, ty),
             Type::Enum(_, _) => self.emit_enum_variants(base, ty),
             _ => {}
@@ -444,7 +459,12 @@ impl<'ctx> ShimCx<'_, 'ctx> {
 fn has_heap_content(ty: &Type, defs: &Definitions, sigs: &Signatures) -> bool {
     match ty {
         Type::Unique(inner) => alloc_kind(inner, defs) == AllocKind::Heap,
-        Type::String | Type::Array(_) | Type::Function(_, _) | Type::Weak(_) => true,
+        Type::String
+        | Type::Array(_)
+        | Type::Function(_, _)
+        | Type::Weak(_)
+        | Type::Any(_, _)
+        | Type::Some(_, _) => true,
         Type::Struct(_, _) | Type::TupleStruct(_, _) => match alloc_kind(ty, defs) {
             AllocKind::Heap => true,
             AllocKind::Stack => fields_of(ty, sigs)
@@ -452,6 +472,7 @@ fn has_heap_content(ty: &Type, defs: &Definitions, sigs: &Signatures) -> bool {
                 .any(|t| has_heap_content(t, defs, sigs)),
         },
         Type::Tuple(elems) => elems.iter().any(|t| has_heap_content(t, defs, sigs)),
+        Type::FixedArray(element, _) => has_heap_content(element, defs, sigs),
         Type::Enum(_, _) => sigs
             .enum_sigs
             .get(match ty {
@@ -473,7 +494,11 @@ fn has_heap_content(ty: &Type, defs: &Definitions, sigs: &Signatures) -> bool {
 
 fn is_heap_leaf(ty: &Type, defs: &Definitions) -> bool {
     match ty {
-        Type::String | Type::Array(_) | Type::Function(_, _) => true,
+        Type::String
+        | Type::Array(_)
+        | Type::Function(_, _)
+        | Type::Any(_, _)
+        | Type::Some(_, _) => true,
         Type::Struct(_, _) | Type::TupleStruct(_, _) => alloc_kind(ty, defs) == AllocKind::Heap,
         _ => false,
     }

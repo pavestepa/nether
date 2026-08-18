@@ -26,7 +26,7 @@ use helpers::block_num;
 /// `nether_llvm`'s own "never `insertvalue`/`extractvalue`" design note.
 pub(crate) fn is_aggregate(ty: &Type, defs: &nether_resolver::Definitions) -> bool {
     match ty {
-        Type::Tuple(_) | Type::Enum(_, _) => true,
+        Type::Tuple(_) | Type::Enum(_, _) | Type::FixedArray(_, _) => true,
         Type::Struct(_, _) | Type::TupleStruct(_, _) => alloc_kind(ty, defs) == AllocKind::Stack,
         _ => false,
     }
@@ -333,9 +333,15 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
                 }
                 Projection::Index(idx_op) => {
                     let idx_val = self.gen_array_index(idx_op);
-                    self.m
-                        .call(self.runtime.array_get, &[current_addr, idx_val], "elem_ptr")
-                        .expect("nether_rt_array_get returns a value")
+                    if let Type::FixedArray(element, _) = &current_ty {
+                        let size = self.m.size_of(self.layout.llvm_type(element));
+                        let offset = self.m.int_mul(idx_val, size, "fixed_index_offset");
+                        self.m.gep_bytes(current_addr, offset, "fixed_elem_ptr")
+                    } else {
+                        self.m
+                            .call(self.runtime.array_get, &[current_addr, idx_val], "elem_ptr")
+                            .expect("nether_rt_array_get returns a value")
+                    }
                 }
             };
             current_ty = next_ty;
@@ -396,6 +402,7 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
                 .cloned(),
             Projection::Index(_) => match base {
                 Type::Array(elem) => Some((**elem).clone()),
+                Type::FixedArray(elem, _) => Some((**elem).clone()),
                 _ => None,
             },
         }

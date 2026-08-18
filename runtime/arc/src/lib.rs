@@ -136,6 +136,11 @@ pub extern "C" fn nether_rt_unique_alloc(
     }
 }
 
+/// Frees one live allocation returned by `nether_rt_unique_alloc`.
+///
+/// # Safety
+/// `payload` must be null or a live unique payload pointer allocated by this
+/// runtime, and it must not be used again after this call.
 #[no_mangle]
 pub unsafe extern "C" fn nether_rt_unique_free(payload: *mut u8) {
     if payload.is_null() {
@@ -153,6 +158,10 @@ pub unsafe extern "C" fn nether_rt_unique_free(payload: *mut u8) {
 /// Converts the sole-owner allocation into an ARC allocation without
 /// cloning its fields: bytes move to a new ARC block and the old unique
 /// block is deallocated without running its payload drop callback.
+///
+/// # Safety
+/// `payload` must be null or a live unique payload pointer allocated by this
+/// runtime, with no aliases that outlive the promotion.
 #[no_mangle]
 pub unsafe extern "C" fn nether_rt_unique_promote(payload: *mut u8) -> *mut u8 {
     if payload.is_null() {
@@ -239,6 +248,27 @@ pub unsafe extern "C" fn nether_rt_arc_release(payload: *mut u8) {
             if (*header).weak == 0 {
                 dealloc_header(header);
             }
+        }
+    }
+}
+
+/// Drop callback for an existential package: one method count followed
+/// by that many ARC-owned closure-environment pointers.
+///
+/// # Safety
+/// `payload` must point to a package created by the compiler's existential
+/// allocator layout and this callback must run at most once for that package.
+#[no_mangle]
+pub unsafe extern "C" fn nether_rt_existential_drop(payload: *mut u8) {
+    if payload.is_null() {
+        return;
+    }
+    unsafe {
+        let words = payload.cast::<usize>();
+        let count = *words;
+        for index in 0..count {
+            let closure = *words.add(index + 1) as *mut u8;
+            nether_rt_arc_release(closure);
         }
     }
 }

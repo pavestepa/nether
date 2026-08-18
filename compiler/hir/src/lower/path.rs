@@ -23,6 +23,16 @@ impl Lowerer<'_> {
             None
         };
 
+        if matches!(res.base, Resolution::GenericParam) && total == 2 && call_args.is_none() {
+            return HirExpr {
+                kind: HirExprKind::AssociatedConst {
+                    owner: Type::Generic(path.segments[0].name.clone()),
+                    name: path.segments[1].name.clone(),
+                },
+                ty: result_ty,
+            };
+        }
+
         // Tracked alongside `current`/`current_ty` for the same reason as
         // `Lowerer::receiver_domain_of`: `local_ty`/`lower_field_access_
         // named` both strip `Type::Unique` from `current_ty`, so an
@@ -96,6 +106,29 @@ impl Lowerer<'_> {
             }
             Resolution::StaticMember(owner_id, idx) => {
                 self.lower_static_member(owner_id, idx, direct_call_args, generic_args, &result_ty)
+            }
+            Resolution::StaticConst(owner_id, idx) => {
+                let expression = self
+                    .resolved
+                    .definitions
+                    .get(owner_id)
+                    .constants
+                    .get(idx as usize)
+                    .and_then(|name| self.sigs.associated_consts.get(&(owner_id, name.clone())))
+                    .map(|signature| self.lower_expr(&signature.value))
+                    .unwrap_or(HirExpr {
+                        kind: HirExprKind::Unit,
+                        ty: Type::Error,
+                    });
+                let ty = expression.ty.clone();
+                (expression, ty)
+            }
+            Resolution::ConstParam => {
+                let expression = HirExpr {
+                    kind: HirExprKind::ConstParam(path.segments[0].name.clone()),
+                    ty: result_ty.clone(),
+                };
+                (expression, result_ty.clone())
             }
             Resolution::GenericParam | Resolution::Error => (
                 HirExpr {
@@ -401,6 +434,7 @@ impl Lowerer<'_> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn lower_method_call_on(
         &mut self,
         receiver: HirExpr,
@@ -430,6 +464,25 @@ impl Lowerer<'_> {
                     ty: result_ty.clone(),
                 };
             }
+        }
+        if let Type::FixedArray(_, length) = receiver_ty {
+            if method.name.as_str() == "len" {
+                return HirExpr {
+                    kind: HirExprKind::FixedArrayLen((**length).clone()),
+                    ty: result_ty.clone(),
+                };
+            }
+        }
+        if let Type::Any(trait_id, _) | Type::Some(trait_id, _) = receiver_ty {
+            return HirExpr {
+                kind: HirExprKind::CallWitness {
+                    receiver: Box::new(receiver),
+                    trait_id: *trait_id,
+                    method_name: method.name.clone(),
+                    args: self.lower_args(args),
+                },
+                ty: result_ty.clone(),
+            };
         }
         if let Type::Generic(name) = receiver_ty {
             let bound = self.generics.get(name).and_then(|bounds| {

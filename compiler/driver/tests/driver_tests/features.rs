@@ -327,6 +327,219 @@ fn main() {
 }
 
 #[test]
+fn associated_constants_run_end_to_end() {
+    ensure_runtime_built();
+    let dir = std::env::temp_dir().join(format!(
+        "nether_associated_constants_test_{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.nr");
+    std::fs::write(
+        &entry,
+        r#"
+trait SizedValue {
+    pub const SIZE i32;
+    pub const FALLBACK i32 = 7;
+}
+struct Packet;
+impl Packet SizedValue {
+    pub const SIZE i32 = 12;
+}
+impl Packet {
+    pub const TAG i32 = 3;
+}
+fn size<T SizedValue>() i32 { return T.SIZE; }
+fn main() {
+    println(`${Packet.SIZE}`);
+    println(`${Packet.FALLBACK}`);
+    println(`${Packet.TAG}`);
+    println(`${size<Packet>()}`);
+}
+"#,
+    )
+    .unwrap();
+    let result = nether_driver::check(&entry).unwrap();
+    assert!(
+        !result
+            .diagnostics
+            .iter()
+            .any(nether_diagnostics::Diagnostic::is_error),
+        "unexpected diagnostics: {:?}",
+        result.diagnostics
+    );
+    let output = Command::new(result.executable_path.unwrap())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "12\n7\n3\n12\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn associated_types_run_end_to_end() {
+    ensure_runtime_built();
+    let dir = std::env::temp_dir().join(format!(
+        "nether_associated_types_test_{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.nr");
+    std::fs::write(
+        &entry,
+        r#"
+trait Container { pub type Item; }
+struct IntBox;
+impl IntBox Container { pub type Item = i32; }
+fn identity<T Container>(value T.Item) T.Item { return value; }
+fn main() { println(`${identity<IntBox>(42)}`); }
+"#,
+    )
+    .unwrap();
+    let result = nether_driver::check(&entry).unwrap();
+    assert!(
+        !result
+            .diagnostics
+            .iter()
+            .any(nether_diagnostics::Diagnostic::is_error),
+        "unexpected diagnostics: {:?}",
+        result.diagnostics
+    );
+    let output = Command::new(result.executable_path.unwrap())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "42\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn const_generic_fixed_arrays_run_end_to_end() {
+    ensure_runtime_built();
+    let dir =
+        std::env::temp_dir().join(format!("nether_const_generics_test_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.nr");
+    std::fs::write(
+        &entry,
+        r#"
+fn consume<const N usize>(values {i32, N}) usize { return N; }
+fn first<const N usize>(values {i32, N}) i32 { return values[0]; }
+fn main() {
+    println(`${consume<3>([1, 2, 3])}`);
+    println(`${first<3>([4, 5, 6])}`);
+}
+"#,
+    )
+    .unwrap();
+    let result = nether_driver::check(&entry).unwrap();
+    assert!(
+        !result
+            .diagnostics
+            .iter()
+            .any(nether_diagnostics::Diagnostic::is_error),
+        "unexpected diagnostics: {:?}",
+        result.diagnostics
+    );
+    let output = Command::new(result.executable_path.unwrap())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "3\n4\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn existential_and_opaque_witness_dispatch_run_end_to_end() {
+    ensure_runtime_built();
+    let dir = std::env::temp_dir().join(format!("nether_existential_test_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.nr");
+    std::fs::write(
+        &entry,
+        r#"
+trait Sound { sound(self) String; }
+struct Dog { name String }
+impl Dog Sound { sound(self) String { return self.name; } }
+fn erase(value Dog) any Sound { return value; }
+fn make() some Sound { return Dog { name = "opaque" }; }
+fn main() {
+    let value any Sound = erase(Dog { name = "existential" });
+    println(value.sound());
+    println(make().sound());
+}
+"#,
+    )
+    .unwrap();
+    let result = nether_driver::check(&entry).unwrap();
+    assert!(
+        !result
+            .diagnostics
+            .iter()
+            .any(nether_diagnostics::Diagnostic::is_error),
+        "unexpected diagnostics: {:?}",
+        result.diagnostics
+    );
+    let output = Command::new(result.executable_path.unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "existential\nopaque\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn dev_dictionary_and_release_monomorphization_match_end_to_end() {
+    ensure_runtime_built();
+    let dir = std::env::temp_dir().join(format!("nether_dictionary_test_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.nr");
+    std::fs::write(
+        &entry,
+        r#"
+trait Noise { noise(self) String { return "default"; } }
+struct Wolf { name String }
+struct Fox Noise { name String }
+impl Wolf Noise { noise(self) String { return "woof"; } }
+fn make_noise<T Noise>(value T) String { return value.noise(); }
+fn main() {
+    println(make_noise(Wolf { name = "w" }));
+    println(make_noise(Fox { name = "f" }));
+}
+"#,
+    )
+    .unwrap();
+    for opt_level in [0, 2] {
+        let result = nether_driver::compile(
+            &entry,
+            &nether_driver::CompileOptions {
+                opt_level,
+                output_path: Some(dir.join(format!("main-o{opt_level}"))),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!result
+            .diagnostics
+            .iter()
+            .any(nether_diagnostics::Diagnostic::is_error));
+        let output = Command::new(result.executable_path.unwrap())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "O{opt_level}: {:?}", output.status);
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "woof\ndefault\n");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn stored_heap_borrows_run_end_to_end() {
     ensure_runtime_built();
     let dir =

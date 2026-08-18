@@ -84,6 +84,58 @@ impl Checker<'_> {
             None
         };
 
+        if matches!(res.base, Resolution::GenericParam) && total == 2 && call_args.is_none() {
+            let generic = &path.segments[0];
+            let constant = &path.segments[1];
+            let matches = self
+                .generics
+                .get(&generic.name)
+                .into_iter()
+                .flatten()
+                .filter_map(|bound| {
+                    self.sigs
+                        .trait_associated_consts
+                        .get(&(bound.trait_id, constant.name.clone()))
+                        .map(|signature| {
+                            let names = self
+                                .sigs
+                                .trait_generics
+                                .get(&bound.trait_id)
+                                .cloned()
+                                .unwrap_or_default();
+                            let subst = names
+                                .into_iter()
+                                .zip(bound.args.iter().cloned())
+                                .collect::<HashMap<_, _>>();
+                            substitute_generic(&signature.ty, &subst)
+                        })
+                })
+                .collect::<Vec<_>>();
+            return match matches.as_slice() {
+                [ty] => ty.clone(),
+                [] => {
+                    self.err(
+                        constant.span,
+                        format!(
+                            "generic parameter `{}` has no associated constant `{}` in its bounds",
+                            generic.name, constant.name
+                        ),
+                    );
+                    Type::Error
+                }
+                _ => {
+                    self.err(
+                        constant.span,
+                        format!(
+                            "associated constant `{}` is ambiguous across bounds of `{}`",
+                            constant.name, generic.name
+                        ),
+                    );
+                    Type::Error
+                }
+            };
+        }
+
         let mut current_ty = match res.base {
             Resolution::Local(id) => {
                 let ty = self
@@ -148,6 +200,36 @@ impl Checker<'_> {
                 call_id,
                 generic_args,
             ),
+            Resolution::StaticConst(owner_id, idx) => {
+                if call_args.is_some() || !generic_args.is_empty() {
+                    self.err(path.span, "an associated constant cannot be called");
+                }
+                let Some(name) = self
+                    .resolved
+                    .definitions
+                    .get(owner_id)
+                    .constants
+                    .get(idx as usize)
+                else {
+                    return Type::Error;
+                };
+                let Some(signature) = self.sigs.associated_consts.get(&(owner_id, name.clone()))
+                else {
+                    return Type::Error;
+                };
+                if signature.file != path.span.file && !signature.visibility.is_public() {
+                    self.err(
+                        path.span,
+                        format!("associated constant `{name}` is private"),
+                    );
+                }
+                signature.ty.clone()
+            }
+            Resolution::ConstParam => self
+                .const_generics
+                .get(&path.segments[0].name)
+                .cloned()
+                .unwrap_or(Type::Error),
             Resolution::GenericParam | Resolution::Error => Type::Error,
         };
 
@@ -403,27 +485,25 @@ impl Checker<'_> {
                     );
                 } else if crate::alloc::alloc_kind(&arg_ty, &self.resolved.definitions)
                     == crate::alloc::AllocKind::Heap
-                {
-                    if !self
+                    && !self
                         .sigs
                         .can_clone_to_unique(&arg_ty, &self.resolved.definitions)
-                    {
-                        let described = self.describe(&arg_ty);
-                        if self.sigs.has_user_clone_candidate(&arg_ty) {
-                            self.err(
+                {
+                    let described = self.describe(&arg_ty);
+                    if self.sigs.has_user_clone_candidate(&arg_ty) {
+                        self.err(
                                 args[0].span,
                                 format!(
                                     "invalid `clone` override for `{described}` — expected `clone(: &self): {described}` with no additional parameters or generics"
                                 ),
                             );
-                        } else {
-                            self.err(
+                    } else {
+                        self.err(
                                 args[0].span,
                                 format!(
                                     "`to()` cannot clone `{described}` into its owned form — every structurally cloned heap type, including unique fields, must implement `Clone` and the clone graph must be finite"
                                 ),
                             );
-                        }
                     }
                 }
             }

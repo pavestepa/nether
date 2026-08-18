@@ -35,8 +35,8 @@ pub enum AllocKind {
 /// `Weak` below.
 pub fn alloc_kind(ty: &Type, defs: &Definitions) -> AllocKind {
     match ty {
-        Type::Primitive(_) => AllocKind::Stack,
-        Type::String | Type::Array(_) => AllocKind::Heap,
+        Type::Primitive(_) | Type::Const(_) | Type::FixedArray(_, _) => AllocKind::Stack,
+        Type::String | Type::Array(_) | Type::Any(_, _) | Type::Some(_, _) => AllocKind::Heap,
         Type::Struct(id, _) | Type::TupleStruct(id, _) => {
             if is_pascal_case(defs.get(*id).name.as_str()) {
                 AllocKind::Heap
@@ -53,7 +53,7 @@ pub fn alloc_kind(ty: &Type, defs: &Definitions) -> AllocKind {
         Type::Function(_, _) => AllocKind::Heap,
         Type::Weak(_) | Type::Ref(_) | Type::MutRef(_) => AllocKind::Stack,
         Type::Unique(inner) => alloc_kind(inner, defs),
-        Type::Generic(_) => AllocKind::Stack, // meaningless before substitution; never queried before monomorphization in practice
+        Type::Generic(_) | Type::Associated(_, _) => AllocKind::Stack, // meaningless before substitution; never queried before monomorphization in practice
         Type::Trait(_) | Type::Never | Type::Error => AllocKind::Stack,
     }
 }

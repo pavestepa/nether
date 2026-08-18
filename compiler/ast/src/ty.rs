@@ -8,6 +8,8 @@ use crate::ident::Path;
 /// what the programmer wrote.
 #[derive(Debug, Clone)]
 pub enum TypeExpr {
+    /// A numeric const-generic argument such as `Buffer<16>`.
+    Const(u128, Span),
     /// `Dog`, `Array<T>`, `user.User`.
     Named {
         path: Path,
@@ -19,8 +21,18 @@ pub enum TypeExpr {
     /// `[i32]` — sugar the parser desugars to this node; see
     /// language-spec.md §2.3/§3.5 for `Array`'s built-in role.
     Array(Box<TypeExpr>, Span),
+    /// `{T, N}` — an inline fixed-size array type.
+    FixedArray {
+        element: Box<TypeExpr>,
+        length: Box<TypeExpr>,
+        span: Span,
+    },
     /// `weak T`.
     Weak(Box<TypeExpr>, Span),
+    /// `any Trait` — an existential trait value.
+    Any(Box<TypeExpr>, Span),
+    /// `some Trait` — an opaque result type.
+    Some(Box<TypeExpr>, Span),
     /// `:T` — the uniquely-owned form of a heap/reference-category type, or
     /// `:t` for the uniquely-owned form of an inline-category type
     /// (language-spec §3). The leading `:` is part of the type expression,
@@ -48,10 +60,14 @@ pub enum TypeExpr {
 impl TypeExpr {
     pub fn span(&self) -> Span {
         match self {
-            TypeExpr::Named { span, .. }
+            TypeExpr::Const(_, span)
+            | TypeExpr::Named { span, .. }
             | TypeExpr::Tuple(_, span)
             | TypeExpr::Array(_, span)
+            | TypeExpr::FixedArray { span, .. }
             | TypeExpr::Weak(_, span)
+            | TypeExpr::Any(_, span)
+            | TypeExpr::Some(_, span)
             | TypeExpr::Unique(_, span)
             | TypeExpr::Ref(_, span)
             | TypeExpr::MutRef(_, span)

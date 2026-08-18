@@ -199,6 +199,10 @@ impl FnBuilder<'_> {
                 Operand::Local(self.materialize(Rvalue::Tuple(ops), expr.ty.clone()))
             }
             MonoExprKind::Array(items) => {
+                if matches!(expr.ty, Type::FixedArray(_, _)) {
+                    let ops = self.lower_stored_exprs(items);
+                    return Operand::Local(self.materialize(Rvalue::Tuple(ops), expr.ty.clone()));
+                }
                 // `runtime/array_push` retains each stored element via
                 // the element shim, so array literals borrow their input
                 // operands here and drop only freshly-computed input
@@ -210,6 +214,35 @@ impl FnBuilder<'_> {
                     self.release_temporary_value(item, operand);
                 }
                 result
+            }
+            MonoExprKind::PackExistential { value, adapters } => {
+                let operand = self.lower_expr(value);
+                let mut methods = Vec::with_capacity(adapters.len());
+                for (function, function_ty) in adapters {
+                    // Each witness closure owns an independent capture of
+                    // the erased value. Unlike an ordinary source closure,
+                    // these adapters are synthesized after HIR lowering, so
+                    // they do not pass through `lower_stored_exprs`.
+                    if let Operand::Local(local) = operand {
+                        if self.sigs.has_managed_content(&value.ty, self.defs)
+                            && !matches!(value.ty, Type::Unique(_))
+                        {
+                            self.push_instr(Instr::Retain(local));
+                        }
+                    }
+                    methods.push(Operand::Local(self.materialize(
+                        Rvalue::Closure {
+                            function: *function,
+                            captures: vec![operand.clone()],
+                        },
+                        function_ty.clone(),
+                    )));
+                }
+                let package = Operand::Local(
+                    self.materialize(Rvalue::PackExistential { methods }, expr.ty.clone()),
+                );
+                self.release_temporary_value(value, &operand);
+                package
             }
             MonoExprKind::Concat(items) => {
                 let ops = self.lower_exprs(items);
@@ -317,6 +350,24 @@ impl FnBuilder<'_> {
                     self.release_temporary_value(arg, operand);
                 }
                 result
+            }
+            MonoExprKind::CallWitness {
+                receiver,
+                slot,
+                function_ty,
+                args,
+            } => {
+                let receiver = self.lower_expr(receiver);
+                let args = self.lower_exprs(args);
+                Operand::Local(self.materialize(
+                    Rvalue::CallWitness {
+                        receiver,
+                        slot: *slot,
+                        function_ty: function_ty.clone(),
+                        args,
+                    },
+                    expr.ty.clone(),
+                ))
             }
             MonoExprKind::Field { base, index } => {
                 let base_op = self.lower_expr(base);

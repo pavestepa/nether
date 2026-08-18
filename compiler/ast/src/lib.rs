@@ -51,8 +51,9 @@ pub use expr::{Block, Expr, ExprKind, FieldAccessor, LetStmt, MatchArm, Stmt, Te
 pub use ident::{Ident, Path};
 pub use ids::{NodeId, NodeIdGen};
 pub use item::{
-    EnumDecl, EnumVariant, Field, FnDecl, GenericParam, ImplBlock, Item, ModDecl, Module, Param,
-    SelfParam, StructDecl, StructDeclKind, TraitDecl, TypeAliasDecl, UseDecl, Visibility,
+    AssociatedConst, AssociatedType, EnumDecl, EnumVariant, Field, FnDecl, GenericParam, ImplBlock,
+    Item, ModDecl, Module, Param, SelfParam, StructDecl, StructDeclKind, TraitDecl, TypeAliasDecl,
+    UseDecl, Visibility,
 };
 pub use literal::Literal;
 pub use pattern::Pattern;

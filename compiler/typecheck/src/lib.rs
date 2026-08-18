@@ -56,7 +56,8 @@ mod ty;
 pub use alloc::{alloc_kind, AllocKind};
 pub use check::{check, TypedTables};
 pub use sig::{
-    EnumSig, FnSig, GenericBound, ParamSig, ReceiverDomain, ReturnOrigin, Signatures, TypeShape,
+    variadic_len_param, EnumSig, FnSig, GenericBound, ParamSig, ReceiverDomain, ReturnOrigin,
+    Signatures, TypeShape,
 };
 pub use ty::{PrimitiveKind, Type};
 

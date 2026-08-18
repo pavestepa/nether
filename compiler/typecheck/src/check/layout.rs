@@ -147,6 +147,7 @@ pub(super) fn value_layout_reaches_cycle(
         Type::Tuple(items) => items
             .iter()
             .any(|item| value_layout_reaches_cycle(item, resolved, sigs, stack)),
+        Type::FixedArray(element, _) => value_layout_reaches_cycle(element, resolved, sigs, stack),
         // `:T`/`:t` share their inner type's layout (Stage 1, language-spec
         // §3.2 — no distinct unique-inline representation yet), so a
         // recursive owned-inline field is exactly as cyclic as a bare one.
@@ -159,8 +160,12 @@ pub(super) fn value_layout_reaches_cycle(
         | Type::Ref(_)
         | Type::MutRef(_)
         | Type::Primitive(_)
+        | Type::Const(_)
         | Type::Trait(_)
+        | Type::Any(_, _)
+        | Type::Some(_, _)
         | Type::Generic(_)
+        | Type::Associated(_, _)
         | Type::Never
         | Type::Error => false,
     }

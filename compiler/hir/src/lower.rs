@@ -39,6 +39,7 @@ pub fn lower(module: &Module, resolved: &ResolvedNames, tables: TypedTables) -> 
         expr_types,
         local_types,
         call_generic_args,
+        existential_coercions,
         signatures,
     } = tables;
 
@@ -96,6 +97,7 @@ pub fn lower(module: &Module, resolved: &ResolvedNames, tables: TypedTables) -> 
             expr_types: &expr_types,
             local_types_by_id: &local_types_by_id,
             call_generic_args: &call_generic_args,
+            existential_coercions: &existential_coercions,
             sigs: &signatures,
             fn_by_def: &fn_by_def,
             methods: &methods,

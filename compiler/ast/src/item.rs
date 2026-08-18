@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use nether_diagnostics::{FileId, Span};
 
-use crate::expr::Block;
+use crate::expr::{Block, Expr};
 use crate::ident::{Ident, Path};
 use crate::ids::NodeId;
 use crate::ty::TypeExpr;
@@ -141,6 +141,8 @@ pub struct ImplBlock {
     /// [`Path`]) because a trait name may itself be generic
     /// (language-spec §7.1).
     pub traits: Vec<TypeExpr>,
+    pub associated_consts: Vec<AssociatedConst>,
+    pub associated_types: Vec<AssociatedType>,
     pub methods: Vec<FnDecl>,
     pub span: Span,
 }
@@ -172,6 +174,8 @@ pub struct EnumDecl {
 pub struct GenericParam {
     pub name: Ident,
     pub bounds: Vec<TypeExpr>,
+    /// `Some(usize)` for `const N usize`; `None` for a type parameter.
+    pub const_ty: Option<TypeExpr>,
 }
 
 #[derive(Debug, Clone)]
@@ -197,11 +201,36 @@ pub struct TraitDecl {
     pub generics: Vec<GenericParam>,
     /// Direct parent traits (`trait Child: ParentA, ParentB`).
     pub parents: Vec<TypeExpr>,
+    pub associated_consts: Vec<AssociatedConst>,
+    pub associated_types: Vec<AssociatedType>,
     /// A method with `body: None` has no default implementation and must
     /// be provided by every `impl`; a method with `body: Some(_)` is a
     /// default, overridable per-impl.
     pub methods: Vec<FnDecl>,
     pub doc: Option<String>,
+    pub span: Span,
+}
+
+/// A trait-associated constant declaration or its implementation.
+/// Trait requirements omit `value`; trait defaults and `impl` definitions
+/// carry an initializer which must be compile-time evaluable.
+#[derive(Debug, Clone)]
+pub struct AssociatedConst {
+    pub id: NodeId,
+    pub name: Ident,
+    pub visibility: Visibility,
+    pub ty: TypeExpr,
+    pub value: Option<Expr>,
+    pub span: Span,
+}
+
+/// A trait-associated type requirement/default or its `impl` definition.
+#[derive(Debug, Clone)]
+pub struct AssociatedType {
+    pub id: NodeId,
+    pub name: Ident,
+    pub visibility: Visibility,
+    pub value: Option<TypeExpr>,
     pub span: Span,
 }
 

@@ -24,6 +24,7 @@ pub struct Runtime<'ctx> {
     pub retain: Func<'ctx>,
     /// `nether_rt_arc::nether_rt_arc_release(ptr)`
     pub release: Func<'ctx>,
+    pub existential_drop: Func<'ctx>,
     /// `nether_rt_arc::nether_rt_arc_weak_retain(ptr)` -- bumps a `weak T`
     /// value's own weak count, never its referent's strong count (spec
     /// §13). Emitted for [`nether_mir::Instr::WeakRetain`].
@@ -47,6 +48,8 @@ pub struct Runtime<'ctx> {
     pub string_from_bytes: Func<'ctx>,
     /// `nether_rt_string::nether_rt_string_concat(a: ptr, b: ptr) -> ptr`
     pub string_concat: Func<'ctx>,
+    /// `nether_rt_string::nether_rt_string_hash(value: ptr) -> u64`
+    pub string_hash: Func<'ctx>,
     pub i64_to_string: Func<'ctx>,
     pub f64_to_string: Func<'ctx>,
     /// `nether_rt_string::nether_rt_bool_to_string(v: i8) -> ptr`
@@ -101,6 +104,7 @@ impl<'ctx> Runtime<'ctx> {
                 .declare_function("nether_rt_unique_promote", m.fn_type(&[ptr], Some(ptr))),
             retain: m.declare_function("nether_rt_arc_retain", void_fn(&[ptr])),
             release: m.declare_function("nether_rt_arc_release", void_fn(&[ptr])),
+            existential_drop: m.declare_function("nether_rt_existential_drop", void_fn(&[ptr])),
             weak_retain: m.declare_function("nether_rt_arc_weak_retain", void_fn(&[ptr])),
             weak_release: m.declare_function("nether_rt_arc_weak_release", void_fn(&[ptr])),
             weak_upgrade: m.declare_function(
@@ -115,6 +119,8 @@ impl<'ctx> Runtime<'ctx> {
             ),
             string_concat: m
                 .declare_function("nether_rt_string_concat", m.fn_type(&[ptr, ptr], Some(ptr))),
+            string_hash: m
+                .declare_function("nether_rt_string_hash", m.fn_type(&[ptr], Some(i64_ty))),
             i64_to_string: m
                 .declare_function("nether_rt_i64_to_string", m.fn_type(&[i64_ty], Some(ptr))),
             f64_to_string: m

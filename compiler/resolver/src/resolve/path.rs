@@ -15,6 +15,17 @@ impl Resolver<'_> {
             return;
         }
 
+        if self.is_generic_param(&first.name) {
+            let base = if self.is_const_generic_param(&first.name) {
+                Resolution::ConstParam
+            } else {
+                Resolution::GenericParam
+            };
+            self.path_res
+                .insert(path.id, PathResolution { base, consumed: 1 });
+            return;
+        }
+
         let Some(id) = self.defs.lookup_in(path.span.file, &first.name) else {
             // A bare variant name (`Some`, `None`, ...) promoted into
             // scope by `use module.Enum.Variant;` (`stdlib/mod.nr`'s own
@@ -78,6 +89,14 @@ impl Resolver<'_> {
                             consumed: 2,
                         },
                     );
+                } else if let Some(idx) = constant_index(def, &second.name) {
+                    self.path_res.insert(
+                        path.id,
+                        PathResolution {
+                            base: Resolution::StaticConst(id, idx),
+                            consumed: 2,
+                        },
+                    );
                 } else {
                     self.error(
                         second.span,
@@ -101,6 +120,14 @@ impl Resolver<'_> {
                         path.id,
                         PathResolution {
                             base: Resolution::StaticMember(id, idx),
+                            consumed: 2,
+                        },
+                    );
+                } else if let Some(idx) = constant_index(def, &second.name) {
+                    self.path_res.insert(
+                        path.id,
+                        PathResolution {
+                            base: Resolution::StaticConst(id, idx),
                             consumed: 2,
                         },
                     );

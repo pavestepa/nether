@@ -17,14 +17,15 @@ fn main() {
 }
 
 #[test]
-fn variadic_element_type_is_array_inside_the_function_body() {
-    assert_ok(
+fn variadic_parameter_is_not_a_growable_array_inside_the_function_body() {
+    assert_err(
         r#"
 fn first_len(items ...i32) usize {
     let arr Array<i32> = items;
     return arr.len();
 }
 "#,
+        "expected `[i32]`",
     );
 }
 

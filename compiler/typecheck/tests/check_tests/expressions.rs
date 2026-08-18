@@ -306,11 +306,21 @@ fn main() {
 "#,
     );
 
-    assert_err(
+    assert_ok(
         r#"
 Hash struct Named { name String }
 fn main() {
     let value = Named { name = "same" };
+    let fingerprint = hash(value);
+}
+"#,
+    );
+
+    assert_err(
+        r#"
+Hash struct Measurement { value f64 }
+fn main() {
+    let value = Measurement { value = 1.0 };
     let fingerprint = hash(value);
 }
 "#,

@@ -15,6 +15,22 @@ pub(super) fn build_type_shapes(
         }
         sigs.type_generics
             .insert(id, t.generics.iter().map(|g| g.name.name.clone()).collect());
+        let const_params = t
+            .generics
+            .iter()
+            .filter_map(|generic| {
+                let syntax = generic.const_ty.as_ref()?;
+                let ty = lower_type_expr(syntax, resolved, decls, diags);
+                if !matches!(ty, Type::Primitive(kind) if kind.is_integer()) {
+                    diags.push(
+                        Diagnostic::error("a const generic parameter must have an integer type")
+                            .with_label(syntax.span(), "not an integer type"),
+                    );
+                }
+                Some((generic.name.name.clone(), ty))
+            })
+            .collect();
+        sigs.const_type_params.insert(id, const_params);
         sigs.generic_type_bounds.insert(
             id,
             t.generics
@@ -68,6 +84,22 @@ pub(super) fn build_enum_sigs(
             continue;
         };
         let generics = e.generics.iter().map(|g| g.name.name.clone()).collect();
+        let const_params = e
+            .generics
+            .iter()
+            .filter_map(|generic| {
+                let syntax = generic.const_ty.as_ref()?;
+                let ty = lower_type_expr(syntax, resolved, decls, diags);
+                if !matches!(ty, Type::Primitive(kind) if kind.is_integer()) {
+                    diags.push(
+                        Diagnostic::error("a const generic parameter must have an integer type")
+                            .with_label(syntax.span(), "not an integer type"),
+                    );
+                }
+                Some((generic.name.name.clone(), ty))
+            })
+            .collect();
+        sigs.const_type_params.insert(id, const_params);
         sigs.generic_type_bounds.insert(
             id,
             e.generics
@@ -422,6 +454,7 @@ pub(super) fn specialize_fn_sig(sig: &FnSig, subst: &HashMap<Symbol, Type>) -> F
                 )
             })
             .collect(),
+        const_params: sig.const_params.clone(),
         return_origins: sig.return_origins.clone(),
     }
 }

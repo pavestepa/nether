@@ -228,6 +228,7 @@ fn derived_hash_is_structural_for_arc_nested_and_unique_values() {
         r#"
 Hash struct Point { x i32, y i32 }
 Hash struct BoxedPoint { point: Point }
+Hash struct Named { name String }
 fn main() {
     let a = Point { x = 1, y = 2 };
     let b = Point { x = 1, y = 2 };
@@ -242,8 +243,14 @@ fn main() {
     let owned_a: Point = :Point { x = 8, y = 9 };
     let owned_b: Point = :Point { x = 8, y = 9 };
     println(`${hash(owned_a) == hash(owned_b)}`);
+
+    let named_a = Named { name = "same" };
+    let named_b = Named { name = `sa${"me"}` };
+    let named_c = Named { name = "different" };
+    println(`${hash(named_a) == hash(named_b)}`);
+    println(`${hash(named_a) != hash(named_c)}`);
 }
 "#,
-        "true\ntrue\ntrue\ntrue\n",
+        "true\ntrue\ntrue\ntrue\ntrue\ntrue\n",
     );
 }

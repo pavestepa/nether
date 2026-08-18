@@ -2,6 +2,27 @@ use super::*;
 
 impl Lowerer<'_> {
     pub(super) fn lower_expr(&mut self, expr: &Expr) -> HirExpr {
+        let mut lowered = self.lower_expr_unpacked(expr);
+        let Some(concrete) = self.existential_coercions.get(&expr.id).cloned() else {
+            return lowered;
+        };
+        let existential_ty = self.ty_of(expr.id);
+        let trait_id = match &existential_ty {
+            Type::Any(id, _) | Type::Some(id, _) => *id,
+            _ => return lowered,
+        };
+        lowered.ty = self.runtime_ty(&concrete);
+        HirExpr {
+            kind: HirExprKind::PackExistential {
+                value: Box::new(lowered),
+                concrete,
+                trait_id,
+            },
+            ty: existential_ty,
+        }
+    }
+
+    fn lower_expr_unpacked(&mut self, expr: &Expr) -> HirExpr {
         let ty = self.ty_of(expr.id);
         match &expr.kind {
             ExprKind::Literal(lit) => HirExpr {
@@ -154,7 +175,10 @@ impl Lowerer<'_> {
             .collect();
         lowered.push(HirExpr {
             kind: HirExprKind::Array(variadic_items),
-            ty: Type::Array(Box::new(elem_ty)),
+            ty: Type::FixedArray(
+                Box::new(elem_ty),
+                Box::new(Type::Const((args.len() - split) as u128)),
+            ),
         });
         lowered
     }

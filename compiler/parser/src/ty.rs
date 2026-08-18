@@ -12,6 +12,11 @@ impl Parser {
     pub(crate) fn parse_type_expr(&mut self) -> TypeExpr {
         let start = self.peek_span();
         match self.peek() {
+            Token::Int(value) => {
+                let value = *value;
+                let span = self.bump().span;
+                TypeExpr::Const(value, span)
+            }
             Token::Punct(Punct::Colon) => {
                 self.bump();
                 if self.eat_punct(Punct::Amp) {
@@ -36,11 +41,35 @@ impl Parser {
                 let span = start.to(inner.span());
                 TypeExpr::Weak(Box::new(inner), span)
             }
+            Token::Keyword(Keyword::Any) => {
+                self.bump();
+                let inner = self.parse_type_expr();
+                let span = start.to(inner.span());
+                TypeExpr::Any(Box::new(inner), span)
+            }
+            Token::Keyword(Keyword::Some) => {
+                self.bump();
+                let inner = self.parse_type_expr();
+                let span = start.to(inner.span());
+                TypeExpr::Some(Box::new(inner), span)
+            }
             Token::Punct(Punct::LBracket) => {
                 self.bump();
                 let inner = self.parse_type_expr();
                 let end = self.expect_punct(Punct::RBracket, "to close array type");
                 TypeExpr::Array(Box::new(inner), start.to(end))
+            }
+            Token::Punct(Punct::LBrace) => {
+                self.bump();
+                let element = self.parse_type_expr();
+                self.expect_punct(Punct::Comma, "between fixed-array element type and length");
+                let length = self.parse_type_expr();
+                let end = self.expect_punct(Punct::RBrace, "to close fixed-array type");
+                TypeExpr::FixedArray {
+                    element: Box::new(element),
+                    length: Box::new(length),
+                    span: start.to(end),
+                }
             }
             Token::Punct(Punct::LParen) => {
                 self.bump();

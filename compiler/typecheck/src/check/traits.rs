@@ -533,3 +533,314 @@ pub(super) fn build_impl_methods(
         }
     }
 }
+
+pub(super) fn build_associated_constants(
+    module: &Module,
+    resolved: &ResolvedNames,
+    decls: &DeclIndex,
+    sigs: &mut Signatures,
+    diags: &mut Vec<Diagnostic>,
+) {
+    for (&trait_id, declaration) in &decls.trait_decls {
+        let mut seen = HashSet::new();
+        for constant in &declaration.associated_consts {
+            if !seen.insert(constant.name.name.clone()) {
+                diags.push(
+                    Diagnostic::error(format!(
+                        "associated constant `{}` is declared more than once",
+                        constant.name.name
+                    ))
+                    .with_label(constant.name.span, "duplicate declaration"),
+                );
+                continue;
+            }
+            let ty = lower_type_expr(&constant.ty, resolved, decls, diags);
+            sigs.trait_associated_consts.insert(
+                (trait_id, constant.name.name.clone()),
+                TraitAssociatedConstSig {
+                    visibility: constant.visibility,
+                    file: constant.span.file,
+                    ty,
+                    default: constant.value.clone(),
+                },
+            );
+        }
+    }
+
+    // Materialize inherited requirements/defaults under each child trait,
+    // specializing the parent trait's generic arguments on the way down.
+    for _ in 0..decls.trait_decls.len() {
+        let snapshot = sigs.trait_associated_consts.clone();
+        let mut changed = false;
+        for (&child, parents) in &sigs.trait_parents {
+            for parent in parents {
+                let names = sigs
+                    .trait_generics
+                    .get(&parent.trait_id)
+                    .cloned()
+                    .unwrap_or_default();
+                let subst = names
+                    .into_iter()
+                    .zip(parent.args.iter().cloned())
+                    .collect::<HashMap<_, _>>();
+                for ((trait_id, name), inherited) in &snapshot {
+                    if *trait_id != parent.trait_id {
+                        continue;
+                    }
+                    let key = (child, name.clone());
+                    if sigs.trait_associated_consts.contains_key(&key) {
+                        continue;
+                    }
+                    let mut inherited = inherited.clone();
+                    inherited.ty = substitute_generic(&inherited.ty, &subst);
+                    sigs.trait_associated_consts.insert(key, inherited);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    for item in &module.items {
+        let Item::Impl(block) = item else { continue };
+        let Some(owner) = resolved
+            .definitions
+            .lookup_in(block.span.file, &block.target.name)
+        else {
+            continue;
+        };
+        let mut seen = HashSet::new();
+        for constant in &block.associated_consts {
+            if !seen.insert(constant.name.name.clone()) {
+                diags.push(
+                    Diagnostic::error(format!(
+                        "associated constant `{}` is defined more than once for `{}`",
+                        constant.name.name, block.target.name
+                    ))
+                    .with_label(constant.name.span, "duplicate definition"),
+                );
+                continue;
+            }
+            let Some(value) = constant.value.clone() else {
+                continue;
+            };
+            let ty = lower_type_expr(&constant.ty, resolved, decls, diags);
+            sigs.associated_consts.insert(
+                (owner, constant.name.name.clone()),
+                AssociatedConstSig {
+                    visibility: constant.visibility,
+                    file: constant.span.file,
+                    ty,
+                    value,
+                },
+            );
+        }
+
+        for trait_ref in &block.traits {
+            let Some(bound) = lower_generic_bound(trait_ref, resolved, decls, diags) else {
+                continue;
+            };
+            let generic_names = sigs
+                .trait_generics
+                .get(&bound.trait_id)
+                .cloned()
+                .unwrap_or_default();
+            let subst = generic_names
+                .into_iter()
+                .zip(bound.args.iter().cloned())
+                .collect::<HashMap<_, _>>();
+            let requirements = sigs
+                .trait_associated_consts
+                .iter()
+                .filter(|((trait_id, _), _)| *trait_id == bound.trait_id)
+                .map(|((_, name), requirement)| (name.clone(), requirement.clone()))
+                .collect::<Vec<_>>();
+            for (name, requirement) in requirements {
+                let required_ty = substitute_generic(&requirement.ty, &subst);
+                let key = (owner, name.clone());
+                if let Some(provided) = sigs.associated_consts.get(&key) {
+                    if provided.ty != required_ty && !provided.ty.contains_error() {
+                        diags.push(
+                            Diagnostic::error(format!(
+                                "associated constant `{name}` has type `{}`, expected `{}`",
+                                describe_type(&provided.ty, resolved),
+                                describe_type(&required_ty, resolved)
+                            ))
+                            .with_label(block.span, "type does not match the trait declaration"),
+                        );
+                    }
+                } else if let Some(value) = requirement.default {
+                    sigs.associated_consts.insert(
+                        key,
+                        AssociatedConstSig {
+                            visibility: requirement.visibility,
+                            file: requirement.file,
+                            ty: required_ty,
+                            value,
+                        },
+                    );
+                } else {
+                    diags.push(
+                        Diagnostic::error(format!(
+                            "implementation of `{}` is missing associated constant `{name}`",
+                            resolved.definitions.get(bound.trait_id).name
+                        ))
+                        .with_label(block.span, "required by this trait"),
+                    );
+                }
+            }
+        }
+    }
+}
+
+pub(super) fn build_associated_types(
+    module: &Module,
+    resolved: &ResolvedNames,
+    decls: &DeclIndex,
+    sigs: &mut Signatures,
+    diags: &mut Vec<Diagnostic>,
+) {
+    for (&trait_id, declaration) in &decls.trait_decls {
+        let mut seen = HashSet::new();
+        for associated in &declaration.associated_types {
+            if !seen.insert(associated.name.name.clone()) {
+                diags.push(
+                    Diagnostic::error(format!(
+                        "associated type `{}` is declared more than once",
+                        associated.name.name
+                    ))
+                    .with_label(associated.name.span, "duplicate declaration"),
+                );
+                continue;
+            }
+            let default = associated
+                .value
+                .as_ref()
+                .map(|ty| lower_type_expr(ty, resolved, decls, diags));
+            sigs.trait_associated_types.insert(
+                (trait_id, associated.name.name.clone()),
+                TraitAssociatedTypeSig {
+                    visibility: associated.visibility,
+                    file: associated.span.file,
+                    default,
+                },
+            );
+        }
+    }
+
+    for _ in 0..decls.trait_decls.len() {
+        let snapshot = sigs.trait_associated_types.clone();
+        let mut changed = false;
+        for (&child, parents) in &sigs.trait_parents {
+            for parent in parents {
+                let names = sigs
+                    .trait_generics
+                    .get(&parent.trait_id)
+                    .cloned()
+                    .unwrap_or_default();
+                let subst = names
+                    .into_iter()
+                    .zip(parent.args.iter().cloned())
+                    .collect::<HashMap<_, _>>();
+                for ((trait_id, name), inherited) in &snapshot {
+                    if *trait_id != parent.trait_id {
+                        continue;
+                    }
+                    let key = (child, name.clone());
+                    if sigs.trait_associated_types.contains_key(&key) {
+                        continue;
+                    }
+                    let mut inherited = inherited.clone();
+                    inherited.default = inherited.default.map(|ty| substitute_generic(&ty, &subst));
+                    sigs.trait_associated_types.insert(key, inherited);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    for item in &module.items {
+        let Item::Impl(block) = item else { continue };
+        let Some(owner) = resolved
+            .definitions
+            .lookup_in(block.span.file, &block.target.name)
+        else {
+            continue;
+        };
+        let mut seen = HashSet::new();
+        for associated in &block.associated_types {
+            if !seen.insert(associated.name.name.clone()) {
+                diags.push(
+                    Diagnostic::error(format!(
+                        "associated type `{}` is defined more than once for `{}`",
+                        associated.name.name, block.target.name
+                    ))
+                    .with_label(associated.name.span, "duplicate definition"),
+                );
+                continue;
+            }
+            let Some(value) = &associated.value else {
+                continue;
+            };
+            let ty = lower_type_expr(value, resolved, decls, diags);
+            sigs.associated_types.insert(
+                (owner, associated.name.name.clone()),
+                AssociatedTypeSig {
+                    visibility: associated.visibility,
+                    file: associated.span.file,
+                    ty,
+                },
+            );
+        }
+
+        for trait_ref in &block.traits {
+            let Some(bound) = lower_generic_bound(trait_ref, resolved, decls, diags) else {
+                continue;
+            };
+            let trait_names = sigs
+                .trait_generics
+                .get(&bound.trait_id)
+                .cloned()
+                .unwrap_or_default();
+            let subst = trait_names
+                .into_iter()
+                .zip(bound.args.iter().cloned())
+                .collect::<HashMap<_, _>>();
+            let requirements = sigs
+                .trait_associated_types
+                .iter()
+                .filter(|((trait_id, _), _)| *trait_id == bound.trait_id)
+                .map(|((_, name), requirement)| (name.clone(), requirement.clone()))
+                .collect::<Vec<_>>();
+            for (name, requirement) in requirements {
+                let key = (owner, name.clone());
+                if sigs.associated_types.contains_key(&key) {
+                    continue;
+                }
+                if let Some(default) = requirement.default {
+                    sigs.associated_types.insert(
+                        key,
+                        AssociatedTypeSig {
+                            visibility: requirement.visibility,
+                            file: requirement.file,
+                            ty: substitute_generic(&default, &subst),
+                        },
+                    );
+                } else {
+                    diags.push(
+                        Diagnostic::error(format!(
+                            "implementation of `{}` is missing associated type `{name}`",
+                            resolved.definitions.get(bound.trait_id).name
+                        ))
+                        .with_label(block.span, "required by this trait"),
+                    );
+                }
+            }
+        }
+    }
+}

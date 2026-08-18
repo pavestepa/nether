@@ -52,6 +52,7 @@ pub struct Def {
     pub kind: DefKind,
     pub variants: Vec<Symbol>,
     pub methods: Vec<Symbol>,
+    pub constants: Vec<Symbol>,
     pub visibility: Visibility,
     pub file: Option<FileId>,
 }
@@ -205,6 +206,7 @@ impl Definitions {
             kind,
             variants: Vec::new(),
             methods: Vec::new(),
+            constants: Vec::new(),
             visibility: Visibility::Public,
             file: None,
         });
@@ -246,6 +248,7 @@ impl Definitions {
             kind,
             variants: Vec::new(),
             methods: Vec::new(),
+            constants: Vec::new(),
             visibility,
             file: Some(name.span.file),
         });

@@ -93,6 +93,10 @@ pub enum MonoExprKind {
     Unit,
     Tuple(Vec<MonoExpr>),
     Array(Vec<MonoExpr>),
+    PackExistential {
+        value: Box<MonoExpr>,
+        adapters: Vec<(MonoFnId, Type)>,
+    },
     Concat(Vec<MonoExpr>),
     ToString(Box<MonoExpr>),
     Unary {
@@ -140,6 +144,12 @@ pub enum MonoExprKind {
     CallArrayMethod {
         receiver: Box<MonoExpr>,
         method: Symbol,
+        args: Vec<MonoExpr>,
+    },
+    CallWitness {
+        receiver: Box<MonoExpr>,
+        slot: u32,
+        function_ty: Type,
         args: Vec<MonoExpr>,
     },
     If {

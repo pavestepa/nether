@@ -150,6 +150,21 @@ pub unsafe extern "C" fn nether_rt_string_len(payload: *mut u8) -> i64 {
     unsafe { (*payload.cast::<StringRepr>()).len }
 }
 
+/// Returns a deterministic, unkeyed hash of the String's UTF-8 bytes.
+/// This intentionally shares the compiler's structural-hash constants;
+/// it is suitable for language-level Hash containers, not adversarial input.
+///
+/// # Safety
+/// `payload` must point at a live `String` object.
+#[no_mangle]
+pub unsafe extern "C" fn nether_rt_string_hash(payload: *mut u8) -> u64 {
+    unsafe { bytes_of(payload) }
+        .iter()
+        .fold(1_469_598_103_934_665_603_u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(1_099_511_628_211)
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,6 +222,20 @@ mod tests {
 
             let c = nether_rt_char_to_string('λ' as u32);
             assert_eq!(as_str(c), "λ");
+            nether_rt_arc_release(c);
+        }
+    }
+
+    #[test]
+    fn string_hash_is_deterministic_and_content_based() {
+        unsafe {
+            let a = nether_rt_string_from_utf8(b"same".as_ptr(), 4);
+            let b = nether_rt_string_from_utf8(b"same".as_ptr(), 4);
+            let c = nether_rt_string_from_utf8(b"different".as_ptr(), 9);
+            assert_eq!(nether_rt_string_hash(a), nether_rt_string_hash(b));
+            assert_ne!(nether_rt_string_hash(a), nether_rt_string_hash(c));
+            nether_rt_arc_release(a);
+            nether_rt_arc_release(b);
             nether_rt_arc_release(c);
         }
     }

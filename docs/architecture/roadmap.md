@@ -26,9 +26,9 @@ rebuilding.
 | `compiler/resolver` | **keep, minor threading** | Flat single-namespace, file=module design is sound. Stage 1 threads through the new `Item::Struct`/`Item::TypeAlias` items; the current compiler also enforces default-private declarations and explicit `pub` imports/re-exports. |
 | `compiler/hir` | **refactor** | Straightforward AST→HIR desugaring. Stage 1 adds `Unique`/`Ref`/`MutRef` lowering (mirroring the existing `Weak` handling), alias substitution with a cycle guard, and moves fn-body tail-expression suppression here. |
 | `compiler/typecheck` | **largest refactor** | The structural `Type` enum was already good design; Stage 1's biggest, riskiest change is extending it with `Unique`/`Ref`/`MutRef` and replacing casing-as-mechanism with casing-as-validation in `alloc.rs`. |
-| `compiler/monomorphization` | **keep** | Always-monomorphized generics remain the Stage 1 strategy; dev-mode witness tables are a Stage 3 addition alongside this crate, not a replacement of it. |
+| `compiler/monomorphization` | **keep** | Release builds monomorphize; development builds share dictionary-safe generic bodies through existential witness tables, with a monomorphized fallback for layout-dependent shapes. |
 | `compiler/mir` | **keep, pass-through only** | The ARC-insertion pass (`arc.rs`) already keys off a single `AllocKind` chokepoint — decoupling from casing turned out to need no logic change, only new pass-through match arms. |
-| `compiler/llvm` | **keep** | Thin, well-isolated `inkwell` facade. No dev/release split exists yet (Stage 3). |
+| `compiler/llvm` | **keep** | Thin, well-isolated `inkwell` facade. The dev/release generic strategy is selected before MIR; LLVM consumes either form uniformly. |
 | `compiler/codegen` | **refactor** | Real LLVM IR generation, drop-shim generation reused as-is. Stage 1 adds reference codegen for heap-category types only (§3.1 of the spec). |
 | `compiler/driver` | **refactor** | `module_loader.rs` gets the `.nr`-only migration and legacy-`.nt` diagnostics; the rest of the pipeline wiring (`lib.rs`) is largely unaffected by Stage 1. |
 | `runtime/{arc,string,array,io}` | **keep for Stage 1** | Clean, minimal, but explicitly single-threaded/non-atomic today — the spec requires atomic ARC eventually (Stage 6). No change needed until concurrency lands. |
@@ -38,9 +38,8 @@ rebuilding.
 
 ## 2. Stage sequence
 
-**Implementation snapshot (2026-08-18).** Stages 1 and 2 are complete. Stage 3 has
-started with the narrow `#[allow_pascal_case]` type-alias attribute, including
-focused diagnostics for unknown attributes and invalid targets. Stage 2 has
+**Implementation snapshot (2026-08-19).** Stages 1, 2, and 3 are complete.
+Stage 2 has
 flow-sensitive move checking, reference parameters and receiver calls,
 lexically scoped stored heap borrows, plus the first three `to(value)`
 ownership-domain conversions. Returned-reference origins are checked and
@@ -198,7 +197,7 @@ retain, and `to<T>` promotes it into a fresh ARC allocation. The reverse
 `T -> :T` operation is no longer Stage 2 work: it is a deep-copy operation
 and belongs with `Clone` in Stage 3.
 
-**Stage 3 — trait system extensions + dev-mode generics — in progress.** The
+**Stage 3 — trait system extensions + dev-mode generics — done.** The
 narrow `#[allow_pascal_case]` type-alias escape hatch is implemented. The
 compiler-known `Clone` marker also enables structural `T -> :T` conversion for
 user structs: codegen allocates an independent unique outer object, retains
@@ -209,19 +208,19 @@ clone overrides with signature `clone(: &self): T` are dispatched directly by
 `to<:T>`. `Eq struct Value` now derives structural `==`/`!=` for both ARC and
 unique values, recursively comparing primitive, tuple, nested `Eq`, and unique
 fields; unsupported or cyclic field graphs are diagnosed. Derived `Hash`
-is implemented for integer/bool/char, tuple, nested `Hash`, and unique fields;
+is implemented for integer/bool/char, `String`, tuple, nested `Hash`, and unique fields;
 the compiler builtin `hash(value)` returns a deterministic `u64`, while
-unsupported and cyclic graphs are diagnosed. String and floating-point fields
-remain excluded until their stable hashing semantics are specified. Remaining:
-associated
-types/constants, const generics, existential
-(`any Trait`) and opaque (`some Trait`) types with existential-safety
-checking, and development-mode
-witness-table/dictionary generics dispatch (so `nether build` stops
-monomorphizing every generic body — release retains full
-monomorphization/devirtualization/specialization). Also folds in the
-unstaged syntax cleanup this doc tracks below (optional semicolons, inline
-array vs. vector literal distinction, variadics-as-fixed-array).
+unsupported and cyclic graphs are diagnosed. Strings use a deterministic hash
+of their UTF-8 bytes. Floating-point fields remain excluded until `Eq`/hash
+semantics for signed zero and NaN are specified. Associated types/constants,
+const generics and fixed arrays, `any Trait`/`some Trait` with
+existential-safety checks, and runtime witness dispatch are implemented.
+At `-O0`, dictionary-safe generic free functions whose constrained type is
+passed directly as a value share one existentially erased body; functions
+whose ABI/layout depends on the type (and type-only associated-constant calls)
+fall back to monomorphization. `-O1` through `-O3` retain full
+monomorphization/devirtualization/specialization. Variadics now lower to a
+hidden const-sized fixed array.
 
 **Stage 4 — async/await + Tokio runtime bridge.** `async fn`, prefix
 `await expr`, compiler-generated state-machine lowering, the Nether runtime

@@ -23,6 +23,9 @@ pub struct HirFnId(pub(crate) u32);
 pub struct HirLocalId(pub(crate) u32);
 
 impl HirLocalId {
+    pub fn from_index(index: usize) -> Self {
+        HirLocalId(index as u32)
+    }
     /// Dense per-function index used by downstream lowering tables.
     pub fn index(self) -> usize {
         self.0 as usize
@@ -141,6 +144,22 @@ pub struct HirExpr {
 #[derive(Debug, Clone)]
 pub enum HirExprKind {
     Literal(Literal),
+    /// A trait-associated constant selected by a still-generic owner.
+    /// Monomorphization substitutes `owner` and selects the concrete impl.
+    AssociatedConst {
+        owner: Type,
+        name: Symbol,
+    },
+    /// A const generic read, replaced with a literal during monomorphization.
+    ConstParam(Symbol),
+    /// Length of a fixed array, materialized after const substitution.
+    FixedArrayLen(Type),
+    /// Allocates an existential package carrying a value and its witness.
+    PackExistential {
+        value: Box<HirExpr>,
+        concrete: Type,
+        trait_id: DefId,
+    },
     Local(HirLocalId),
     /// Forms a non-owning reference to an addressable local/place.
     Borrow(Box<HirExpr>),
@@ -243,6 +262,13 @@ pub enum HirExprKind {
         /// Meaningless (never read) when `is_static` is `true`.
         domain: ReceiverDomain,
         generic_args: Vec<Type>,
+        args: Vec<HirExpr>,
+    },
+    /// Method dispatch through an `any`/`some` witness table.
+    CallWitness {
+        receiver: Box<HirExpr>,
+        trait_id: DefId,
+        method_name: Symbol,
         args: Vec<HirExpr>,
     },
     /// `Array<T>`'s runtime methods (`push`/`pop`/`len`, language-spec

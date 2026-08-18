@@ -160,6 +160,7 @@ impl Checker<'_> {
                 .generics
                 .iter()
                 .map(|(name, _)| name)
+                .filter(|name| **name != crate::sig::variadic_len_param())
                 .filter(|name| !subst.contains_key(*name))
                 .cloned()
                 .collect();
@@ -182,6 +183,12 @@ impl Checker<'_> {
         if let Some(expected_return) = expected_return {
             collect_generic_bindings(&sig.ret, expected_return, &mut subst);
         }
+        if variadic {
+            subst.insert(
+                crate::sig::variadic_len_param(),
+                Type::Const(args.len().saturating_sub(fixed_params.len()) as u128),
+            );
+        }
         let fixed_arg_count = args.len().min(fixed_params.len());
         // Tracks, within *this* call's argument list only, whether each
         // borrowed local has already been borrowed mutably — the entire
@@ -190,7 +197,9 @@ impl Checker<'_> {
         // the call that produced it (Stage 2, slice 2).
         let mut borrowed_in_call: HashMap<LocalId, bool> = HashMap::new();
         for (param, arg) in fixed_params.iter().zip(&args[..fixed_arg_count]) {
-            let expected = substitute_generic(&param.ty, &subst);
+            let expected = self
+                .sigs
+                .normalize_associated(&substitute_generic(&param.ty, &subst));
             if matches!(expected, Type::Ref(_) | Type::MutRef(_)) {
                 if matches!(arg.kind, ExprKind::MutArg(_)) {
                     self.err(
@@ -218,13 +227,17 @@ impl Checker<'_> {
             } else if param.mutable {
                 self.check_mut_arg_target(inner_expr);
             }
-            let expected = substitute_generic(&param.ty, &subst);
+            let expected = self
+                .sigs
+                .normalize_associated(&substitute_generic(&param.ty, &subst));
             let actual = self.check_expr_with_expected(inner_expr, Some(&expected));
             if is_mut_arg {
                 self.expr_types.insert(arg.id, actual.clone());
             }
             collect_generic_bindings(&param.ty, &actual, &mut subst);
-            let expected = substitute_generic(&param.ty, &subst);
+            let expected = self
+                .sigs
+                .normalize_associated(&substitute_generic(&param.ty, &subst));
             if !actual.compatible(&expected) {
                 let expected_s = self.describe(&expected);
                 let found_s = self.describe(&actual);
@@ -272,6 +285,19 @@ impl Checker<'_> {
                 );
                 continue;
             };
+            if sig.const_params.contains_key(name) {
+                if !matches!(concrete, Type::Const(_)) {
+                    self.err(
+                        call_span,
+                        format!("const generic parameter `{name}` requires an integer constant"),
+                    );
+                }
+            } else if matches!(concrete, Type::Const(_)) {
+                self.err(
+                    call_span,
+                    format!("type generic parameter `{name}` requires a type, not a constant"),
+                );
+            }
             for bound in bound {
                 let concrete_bound = GenericBound {
                     trait_id: bound.trait_id,
@@ -319,7 +345,27 @@ impl Checker<'_> {
                     .cloned()
                     .unwrap_or_default();
                 let subst: HashMap<Symbol, Type> =
-                    names.into_iter().zip(args.iter().cloned()).collect();
+                    names.iter().cloned().zip(args.iter().cloned()).collect();
+                let const_params = self.sigs.const_type_params.get(id);
+                for (name, argument) in names.iter().zip(args) {
+                    if const_params.is_some_and(|params| params.contains_key(name)) {
+                        if !matches!(argument, Type::Const(_)) {
+                            self.err(
+                                span,
+                                format!(
+                                    "const generic parameter `{name}` requires an integer constant"
+                                ),
+                            );
+                        }
+                    } else if matches!(argument, Type::Const(_)) {
+                        self.err(
+                            span,
+                            format!(
+                                "type generic parameter `{name}` requires a type, not a constant"
+                            ),
+                        );
+                    }
+                }
                 for (index, bound) in bounds.into_iter().enumerate() {
                     let Some(actual) = args.get(index) else {
                         continue;
@@ -354,6 +400,57 @@ impl Checker<'_> {
             }
             Type::Array(inner) | Type::Weak(inner) => {
                 self.validate_type_bounds(inner, span);
+            }
+            Type::Associated(owner, name) => {
+                match owner.as_ref() {
+                    Type::Generic(generic) => {
+                        let declarations = self
+                            .generics
+                            .get(generic)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|bound| {
+                                self.sigs
+                                    .trait_associated_types
+                                    .get(&(bound.trait_id, name.clone()))
+                            })
+                            .collect::<Vec<_>>();
+                        let count = declarations.len();
+                        if count == 0 {
+                            self.err(
+                                span,
+                                format!(
+                                    "generic parameter `{generic}` has no associated type `{name}` in its bounds"
+                                ),
+                            );
+                        } else if count > 1 {
+                            self.err(
+                                span,
+                                format!(
+                                    "associated type `{name}` is ambiguous across bounds of `{generic}`"
+                                ),
+                            );
+                        } else if declarations[0].file != span.file
+                            && !declarations[0].visibility.is_public()
+                        {
+                            self.err(span, format!("associated type `{name}` is private"));
+                        }
+                    }
+                    Type::Struct(id, _) | Type::TupleStruct(id, _) | Type::Enum(id, _) => {
+                        match self.sigs.associated_types.get(&(*id, name.clone())) {
+                            None => self.err(span, format!("type has no associated type `{name}`")),
+                            Some(signature)
+                                if signature.file != span.file
+                                    && !signature.visibility.is_public() =>
+                            {
+                                self.err(span, format!("associated type `{name}` is private"));
+                            }
+                            Some(_) => {}
+                        }
+                    }
+                    _ => {}
+                }
+                self.validate_type_bounds(owner, span);
             }
             Type::Function(params, ret) => {
                 for param in params {

@@ -98,7 +98,7 @@ impl Checker<'_> {
             self.err(index.span, "array index must be an integer type");
         }
         match base_ty {
-            Type::Array(inner) => *inner,
+            Type::Array(inner) | Type::FixedArray(inner, _) => *inner,
             Type::Error => Type::Error,
             other => {
                 let desc = self.describe(&other);
@@ -430,13 +430,13 @@ impl Checker<'_> {
     pub(super) fn check_for_in(&mut self, pattern: &Pattern, iter: &Expr, body: &Block) -> Type {
         let iter_ty = self.check_expr(iter);
         let elem_ty = match &iter_ty {
-            Type::Array(inner) => (**inner).clone(),
+            Type::Array(inner) | Type::FixedArray(inner, _) => (**inner).clone(),
             Type::Error => Type::Error,
             other => {
                 let desc = self.describe(other);
                 self.err(
                     iter.span,
-                    format!("`for`-`in` requires an `Array`, found `{desc}`"),
+                    format!("`for`-`in` requires an array, found `{desc}`"),
                 );
                 Type::Error
             }
@@ -529,6 +529,8 @@ impl Checker<'_> {
                         .get(index as usize)
                         .and_then(|name| self.sigs.method(owner, name, ReceiverDomain::Static))
                         .map(|sig| sig.return_origins.as_slice()),
+                    Resolution::StaticConst(_, _) => None,
+                    Resolution::ConstParam => None,
                     Resolution::Local(local) if path.segments.len() == resolution.consumed => {
                         let Some(summary) = self.local_callable_origins.get(&local) else {
                             return HashSet::new();

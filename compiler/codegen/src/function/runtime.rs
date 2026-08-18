@@ -1,6 +1,88 @@
 use super::*;
 
 impl<'ctx> FnCodegen<'_, 'ctx> {
+    pub(super) fn gen_pack_existential(&self, methods: &[Operand]) -> Value<'ctx> {
+        let word = self.m.int_type(64);
+        let size = self
+            .m
+            .const_int(word, ((methods.len() + 1) * 8) as u64, false);
+        let drop = self
+            .runtime
+            .existential_drop
+            .as_global_value()
+            .as_pointer_value()
+            .into();
+        let package = self
+            .m
+            .call(self.runtime.alloc, &[size, drop], "existential")
+            .expect("nether_rt_arc_alloc returns an existential package");
+        self.m
+            .store(package, self.m.const_int(word, methods.len() as u64, false));
+        for (index, method) in methods.iter().enumerate() {
+            let offset = self.m.const_int(word, ((index + 1) * 8) as u64, false);
+            let slot = self.m.gep_bytes(package, offset, "witness_slot");
+            let closure = self.gen_operand(method);
+            // `methods` are ordinary MIR locals and are released at the end
+            // of the surrounding scope.  The existential package therefore
+            // needs its own strong reference for every stored witness closure.
+            self.m.call(self.runtime.retain, &[closure], "");
+            self.m.store(slot, closure);
+        }
+        package
+    }
+
+    pub(super) fn gen_call_witness(
+        &self,
+        receiver: &Operand,
+        slot: u32,
+        function_ty: &Type,
+        args: &[Operand],
+        dest_ty: &Type,
+    ) -> Value<'ctx> {
+        let package = self.gen_operand(receiver);
+        let offset = self
+            .m
+            .const_int(self.m.int_type(64), ((slot as usize + 1) * 8) as u64, false);
+        let closure_slot = self.m.gep_bytes(package, offset, "witness_slot");
+        let closure = self
+            .m
+            .load(self.m.ptr_type(), closure_slot, "witness_closure");
+        let code = self.m.load(self.m.ptr_type(), closure, "witness_fn");
+        let Type::Function(params, ret) = function_ty else {
+            panic!("witness slot does not carry a function type")
+        };
+        let mut param_tys = vec![self.m.ptr_type()];
+        param_tys.extend(params.iter().map(|ty| {
+            if is_aggregate(ty, self.defs()) {
+                self.m.ptr_type()
+            } else {
+                self.layout.llvm_type(ty)
+            }
+        }));
+        let ret_ty = if matches!(ret.as_ref(), Type::Tuple(items) if items.is_empty()) {
+            None
+        } else {
+            Some(self.layout.llvm_type(ret))
+        };
+        let fn_ty = self.m.fn_type(&param_tys, ret_ty);
+        let mut values = Vec::with_capacity(args.len() + 1);
+        values.push(closure);
+        values.extend(args.iter().map(|argument| self.gen_operand(argument)));
+        let result = self
+            .m
+            .indirect_call(fn_ty, code, &values, "witness_call")
+            .unwrap_or_else(|| self.gen_unit());
+        if is_aggregate(dest_ty, self.defs()) {
+            let spill = self
+                .m
+                .alloca(self.layout.llvm_type(dest_ty), "witness_result");
+            self.m.store(spill, result);
+            spill
+        } else {
+            result
+        }
+    }
+
     pub(super) fn gen_closure(&self, function: MonoFnId, captures: &[Operand]) -> Value<'ctx> {
         let capture_tys: Vec<Type> = captures
             .iter()
@@ -241,12 +323,23 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
         index: &Operand,
         dest_ty: &Type,
     ) -> Value<'ctx> {
-        let base_val = self.gen_operand(base);
+        let base_ty = self.operand_ty(base);
+        let base_val = match (&base_ty, base) {
+            (Type::FixedArray(_, _), Operand::Local(local)) => self.base_address(*local, &base_ty),
+            _ => self.gen_operand(base),
+        };
         let idx_val = self.gen_array_index(index);
-        let addr = self
-            .m
-            .call(self.runtime.array_get, &[base_val, idx_val], "elem_ptr")
-            .expect("nether_rt_array_get returns a value");
+        let addr = match base_ty {
+            Type::FixedArray(element, _) => {
+                let size = self.m.size_of(self.layout.llvm_type(&element));
+                let offset = self.m.int_mul(idx_val, size, "fixed_index_offset");
+                self.m.gep_bytes(base_val, offset, "fixed_elem_ptr")
+            }
+            _ => self
+                .m
+                .call(self.runtime.array_get, &[base_val, idx_val], "elem_ptr")
+                .expect("nether_rt_array_get returns a value"),
+        };
         self.load_value(addr, dest_ty)
     }
 

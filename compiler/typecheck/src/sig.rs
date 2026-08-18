@@ -1,11 +1,15 @@
 use std::collections::{HashMap, HashSet};
 
-use nether_ast::{NodeId, SelfParam, Symbol, Visibility};
+use nether_ast::{Expr, NodeId, SelfParam, Symbol, Visibility};
 use nether_diagnostics::FileId;
 use nether_resolver::{DefId, Definitions};
 
 use crate::alloc::{alloc_kind, AllocKind};
 use crate::ty::Type;
+
+pub fn variadic_len_param() -> Symbol {
+    Symbol::new("$variadic_len")
+}
 
 /// One generic/trait constraint with its concrete type arguments.
 ///
@@ -81,6 +85,8 @@ pub struct FnSig {
     /// This item's own generic parameters and their bounds, used for
     /// call-site bound checking (`check.rs`).
     pub generics: Vec<(Symbol, Vec<GenericBound>)>,
+    /// Declared compile-time integer parameters, keyed by generic name.
+    pub const_params: HashMap<Symbol, Type>,
     /// Reference-return origin summary: zero-based parameter indices the
     /// returned reference may originate from. Empty for non-reference
     /// returns or while no safe origin can be inferred.
@@ -161,6 +167,36 @@ pub struct EnumSig {
     pub variants: Vec<(Symbol, Vec<Type>)>,
 }
 
+#[derive(Debug, Clone)]
+pub struct AssociatedConstSig {
+    pub visibility: Visibility,
+    pub file: FileId,
+    pub ty: Type,
+    pub value: Expr,
+}
+
+#[derive(Debug, Clone)]
+pub struct TraitAssociatedConstSig {
+    pub visibility: Visibility,
+    pub file: FileId,
+    pub ty: Type,
+    pub default: Option<Expr>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AssociatedTypeSig {
+    pub visibility: Visibility,
+    pub file: FileId,
+    pub ty: Type,
+}
+
+#[derive(Debug, Clone)]
+pub struct TraitAssociatedTypeSig {
+    pub visibility: Visibility,
+    pub file: FileId,
+    pub default: Option<Type>,
+}
+
 /// Every signature `typecheck` collected from the module, keyed against
 /// `nether_resolver`'s [`DefId`]s so results from both crates can be
 /// cross-referenced directly.
@@ -176,6 +212,7 @@ pub struct Signatures {
     /// Bounds corresponding to generic type/enum parameters, in the same
     /// declaration order as `type_generics` / `EnumSig::generics`.
     pub generic_type_bounds: HashMap<DefId, Vec<Vec<GenericBound>>>,
+    pub const_type_params: HashMap<DefId, HashMap<Symbol, Type>>,
     pub enum_sigs: HashMap<DefId, EnumSig>,
     /// Standalone `fn` signatures, keyed by their own `DefId`.
     pub fns: HashMap<DefId, FnSig>,
@@ -200,6 +237,13 @@ pub struct Signatures {
     pub impl_specializations: HashMap<NodeId, Vec<Type>>,
     /// Fully inherited trait method signatures.
     pub trait_methods: HashMap<(DefId, Symbol), FnSig>,
+    /// Effective associated constants for concrete owners and declarations
+    /// for traits. Trait defaults are copied into an owner when its impl
+    /// does not override them.
+    pub associated_consts: HashMap<(DefId, Symbol), AssociatedConstSig>,
+    pub trait_associated_consts: HashMap<(DefId, Symbol), TraitAssociatedConstSig>,
+    pub associated_types: HashMap<(DefId, Symbol), AssociatedTypeSig>,
+    pub trait_associated_types: HashMap<(DefId, Symbol), TraitAssociatedTypeSig>,
     /// Generic parameter names and direct parent templates for traits.
     pub trait_generics: HashMap<DefId, Vec<Symbol>>,
     pub trait_parents: HashMap<DefId, Vec<GenericBound>>,
@@ -220,6 +264,100 @@ pub struct Signatures {
 }
 
 impl Signatures {
+    pub fn normalize_associated(&self, ty: &Type) -> Type {
+        self.normalize_associated_inner(ty, &mut HashSet::new())
+    }
+
+    fn normalize_associated_inner(
+        &self,
+        ty: &Type,
+        visiting: &mut HashSet<(DefId, Symbol)>,
+    ) -> Type {
+        match ty {
+            Type::Associated(owner, name) => {
+                let owner = self.normalize_associated_inner(owner, visiting);
+                let (id, args) = match &owner {
+                    Type::Struct(id, args) | Type::TupleStruct(id, args) | Type::Enum(id, args) => {
+                        (*id, args.as_slice())
+                    }
+                    _ => return Type::Associated(Box::new(owner), name.clone()),
+                };
+                let key = (id, name.clone());
+                let Some(signature) = self.associated_types.get(&key) else {
+                    return Type::Associated(Box::new(owner), name.clone());
+                };
+                if !visiting.insert(key.clone()) {
+                    return Type::Error;
+                }
+                let generic_names = self
+                    .type_generics
+                    .get(&id)
+                    .cloned()
+                    .or_else(|| self.enum_sigs.get(&id).map(|sig| sig.generics.clone()))
+                    .unwrap_or_default();
+                let subst = generic_names
+                    .into_iter()
+                    .zip(args.iter().cloned())
+                    .collect::<HashMap<_, _>>();
+                let projected = crate::check::substitute_generic(&signature.ty, &subst);
+                let result = self.normalize_associated_inner(&projected, visiting);
+                visiting.remove(&key);
+                result
+            }
+            Type::Struct(id, args) => Type::Struct(
+                *id,
+                args.iter()
+                    .map(|arg| self.normalize_associated_inner(arg, visiting))
+                    .collect(),
+            ),
+            Type::TupleStruct(id, args) => Type::TupleStruct(
+                *id,
+                args.iter()
+                    .map(|arg| self.normalize_associated_inner(arg, visiting))
+                    .collect(),
+            ),
+            Type::Enum(id, args) => Type::Enum(
+                *id,
+                args.iter()
+                    .map(|arg| self.normalize_associated_inner(arg, visiting))
+                    .collect(),
+            ),
+            Type::Tuple(items) => Type::Tuple(
+                items
+                    .iter()
+                    .map(|item| self.normalize_associated_inner(item, visiting))
+                    .collect(),
+            ),
+            Type::Array(inner) => {
+                Type::Array(Box::new(self.normalize_associated_inner(inner, visiting)))
+            }
+            Type::FixedArray(element, length) => Type::FixedArray(
+                Box::new(self.normalize_associated_inner(element, visiting)),
+                Box::new(self.normalize_associated_inner(length, visiting)),
+            ),
+            Type::Weak(inner) => {
+                Type::Weak(Box::new(self.normalize_associated_inner(inner, visiting)))
+            }
+            Type::Unique(inner) => {
+                Type::Unique(Box::new(self.normalize_associated_inner(inner, visiting)))
+            }
+            Type::Ref(inner) => {
+                Type::Ref(Box::new(self.normalize_associated_inner(inner, visiting)))
+            }
+            Type::MutRef(inner) => {
+                Type::MutRef(Box::new(self.normalize_associated_inner(inner, visiting)))
+            }
+            Type::Function(params, ret) => Type::Function(
+                params
+                    .iter()
+                    .map(|param| self.normalize_associated_inner(param, visiting))
+                    .collect(),
+                Box::new(self.normalize_associated_inner(ret, visiting)),
+            ),
+            _ => ty.clone(),
+        }
+    }
+
     /// Whether `ty` opts into compiler-derived structural equality and all
     /// of its fields can participate in that comparison.
     pub fn can_derive_eq(&self, ty: &Type, defs: &Definitions) -> bool {
@@ -546,7 +684,12 @@ impl Signatures {
     /// deep retain/drop shim when copied or when its scope ends.
     pub fn has_managed_content(&self, ty: &Type, defs: &Definitions) -> bool {
         match ty {
-            Type::String | Type::Array(_) | Type::Function(_, _) | Type::Weak(_) => true,
+            Type::String
+            | Type::Array(_)
+            | Type::Function(_, _)
+            | Type::Weak(_)
+            | Type::Any(_, _)
+            | Type::Some(_, _) => true,
             Type::Struct(_, _) | Type::TupleStruct(_, _) => {
                 if alloc_kind(ty, defs) == AllocKind::Heap {
                     true
@@ -560,6 +703,7 @@ impl Signatures {
             Type::Tuple(items) => items
                 .iter()
                 .any(|item| self.has_managed_content(item, defs)),
+            Type::FixedArray(element, _) => self.has_managed_content(element, defs),
             Type::Enum(_, _) => self
                 .enum_sigs
                 .get(match ty {
@@ -614,6 +758,7 @@ fn eq_field_is_structural(
         Type::Tuple(items) => items
             .iter()
             .all(|item| eq_field_is_structural(sigs, item, defs, visiting)),
+        Type::FixedArray(element, _) => eq_field_is_structural(sigs, element, defs, visiting),
         _ => false,
     }
 }
@@ -626,6 +771,7 @@ fn hash_field_is_structural(
 ) -> bool {
     match ty {
         Type::Primitive(kind) => !kind.is_float(),
+        Type::String => true,
         Type::Unique(inner) => hash_field_is_structural(sigs, inner, defs, visiting),
         Type::Struct(_, _) | Type::TupleStruct(_, _) => {
             sigs.can_derive_hash_inner(ty, defs, visiting)
@@ -633,6 +779,7 @@ fn hash_field_is_structural(
         Type::Tuple(items) => items
             .iter()
             .all(|item| hash_field_is_structural(sigs, item, defs, visiting)),
+        Type::FixedArray(element, _) => hash_field_is_structural(sigs, element, defs, visiting),
         _ => false,
     }
 }
@@ -659,6 +806,7 @@ fn clone_field_is_structural(
         Type::Tuple(items) => items
             .iter()
             .all(|item| clone_field_is_structural(sigs, item, defs, visiting)),
+        Type::FixedArray(element, _) => clone_field_is_structural(sigs, element, defs, visiting),
         Type::Struct(_, _) | Type::TupleStruct(_, _)
             if alloc_kind(ty, defs) == AllocKind::Stack =>
         {
@@ -715,6 +863,10 @@ fn collect_pattern_bindings(
         (Type::Array(a), Type::Array(b)) | (Type::Weak(a), Type::Weak(b)) => {
             collect_pattern_bindings(a, b, subst)
         }
+        (Type::FixedArray(a_element, a_length), Type::FixedArray(b_element, b_length)) => {
+            collect_pattern_bindings(a_element, b_element, subst)
+                && collect_pattern_bindings(a_length, b_length, subst)
+        }
         (Type::Function(a_params, a_ret), Type::Function(b_params, b_ret)) => {
             a_params.len() == b_params.len()
                 && a_params
@@ -741,6 +893,10 @@ fn substitute(ty: &Type, subst: &HashMap<Symbol, Type>) -> Type {
             Type::Enum(*id, args.iter().map(|ty| substitute(ty, subst)).collect())
         }
         Type::Array(elem) => Type::Array(Box::new(substitute(elem, subst))),
+        Type::FixedArray(element, length) => Type::FixedArray(
+            Box::new(substitute(element, subst)),
+            Box::new(substitute(length, subst)),
+        ),
         Type::Function(params, ret) => Type::Function(
             params.iter().map(|ty| substitute(ty, subst)).collect(),
             Box::new(substitute(ret, subst)),

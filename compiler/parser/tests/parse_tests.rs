@@ -412,10 +412,19 @@ fn trait_default_body_vs_required_method() {
     let module = parse_ok(
         r#"
 trait Sound {
+    const CHANNELS i32;
+    pub const DEFAULT_VOLUME i32 = 10;
     sound() String {
         "..."
     }
     required_method(self) i32;
+}
+struct Speaker;
+impl Speaker Sound {
+    const CHANNELS i32 = 2;
+    const DEFAULT_VOLUME i32 = 8;
+    sound() String { return "speaker"; }
+    required_method(self) i32 { return 1; }
 }
 "#,
     );
@@ -425,6 +434,21 @@ trait Sound {
     assert!(decl.methods[0].body.is_some());
     assert!(decl.methods[1].body.is_none());
     assert_eq!(decl.methods[1].self_param, Some(SelfParam::ByRef));
+    assert_eq!(decl.associated_consts.len(), 2);
+    assert!(decl.associated_consts[0].value.is_none());
+    assert!(decl.associated_consts[1].value.is_some());
+    assert_eq!(
+        decl.associated_consts[1].visibility,
+        nether_ast::Visibility::Public
+    );
+    let Item::Impl(block) = &module.items[2] else {
+        panic!("expected ImplBlock")
+    };
+    assert_eq!(block.associated_consts.len(), 2);
+    assert!(block
+        .associated_consts
+        .iter()
+        .all(|constant| constant.value.is_some()));
 }
 
 #[test]

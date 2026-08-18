@@ -44,7 +44,7 @@ fn find_fn<'a>(functions: &'a [MirFunction], name: &str) -> &'a MirFunction {
 /// enough for these tests' single-path (no branching) function bodies,
 /// where block order matches execution order.
 fn all_instrs(f: &MirFunction) -> Vec<&Instr> {
-    return f.blocks.iter().flat_map(|b| &b.instrs).collect();
+    f.blocks.iter().flat_map(|b| &b.instrs).collect()
 }
 
 fn retain_release_shape(f: &MirFunction) -> Vec<&'static str> {

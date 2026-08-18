@@ -1,10 +1,18 @@
 use nether_diagnostics::{Diagnostic, SourceMap};
 use nether_typecheck::check;
 
+#[path = "check_tests/associated_consts.rs"]
+mod associated_consts;
+#[path = "check_tests/associated_types.rs"]
+mod associated_types;
 #[path = "check_tests/borrows.rs"]
 mod borrows;
 #[path = "check_tests/casing.rs"]
 mod casing;
+#[path = "check_tests/const_generics.rs"]
+mod const_generics;
+#[path = "check_tests/existentials.rs"]
+mod existentials;
 #[path = "check_tests/expressions.rs"]
 mod expressions;
 #[path = "check_tests/generics.rs"]

@@ -23,6 +23,8 @@ pub fn check(module: &Module, resolved: &ResolvedNames) -> (TypedTables, Vec<Dia
         &mut sigs,
         &mut diagnostics,
     );
+    build_associated_constants(module, resolved, &decls, &mut sigs, &mut diagnostics);
+    build_associated_types(module, resolved, &decls, &mut sigs, &mut diagnostics);
     infer_method_origin_summaries(module, resolved, &mut sigs);
     validate_finite_value_layouts(resolved, &decls, &sigs, &mut diagnostics);
     validate_alias_casing(module, resolved, &decls, &mut diagnostics);
@@ -30,6 +32,7 @@ pub fn check(module: &Module, resolved: &ResolvedNames) -> (TypedTables, Vec<Dia
     let mut expr_types = HashMap::new();
     let mut local_types = HashMap::new();
     let mut call_generic_args = HashMap::new();
+    let mut existential_coercions = HashMap::new();
     for item in &module.items {
         match item {
             Item::Fn(f) => {
@@ -53,6 +56,7 @@ pub fn check(module: &Module, resolved: &ResolvedNames) -> (TypedTables, Vec<Dia
                             &mut expr_types,
                             &mut local_types,
                             &mut call_generic_args,
+                            &mut existential_coercions,
                             &mut diagnostics,
                         );
                         checker.check_fn_decl(f, &sig, None);
@@ -62,6 +66,39 @@ pub fn check(module: &Module, resolved: &ResolvedNames) -> (TypedTables, Vec<Dia
             Item::Impl(b) => {
                 if let Some(owner) = resolved.definitions.lookup_in(b.span.file, &b.target.name) {
                     let self_ty = owner_as_type(owner, resolved, &decls);
+                    for constant in &b.associated_consts {
+                        let Some(signature) = sigs
+                            .associated_consts
+                            .get(&(owner, constant.name.name.clone()))
+                            .cloned()
+                        else {
+                            continue;
+                        };
+                        if let Some(value) = &constant.value {
+                            let mut checker = Checker::new(
+                                resolved,
+                                &sigs,
+                                &decls,
+                                &mut expr_types,
+                                &mut local_types,
+                                &mut call_generic_args,
+                                &mut existential_coercions,
+                                &mut diagnostics,
+                            );
+                            let actual =
+                                checker.check_expr_with_expected(value, Some(&signature.ty));
+                            if !signature.ty.compatible(&actual) {
+                                checker.err(
+                                    value.span,
+                                    format!(
+                                        "associated constant has type `{}`, expected `{}`",
+                                        describe_type(&actual, resolved),
+                                        describe_type(&signature.ty, resolved)
+                                    ),
+                                );
+                            }
+                        }
+                    }
                     for m in &b.methods {
                         let domain = ReceiverDomain::of_self_param(m.self_param.as_ref());
                         if let Some(sig) = sigs.method(owner, &m.name.name, domain).cloned() {
@@ -72,6 +109,7 @@ pub fn check(module: &Module, resolved: &ResolvedNames) -> (TypedTables, Vec<Dia
                                 &mut expr_types,
                                 &mut local_types,
                                 &mut call_generic_args,
+                                &mut existential_coercions,
                                 &mut diagnostics,
                             );
                             checker.check_fn_decl(m, &sig, Some(self_ty.clone()));
@@ -81,6 +119,39 @@ pub fn check(module: &Module, resolved: &ResolvedNames) -> (TypedTables, Vec<Dia
             }
             Item::Trait(i) => {
                 if let Some(id) = resolved.definitions.lookup_in(i.span.file, &i.name.name) {
+                    for constant in &i.associated_consts {
+                        let Some(value) = &constant.value else {
+                            continue;
+                        };
+                        let Some(signature) = sigs
+                            .trait_associated_consts
+                            .get(&(id, constant.name.name.clone()))
+                            .cloned()
+                        else {
+                            continue;
+                        };
+                        let mut checker = Checker::new(
+                            resolved,
+                            &sigs,
+                            &decls,
+                            &mut expr_types,
+                            &mut local_types,
+                            &mut call_generic_args,
+                            &mut existential_coercions,
+                            &mut diagnostics,
+                        );
+                        let actual = checker.check_expr_with_expected(value, Some(&signature.ty));
+                        if !signature.ty.compatible(&actual) {
+                            checker.err(
+                                value.span,
+                                format!(
+                                    "associated constant has type `{}`, expected `{}`",
+                                    describe_type(&actual, resolved),
+                                    describe_type(&signature.ty, resolved)
+                                ),
+                            );
+                        }
+                    }
                     for m in &i.methods {
                         if m.body.is_none() {
                             continue;
@@ -116,6 +187,7 @@ pub fn check(module: &Module, resolved: &ResolvedNames) -> (TypedTables, Vec<Dia
                                 &mut expr_types,
                                 &mut local_types,
                                 &mut call_generic_args,
+                                &mut existential_coercions,
                                 &mut diagnostics,
                             );
                             checker.check_fn_decl(m, &checking_sig, Some(Type::Trait(id)));
@@ -132,6 +204,7 @@ pub fn check(module: &Module, resolved: &ResolvedNames) -> (TypedTables, Vec<Dia
             expr_types,
             local_types,
             call_generic_args,
+            existential_coercions,
             signatures: sigs,
         },
         diagnostics,
@@ -140,6 +213,7 @@ pub fn check(module: &Module, resolved: &ResolvedNames) -> (TypedTables, Vec<Dia
 
 pub(super) fn describe_type(ty: &Type, resolved: &ResolvedNames) -> String {
     match ty {
+        Type::Const(value) => value.to_string(),
         Type::Primitive(p) => format!("{p:?}").to_lowercase(),
         Type::Struct(id, args) | Type::TupleStruct(id, args) => {
             let name = resolved.definitions.get(*id).name.to_string();
@@ -175,6 +249,11 @@ pub(super) fn describe_type(ty: &Type, resolved: &ResolvedNames) -> String {
             )
         }
         Type::Array(inner) => format!("[{}]", describe_type(inner, resolved)),
+        Type::FixedArray(element, length) => format!(
+            "{{{}, {}}}",
+            describe_type(element, resolved),
+            describe_type(length, resolved)
+        ),
         Type::String => "String".to_string(),
         Type::Function(params, ret) => format!(
             "({}) => {}",
@@ -186,7 +265,29 @@ pub(super) fn describe_type(ty: &Type, resolved: &ResolvedNames) -> String {
             describe_type(ret, resolved)
         ),
         Type::Trait(id) => resolved.definitions.get(*id).name.to_string(),
+        Type::Any(id, args) | Type::Some(id, args) => {
+            let prefix = if matches!(ty, Type::Any(_, _)) {
+                "any"
+            } else {
+                "some"
+            };
+            let name = resolved.definitions.get(*id).name.to_string();
+            if args.is_empty() {
+                format!("{prefix} {name}")
+            } else {
+                format!(
+                    "{prefix} {name}<{}>",
+                    args.iter()
+                        .map(|arg| describe_type(arg, resolved))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
+        }
         Type::Generic(name) => name.to_string(),
+        Type::Associated(owner, name) => {
+            format!("{}.{name}", describe_type(owner, resolved))
+        }
         Type::Weak(inner) => format!("weak {}", describe_type(inner, resolved)),
         Type::Unique(inner) => format!(":{}", describe_type(inner, resolved)),
         Type::Ref(inner) => format!(":&{}", describe_type(inner, resolved)),
@@ -196,7 +297,7 @@ pub(super) fn describe_type(ty: &Type, resolved: &ResolvedNames) -> String {
     }
 }
 
-pub(super) fn substitute_generic(ty: &Type, subst: &HashMap<Symbol, Type>) -> Type {
+pub(crate) fn substitute_generic(ty: &Type, subst: &HashMap<Symbol, Type>) -> Type {
     match ty {
         Type::Generic(name) => subst.get(name).cloned().unwrap_or_else(|| ty.clone()),
         Type::Struct(id, args) => Type::Struct(
@@ -212,6 +313,13 @@ pub(super) fn substitute_generic(ty: &Type, subst: &HashMap<Symbol, Type>) -> Ty
                 .collect(),
         ),
         Type::Array(inner) => Type::Array(Box::new(substitute_generic(inner, subst))),
+        Type::FixedArray(element, length) => Type::FixedArray(
+            Box::new(substitute_generic(element, subst)),
+            Box::new(substitute_generic(length, subst)),
+        ),
+        Type::Associated(owner, name) => {
+            Type::Associated(Box::new(substitute_generic(owner, subst)), name.clone())
+        }
         Type::Weak(inner) => Type::Weak(Box::new(substitute_generic(inner, subst))),
         Type::Unique(inner) => Type::Unique(Box::new(substitute_generic(inner, subst))),
         Type::Ref(inner) => Type::Ref(Box::new(substitute_generic(inner, subst))),
@@ -222,6 +330,18 @@ pub(super) fn substitute_generic(ty: &Type, subst: &HashMap<Symbol, Type>) -> Ty
         Type::Enum(id, args) => Type::Enum(
             *id,
             args.iter().map(|a| substitute_generic(a, subst)).collect(),
+        ),
+        Type::Any(id, args) => Type::Any(
+            *id,
+            args.iter()
+                .map(|arg| substitute_generic(arg, subst))
+                .collect(),
+        ),
+        Type::Some(id, args) => Type::Some(
+            *id,
+            args.iter()
+                .map(|arg| substitute_generic(arg, subst))
+                .collect(),
         ),
         Type::Function(params, ret) => Type::Function(
             params
@@ -254,6 +374,10 @@ pub(super) fn collect_generic_bindings(
         | (Type::Ref(a), Type::Ref(b))
         | (Type::MutRef(a), Type::MutRef(b)) => {
             collect_generic_bindings(a, b, subst);
+        }
+        (Type::FixedArray(a_element, a_length), Type::FixedArray(b_element, b_length)) => {
+            collect_generic_bindings(a_element, b_element, subst);
+            collect_generic_bindings(a_length, b_length, subst);
         }
         (Type::Tuple(a), Type::Tuple(b))
         | (Type::Enum(_, a), Type::Enum(_, b))

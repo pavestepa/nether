@@ -234,6 +234,53 @@ impl Checker<'_> {
                 return self.check_array_method_call(elem_ty, method, args, span);
             }
         }
+        if let Type::FixedArray(elem_ty, _) = base_ty {
+            if method.name.as_str() == "len" {
+                if !generic_args.is_empty() {
+                    self.err(method.span, "fixed-array methods are not generic");
+                }
+                return self.check_array_method_call(elem_ty, method, args, span);
+            }
+            if matches!(method.name.as_str(), "push" | "pop") {
+                self.err(method.span, "a fixed array cannot change length");
+                return Type::Error;
+            }
+        }
+        if let Type::Any(trait_id, trait_args) | Type::Some(trait_id, trait_args) = base_ty {
+            let Some(signature) = self
+                .sigs
+                .trait_methods
+                .get(&(*trait_id, method.name.clone()))
+                .cloned()
+            else {
+                self.err(
+                    method.span,
+                    format!(
+                        "trait `{}` has no method named `{}`",
+                        self.resolved.definitions.get(*trait_id).name,
+                        method.name
+                    ),
+                );
+                return Type::Error;
+            };
+            if signature.self_param.is_none() || !signature.generics.is_empty() {
+                self.err(method.span, "method is not existential-safe");
+                return Type::Error;
+            }
+            let names = self
+                .sigs
+                .trait_generics
+                .get(trait_id)
+                .cloned()
+                .unwrap_or_default();
+            let trait_subst = names
+                .into_iter()
+                .zip(trait_args.iter().cloned())
+                .collect::<HashMap<_, _>>();
+            let signature = specialize_fn_sig(&signature, &trait_subst);
+            self.check_call_args(&signature, args, span, None, None, generic_args, call_id);
+            return self.sigs.normalize_associated(&signature.ret);
+        }
         let owner_id = match base_ty {
             Type::Struct(id, _) | Type::TupleStruct(id, _) => Some(*id),
             Type::Enum(id, _) => Some(*id),

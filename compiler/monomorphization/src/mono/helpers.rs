@@ -44,6 +44,9 @@ pub(super) fn owner_def_id(ty: &Type, array_owner: Option<DefId>) -> Option<DefI
 pub(super) fn subst_type(ty: &Type, subst: &HashMap<Symbol, Type>) -> Type {
     match ty {
         Type::Generic(name) => subst.get(name).cloned().unwrap_or_else(|| ty.clone()),
+        Type::Associated(owner, name) => {
+            Type::Associated(Box::new(subst_type(owner, subst)), name.clone())
+        }
         Type::Struct(id, args) => {
             Type::Struct(*id, args.iter().map(|t| subst_type(t, subst)).collect())
         }
@@ -54,7 +57,15 @@ pub(super) fn subst_type(ty: &Type, subst: &HashMap<Symbol, Type>) -> Type {
         Type::Enum(id, args) => {
             Type::Enum(*id, args.iter().map(|t| subst_type(t, subst)).collect())
         }
+        Type::Any(id, args) => Type::Any(*id, args.iter().map(|t| subst_type(t, subst)).collect()),
+        Type::Some(id, args) => {
+            Type::Some(*id, args.iter().map(|t| subst_type(t, subst)).collect())
+        }
         Type::Array(elem) => Type::Array(Box::new(subst_type(elem, subst))),
+        Type::FixedArray(element, length) => Type::FixedArray(
+            Box::new(subst_type(element, subst)),
+            Box::new(subst_type(length, subst)),
+        ),
         Type::Function(params, ret) => Type::Function(
             params.iter().map(|t| subst_type(t, subst)).collect(),
             Box::new(subst_type(ret, subst)),
@@ -63,9 +74,12 @@ pub(super) fn subst_type(ty: &Type, subst: &HashMap<Symbol, Type>) -> Type {
         Type::Unique(inner) => Type::Unique(Box::new(subst_type(inner, subst))),
         Type::Ref(inner) => Type::Ref(Box::new(subst_type(inner, subst))),
         Type::MutRef(inner) => Type::MutRef(Box::new(subst_type(inner, subst))),
-        Type::Primitive(_) | Type::String | Type::Trait(_) | Type::Never | Type::Error => {
-            ty.clone()
-        }
+        Type::Primitive(_)
+        | Type::Const(_)
+        | Type::String
+        | Type::Trait(_)
+        | Type::Never
+        | Type::Error => ty.clone(),
     }
 }
 
@@ -84,6 +98,7 @@ pub(super) fn collect_generic_bindings(
         Type::Generic(name) => {
             out.entry(name.clone()).or_insert_with(|| concrete.clone());
         }
+        Type::Associated(_, _) => {}
         Type::Tuple(items) => {
             if let Type::Tuple(concrete_items) = concrete {
                 for (d, c) in items.iter().zip(concrete_items) {
@@ -95,6 +110,20 @@ pub(super) fn collect_generic_bindings(
             if let Type::Enum(_, concrete_args) = concrete {
                 for (d, c) in args.iter().zip(concrete_args) {
                     collect_generic_bindings(d, c, out);
+                }
+            }
+        }
+        Type::Any(_, args) => {
+            if let Type::Any(_, concrete_args) = concrete {
+                for (declared, concrete) in args.iter().zip(concrete_args) {
+                    collect_generic_bindings(declared, concrete, out);
+                }
+            }
+        }
+        Type::Some(_, args) => {
+            if let Type::Some(_, concrete_args) = concrete {
+                for (declared, concrete) in args.iter().zip(concrete_args) {
+                    collect_generic_bindings(declared, concrete, out);
                 }
             }
         }
@@ -115,6 +144,12 @@ pub(super) fn collect_generic_bindings(
         Type::Array(elem) => {
             if let Type::Array(concrete_elem) = concrete {
                 collect_generic_bindings(elem, concrete_elem, out);
+            }
+        }
+        Type::FixedArray(element, length) => {
+            if let Type::FixedArray(concrete_element, concrete_length) = concrete {
+                collect_generic_bindings(element, concrete_element, out);
+                collect_generic_bindings(length, concrete_length, out);
             }
         }
         Type::Function(params, ret) => {
@@ -145,6 +180,11 @@ pub(super) fn collect_generic_bindings(
                 collect_generic_bindings(inner, concrete_inner, out);
             }
         }
-        Type::Primitive(_) | Type::String | Type::Trait(_) | Type::Never | Type::Error => {}
+        Type::Primitive(_)
+        | Type::Const(_)
+        | Type::String
+        | Type::Trait(_)
+        | Type::Never
+        | Type::Error => {}
     }
 }

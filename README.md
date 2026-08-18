@@ -199,18 +199,19 @@ Nether has no garbage collector, macros, or reflection. Its current borrow
 checker infers origins and shortens ordinary borrows after their last use,
 with loop- and local-closure-sensitive shortening plus a safe lexical fallback
 for closure values whose final local use cannot be established.
-Async, threads, unsafe code, and dynamic trait dispatch are not implemented; see
+Async, threads, and unsafe code are not implemented. Dynamic dispatch is
+available through `any Trait`/`some Trait`; see
 [`docs/architecture/roadmap.md`](docs/architecture/roadmap.md) for which
 stage adds each of those.
 
-Current deliberate limits are local generic inference (no associated types;
-concrete specialization is scoped to instance methods only, see
+Current deliberate limits include local generic inference (associated types
+must be selected through a known owner; concrete specialization is scoped to instance methods only, see
 `docs/generics.md`), no general import aliases/globs/re-exports (bundled
 `stdlib/mod.nr` is a special-cased exception, see "Modules and standard
 library" above), a flattened/non-union enum layout, and native linking
 only for the host target. Cross-target object emission is supported.
-Variadic parameters (`fn f(args ...String)`) are supported as sugar over
-`Array` — see `docs/spec/language-spec.md` §8.7.
+Variadic parameters (`fn f(args ...String)`) are supported as sugar over a
+hidden const-generic fixed array — see `docs/spec/language-spec.md` §8.7.
 
 **Known bug, not yet fixed:** a function that loops over an `Array`
 *parameter* reassigning a `String` local via template-string

@@ -10,8 +10,51 @@ impl Checker<'_> {
         expr: &Expr,
         expected: Option<&Type>,
     ) -> Type {
-        let synthesized = self.synth_expr(expr, expected);
-        let ty = expected
+        let mut synthesized = self
+            .sigs
+            .normalize_associated(&self.synth_expr(expr, expected));
+        let normalized_expected = expected.map(|ty| self.sigs.normalize_associated(ty));
+        if let Some(expected @ (Type::Any(trait_id, args) | Type::Some(trait_id, args))) =
+            normalized_expected.as_ref()
+        {
+            if &synthesized != expected {
+                let bound = GenericBound {
+                    trait_id: *trait_id,
+                    args: args.clone(),
+                };
+                if self.type_satisfies_bound(&synthesized, &bound) {
+                    if matches!(expected, Type::Some(_, _)) {
+                        match &self.opaque_witness {
+                            Some(existing) if existing != &synthesized => self.err(
+                                expr.span,
+                                format!(
+                                    "all returns of an opaque `some` type must use one concrete type; found `{}` after `{}`",
+                                    self.describe(&synthesized),
+                                    self.describe(existing)
+                                ),
+                            ),
+                            None => self.opaque_witness = Some(synthesized.clone()),
+                            _ => {}
+                        }
+                    }
+                    self.existential_coercions
+                        .insert(expr.id, synthesized.clone());
+                    synthesized = expected.clone();
+                } else if !synthesized.is_error() {
+                    self.err(
+                        expr.span,
+                        format!(
+                            "`{}` does not implement `{}`",
+                            self.describe(&synthesized),
+                            self.describe_bound(&bound)
+                        ),
+                    );
+                    synthesized = Type::Error;
+                }
+            }
+        }
+        let ty = normalized_expected
+            .as_ref()
             .map(|expected| contextualize_unknowns(&synthesized, expected))
             .unwrap_or(synthesized);
         self.validate_type_bounds(&ty, expr.span);
@@ -202,6 +245,11 @@ impl Checker<'_> {
         if elems.is_empty() {
             return match expected {
                 Some(Type::Array(inner)) => Type::Array(inner.clone()),
+                Some(Type::FixedArray(inner, length))
+                    if matches!(length.as_ref(), Type::Const(0)) =>
+                {
+                    Type::FixedArray(inner.clone(), length.clone())
+                }
                 _ => {
                     self.err(
                         span,
@@ -213,6 +261,7 @@ impl Checker<'_> {
         }
         let elem_expected = match expected {
             Some(Type::Array(inner)) => Some((**inner).clone()),
+            Some(Type::FixedArray(inner, _)) => Some((**inner).clone()),
             _ => None,
         };
         let first = self.check_expr_with_expected(&elems[0], elem_expected.as_ref());
@@ -227,7 +276,23 @@ impl Checker<'_> {
                 );
             }
         }
-        Type::Array(Box::new(first))
+        match expected {
+            Some(Type::FixedArray(_, length)) => {
+                if let Type::Const(expected_len) = length.as_ref() {
+                    if *expected_len != elems.len() as u128 {
+                        self.err(
+                            span,
+                            format!(
+                                "fixed array expects {expected_len} element(s), found {}",
+                                elems.len()
+                            ),
+                        );
+                    }
+                }
+                Type::FixedArray(Box::new(first), length.clone())
+            }
+            _ => Type::Array(Box::new(first)),
+        }
     }
 
     pub(super) fn require_bool(&mut self, ty: &Type, span: Span, what: &str) {

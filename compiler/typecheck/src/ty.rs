@@ -62,6 +62,8 @@ impl PrimitiveKind {
 /// already exists and identifies the same declarations.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Type {
+    /// Compile-time integer argument in a generic argument list.
+    Const(u128),
     Primitive(PrimitiveKind),
     /// A `type` declaration with named fields.
     Struct(DefId, Vec<Type>),
@@ -75,6 +77,9 @@ pub enum Type {
     /// casing (language-spec §3.3) — see [`crate::alloc::alloc_kind`].
     Enum(DefId, Vec<Type>),
     Array(Box<Type>),
+    /// Inline fixed-size array `{T, N}`. `N` is `Const` after monomorphization
+    /// and may be `Generic` while checking a generic body.
+    FixedArray(Box<Type>, Box<Type>),
     String,
     /// A closure's type: parameter types and a return type. Distinct from
     /// a named function/method's signature ([`crate::sig::FnSig`]), which
@@ -85,12 +90,18 @@ pub enum Type {
     /// type of a value directly (language-spec §7;
     /// `docs/architecture/type-system.md` §4) — enforced in `check.rs`.
     Trait(DefId),
+    /// `any Trait<...>` existential package.
+    Any(DefId, Vec<Type>),
+    /// `some Trait<...>` opaque value inside its declaring API.
+    Some(DefId, Vec<Type>),
     /// An unsubstituted generic type parameter, scoped to the item
     /// currently being checked. Monomorphization substitutes a concrete
     /// `Type` for this once a generic item is
     /// instantiated; `typecheck` itself only checks bound satisfaction at
     /// call sites (`check.rs`), it does not substitute.
     Generic(Symbol),
+    /// `T.Item` (or a projection whose owner has not yet been normalized).
+    Associated(Box<Type>, Symbol),
     Weak(Box<Type>),
     /// `:T`/`:t` — the uniquely-owned form of `inner` (language-spec §3).
     /// Orthogonal to `inner`'s own representation category (heap vs.
@@ -177,7 +188,12 @@ impl Type {
             | Type::TupleStruct(_, args)
             | Type::Tuple(args)
             | Type::Enum(_, args) => args.iter().any(Type::contains_error),
+            Type::Any(_, args) | Type::Some(_, args) => args.iter().any(Type::contains_error),
+            Type::FixedArray(element, length) => {
+                element.contains_error() || length.contains_error()
+            }
             Type::Array(inner)
+            | Type::Associated(inner, _)
             | Type::Weak(inner)
             | Type::Unique(inner)
             | Type::Ref(inner)
@@ -198,7 +214,12 @@ impl Type {
             | Type::TupleStruct(_, args)
             | Type::Tuple(args)
             | Type::Enum(_, args) => args.iter().any(Type::contains_generic),
+            Type::Any(_, args) | Type::Some(_, args) => args.iter().any(Type::contains_generic),
+            Type::FixedArray(element, length) => {
+                element.contains_generic() || length.contains_generic()
+            }
             Type::Array(inner)
+            | Type::Associated(inner, _)
             | Type::Weak(inner)
             | Type::Unique(inner)
             | Type::Ref(inner)
@@ -244,6 +265,12 @@ impl Type {
                 a_id == b_id && a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.compatible(b))
             }
             (Type::Array(a), Type::Array(b)) | (Type::Weak(a), Type::Weak(b)) => a.compatible(b),
+            (Type::FixedArray(a_elem, a_len), Type::FixedArray(b_elem, b_len)) => {
+                a_len == b_len && a_elem.compatible(b_elem)
+            }
+            (Type::Associated(a_owner, a_name), Type::Associated(b_owner, b_name)) => {
+                a_name == b_name && a_owner.compatible(b_owner)
+            }
             (Type::Function(a_params, a_ret), Type::Function(b_params, b_ret)) => {
                 a_params.len() == b_params.len()
                     && a_params.iter().zip(b_params).all(|(a, b)| a.compatible(b))

@@ -30,14 +30,14 @@ otherwise exercise.
 | Non-generic type aliases (`type Name = TypeExpr;`) | Supported |
 | `where` clauses | Supported |
 | Multiple inline bounds such as `T A + B` | Supported |
-| Associated types | Not supported |
+| Associated types and constants | Supported (requirements, defaults, impl bindings and projections) |
 | Specialization of static methods or trait conformance | Not supported |
 | Blanket implementations | Not supported |
-| Const generics | Not supported |
+| Const generics | Supported for integer values and fixed-array lengths (`<const N usize>`, `{T, N}`) |
 | Higher-kinded types | Not supported |
 | Generic type aliases | Not supported |
 | First-class unspecialized generic functions | Not supported |
-| Dynamic trait dispatch | Deliberately not supported (see `any Trait`, not yet implemented — Stage 3) |
+| Dynamic trait dispatch | Supported through existential `any Trait` and opaque `some Trait` packages |
 
 ## Generic functions
 
@@ -817,7 +817,9 @@ u32);` — language-spec §4.3), but a generic alias is not:
 
 ### Dynamic generic traits
 
-Traits are bounds only. There is no `any Trait` yet (not
-implemented — Stage 3), no trait-typed local variable, no
-heterogeneous `Array<Trait>`, no vtable, no runtime trait cast.
-Dispatch is always resolved statically and then monomorphized.
+Bare trait names are bounds only. Runtime-polymorphic locals use `any Trait`;
+opaque returns use `some Trait`. Existential safety rejects static and generic
+methods and requires defaults for associated-type bindings. Witness packages
+store callable adapters; runtime trait casts are not supported. Release builds
+devirtualize generic calls through monomorphization, while eligible `-O0`
+generic bodies share dictionary dispatch.

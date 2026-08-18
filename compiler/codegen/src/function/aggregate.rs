@@ -137,6 +137,12 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
     pub(super) fn gen_tuple(&mut self, items: &[Operand], dest_ty: &Type) -> Value<'ctx> {
         let elem_tys = match dest_ty {
             Type::Tuple(tys) => tys.clone(),
+            Type::FixedArray(element, length) => {
+                let Type::Const(length) = length.as_ref() else {
+                    panic!("fixed-array length was not monomorphized")
+                };
+                vec![(**element).clone(); *length as usize]
+            }
             other => panic!("Rvalue::Tuple with non-tuple destination type {other:?}"),
         };
         let llvm_ty = self.layout.llvm_type(dest_ty);

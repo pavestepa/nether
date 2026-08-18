@@ -53,6 +53,13 @@ pub(super) fn method_index(def: &def::Def, name: &Symbol) -> Option<u32> {
     def.methods.iter().position(|m| m == name).map(|i| i as u32)
 }
 
+pub(super) fn constant_index(def: &def::Def, name: &Symbol) -> Option<u32> {
+    def.constants
+        .iter()
+        .position(|constant| constant == name)
+        .map(|i| i as u32)
+}
+
 /// Searches every enum definition for a variant named `name`. Returns
 /// `Err(count)` when the match isn't unique (`0` = not found, `2+` =
 /// ambiguous) — used for unqualified variant patterns like bare `Custom(x)`.

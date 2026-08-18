@@ -28,6 +28,13 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
                 method,
                 args,
             } => self.gen_call_array_method(receiver, method, args, dest_ty),
+            Rvalue::PackExistential { methods } => self.gen_pack_existential(methods),
+            Rvalue::CallWitness {
+                receiver,
+                slot,
+                function_ty,
+                args,
+            } => self.gen_call_witness(receiver, *slot, function_ty, args, dest_ty),
             Rvalue::Field { base, index } => self.gen_field_read(base, *index, dest_ty),
             Rvalue::VariantField {
                 base,
@@ -271,6 +278,10 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
     fn gen_structural_hash(&self, address: Value<'ctx>, ty: &Type) -> Value<'ctx> {
         let u64_ty = self.m.int_type(64);
         match ty {
+            Type::String => self
+                .m
+                .call(self.runtime.string_hash, &[address], "hash_string")
+                .expect("nether_rt_string_hash returns u64"),
             Type::Primitive(primitive) => {
                 let value = self
                     .m

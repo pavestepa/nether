@@ -157,6 +157,9 @@ pub enum Rvalue {
     PromoteUnique(Operand),
     CloneToUnique(Operand),
     Hash(Operand),
+    PackExistential {
+        methods: Vec<Operand>,
+    },
     Unary(UnaryOp, Operand),
     Binary(BinaryOp, Operand, Operand),
     Call {
@@ -170,6 +173,12 @@ pub enum Rvalue {
     CallArrayMethod {
         receiver: Operand,
         method: Symbol,
+        args: Vec<Operand>,
+    },
+    CallWitness {
+        receiver: Operand,
+        slot: u32,
+        function_ty: Type,
         args: Vec<Operand>,
     },
     Field {

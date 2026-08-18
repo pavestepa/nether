@@ -83,6 +83,11 @@ pub fn collect(module: &Module, prelude_file: Option<FileId>) -> (Definitions, V
                 let id = defs.insert_checked(&i.name, DefKind::Trait, i.visibility, &mut diags);
                 defs.defs[id.0 as usize].methods =
                     i.methods.iter().map(|m| m.name.name.clone()).collect();
+                defs.defs[id.0 as usize].constants = i
+                    .associated_consts
+                    .iter()
+                    .map(|constant| constant.name.name.clone())
+                    .collect();
             }
             Item::Fn(f) => {
                 defs.insert_checked(&f.name, DefKind::Fn, f.visibility, &mut diags);
@@ -141,6 +146,28 @@ pub fn collect(module: &Module, prelude_file: Option<FileId>) -> (Definitions, V
         names
     }
 
+    fn inherited_constant_names(
+        trait_def: DefId,
+        defs: &Definitions,
+        parents: &HashMap<DefId, Vec<DefId>>,
+        visiting: &mut Vec<DefId>,
+    ) -> Vec<Symbol> {
+        if visiting.contains(&trait_def) {
+            return Vec::new();
+        }
+        visiting.push(trait_def);
+        let mut names = defs.get(trait_def).constants.clone();
+        for parent in parents.get(&trait_def).into_iter().flatten() {
+            for name in inherited_constant_names(*parent, defs, parents, visiting) {
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        }
+        visiting.pop();
+        names
+    }
+
     let mut declared_members = Vec::new();
     for item in &module.items {
         let (owner, traits) = match item {
@@ -160,6 +187,14 @@ pub fn collect(module: &Module, prelude_file: Option<FileId>) -> (Definitions, V
         };
         let Some(owner) = owner else { continue };
         let mut names = Vec::new();
+        let mut constants = match item {
+            Item::Impl(block) => block
+                .associated_consts
+                .iter()
+                .map(|constant| constant.name.name.clone())
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
         for trait_ref in traits {
             let Some(trait_def) = trait_id(trait_ref, &defs) else {
                 continue;
@@ -169,13 +204,24 @@ pub fn collect(module: &Module, prelude_file: Option<FileId>) -> (Definitions, V
                     names.push(name);
                 }
             }
+            for name in inherited_constant_names(trait_def, &defs, &trait_parents, &mut Vec::new())
+            {
+                if !constants.contains(&name) {
+                    constants.push(name);
+                }
+            }
         }
-        declared_members.push((owner, names));
+        declared_members.push((owner, names, constants));
     }
-    for (owner, names) in declared_members {
+    for (owner, names, constants) in declared_members {
         for name in names {
             if !defs.defs[owner.0 as usize].methods.contains(&name) {
                 defs.defs[owner.0 as usize].methods.push(name);
+            }
+        }
+        for name in constants {
+            if !defs.defs[owner.0 as usize].constants.contains(&name) {
+                defs.defs[owner.0 as usize].constants.push(name);
             }
         }
     }

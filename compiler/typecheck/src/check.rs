@@ -9,7 +9,8 @@ use nether_diagnostics::{Diagnostic, Span};
 use nether_resolver::{DefId, DefKind, LocalId, Resolution, ResolvedNames};
 
 use crate::sig::{
-    EnumSig, FnSig, GenericBound, MethodSet, ReceiverDomain, ReturnOrigin, Signatures, TypeShape,
+    AssociatedConstSig, AssociatedTypeSig, EnumSig, FnSig, GenericBound, MethodSet, ReceiverDomain,
+    ReturnOrigin, Signatures, TraitAssociatedConstSig, TraitAssociatedTypeSig, TypeShape,
 };
 use crate::ty::{PrimitiveKind, Type};
 
@@ -28,9 +29,9 @@ mod traits;
 use casing::validate_alias_casing;
 use checker::{BorrowOrigin, Checker, ClosureOrigin};
 use declarations::*;
+pub(crate) use entry::substitute_generic;
 use entry::{
     collect_generic_bindings, contextualize_unknowns, describe_type, prefer_concrete_type,
-    substitute_generic,
 };
 use layout::*;
 use traits::*;
@@ -52,6 +53,8 @@ pub struct TypedTables {
     /// Fully resolved generic arguments for each direct generic call,
     /// ordered like the callee signature's generic parameter list.
     pub call_generic_args: HashMap<NodeId, Vec<Type>>,
+    /// Concrete source type for each implicit `value -> any/some Trait` pack.
+    pub existential_coercions: HashMap<NodeId, Type>,
     pub signatures: Signatures,
 }
 
@@ -131,6 +134,7 @@ fn lower_type_expr_inner(
     visiting: &mut HashSet<DefId>,
 ) -> Type {
     match ty {
+        TypeExpr::Const(value, _) => Type::Const(*value),
         TypeExpr::Named { path, generics, .. } => {
             lower_named_type(path, generics, resolved, decls, diags, visiting)
         }
@@ -143,6 +147,23 @@ fn lower_type_expr_inner(
         TypeExpr::Array(inner, _) => Type::Array(Box::new(lower_type_expr_inner(
             inner, resolved, decls, diags, visiting,
         ))),
+        TypeExpr::FixedArray {
+            element,
+            length,
+            span,
+        } => {
+            let element = lower_type_expr_inner(element, resolved, decls, diags, visiting);
+            let length = lower_type_expr_inner(length, resolved, decls, diags, visiting);
+            if !matches!(length, Type::Const(_) | Type::Generic(_) | Type::Error) {
+                diags.push(
+                    Diagnostic::error("fixed-array length must be a compile-time integer")
+                        .with_label(*span, "invalid fixed-array length"),
+                );
+                Type::Error
+            } else {
+                Type::FixedArray(Box::new(element), Box::new(length))
+            }
+        }
         TypeExpr::Weak(inner, span) => {
             let inner_ty = lower_type_expr_inner(inner, resolved, decls, diags, visiting);
             if !inner_ty.is_error()
@@ -155,6 +176,12 @@ fn lower_type_expr_inner(
                 );
             }
             Type::Weak(Box::new(inner_ty))
+        }
+        TypeExpr::Any(trait_ty, span) => {
+            lower_existential_type(trait_ty, *span, false, resolved, decls, diags, visiting)
+        }
+        TypeExpr::Some(trait_ty, span) => {
+            lower_existential_type(trait_ty, *span, true, resolved, decls, diags, visiting)
         }
         TypeExpr::Unique(inner, _) => Type::Unique(Box::new(lower_type_expr_inner(
             inner, resolved, decls, diags, visiting,
@@ -175,6 +202,145 @@ fn lower_type_expr_inner(
     }
 }
 
+fn lower_existential_type(
+    syntax: &TypeExpr,
+    span: Span,
+    opaque: bool,
+    resolved: &ResolvedNames,
+    decls: &DeclIndex,
+    diags: &mut Vec<Diagnostic>,
+    visiting: &mut HashSet<DefId>,
+) -> Type {
+    let TypeExpr::Named { path, generics, .. } = syntax else {
+        diags.push(
+            Diagnostic::error("`any`/`some` must be followed by a trait name")
+                .with_label(span, "not a trait"),
+        );
+        return Type::Error;
+    };
+    let Some(resolution) = resolved.path_res.get(&path.id) else {
+        return Type::Error;
+    };
+    let Resolution::Def(id) = resolution.base else {
+        diags.push(
+            Diagnostic::error("`any`/`some` must be followed by a trait name")
+                .with_label(span, "not a trait"),
+        );
+        return Type::Error;
+    };
+    if resolved.definitions.get(id).kind != DefKind::Trait {
+        diags.push(
+            Diagnostic::error("`any`/`some` must be followed by a trait name")
+                .with_label(span, "this is not a trait"),
+        );
+        return Type::Error;
+    }
+    fn validate_existential_safety(
+        trait_id: DefId,
+        resolved: &ResolvedNames,
+        decls: &DeclIndex,
+        diags: &mut Vec<Diagnostic>,
+        visiting: &mut HashSet<DefId>,
+    ) {
+        if !visiting.insert(trait_id) {
+            return;
+        }
+        let Some(declaration) = decls.trait_decls.get(&trait_id).copied() else {
+            return;
+        };
+        for method in &declaration.methods {
+            if matches!(
+                method.self_param,
+                Some(
+                    nether_ast::SelfParam::Owned
+                        | nether_ast::SelfParam::OwnedRef
+                        | nether_ast::SelfParam::OwnedMutRef
+                )
+            ) {
+                diags.push(
+                    Diagnostic::error(format!(
+                        "trait `{}` is not existential-safe: owned-domain receivers cannot be stored in a reusable witness package",
+                        declaration.name.name
+                    ))
+                    .with_label(
+                        method.name.span,
+                        "owned-domain receivers cannot be stored in a reusable witness package",
+                    ),
+                );
+            }
+            if method.self_param.is_none() {
+                diags.push(
+                    Diagnostic::error(format!(
+                        "trait `{}` is not existential-safe",
+                        declaration.name.name
+                    ))
+                    .with_label(
+                        method.name.span,
+                        "static methods cannot be dispatched through `any`/`some`",
+                    ),
+                );
+            }
+            if !method.generics.is_empty() {
+                diags.push(
+                    Diagnostic::error(format!(
+                        "trait `{}` is not existential-safe",
+                        declaration.name.name
+                    ))
+                    .with_label(
+                        method.name.span,
+                        "generic methods cannot appear in an existential witness table",
+                    ),
+                );
+            }
+        }
+        for associated in &declaration.associated_types {
+            if associated.value.is_none() {
+                diags.push(
+                    Diagnostic::error(format!(
+                        "trait `{}` is not existential-safe",
+                        declaration.name.name
+                    ))
+                    .with_label(
+                        associated.name.span,
+                        "an existential associated type needs a default binding",
+                    ),
+                );
+            }
+        }
+        for parent in &declaration.parents {
+            if let Some(parent_id) = type_expr_def_id(parent, resolved) {
+                validate_existential_safety(parent_id, resolved, decls, diags, visiting);
+            }
+        }
+    }
+    validate_existential_safety(id, resolved, decls, diags, &mut HashSet::new());
+    let expected = decls
+        .trait_decls
+        .get(&id)
+        .map(|decl| decl.generics.len())
+        .unwrap_or(0);
+    if generics.len() != expected {
+        diags.push(
+            Diagnostic::error(format!(
+                "trait `{}` takes {expected} type argument(s), found {}",
+                resolved.definitions.get(id).name,
+                generics.len()
+            ))
+            .with_label(span, "wrong number of trait arguments"),
+        );
+        return Type::Error;
+    }
+    let args = generics
+        .iter()
+        .map(|arg| lower_type_expr_inner(arg, resolved, decls, diags, visiting))
+        .collect();
+    if opaque {
+        Type::Some(id, args)
+    } else {
+        Type::Any(id, args)
+    }
+}
+
 fn lower_named_type(
     path: &Path,
     generics: &[TypeExpr],
@@ -187,11 +353,50 @@ fn lower_named_type(
         return Type::Error;
     };
     match res.base {
-        Resolution::GenericParam => Type::Generic(path.segments[0].name.clone()),
+        Resolution::GenericParam | Resolution::ConstParam => {
+            let owner = Type::Generic(path.segments[0].name.clone());
+            match path.segments.get(1) {
+                Some(member) if path.segments.len() == 2 && generics.is_empty() => {
+                    Type::Associated(Box::new(owner), member.name.clone())
+                }
+                Some(_) => {
+                    diags.push(
+                        Diagnostic::error("an associated type projection has exactly two segments")
+                            .with_label(path.span, "invalid projection"),
+                    );
+                    Type::Error
+                }
+                None => owner,
+            }
+        }
         Resolution::Error => Type::Error,
         Resolution::Def(id) => {
             let def = resolved.definitions.get(id);
             let name = def.name.as_str();
+            if res.consumed == 1 && path.segments.len() == 2 {
+                if !generics.is_empty() {
+                    diags.push(
+                        Diagnostic::error("generic arguments belong on the projection owner")
+                            .with_label(path.span, "write the owner type before `.Associated`"),
+                    );
+                    return Type::Error;
+                }
+                let owner = match def.kind {
+                    DefKind::Type => match decls.type_decls.get(&id).map(|decl| &decl.kind) {
+                        Some(StructDeclKind::TupleStruct(_)) => Type::TupleStruct(id, Vec::new()),
+                        _ => Type::Struct(id, Vec::new()),
+                    },
+                    DefKind::Enum => Type::Enum(id, Vec::new()),
+                    _ => {
+                        diags.push(
+                            Diagnostic::error("only a concrete type can own an associated type")
+                                .with_label(path.span, "invalid associated type owner"),
+                        );
+                        return Type::Error;
+                    }
+                };
+                return Type::Associated(Box::new(owner), path.segments[1].name.clone());
+            }
             if name == "String" {
                 return Type::String;
             }
@@ -306,7 +511,7 @@ fn lower_named_type(
                 DefKind::Fn | DefKind::Primitive | DefKind::Imported => Type::Error,
             }
         }
-        // Local/EnumVariant/StaticMember never arise for a type-position
+        // Local/EnumVariant/StaticMember/StaticConst never arise for a type-position
         // path (`resolver::resolve_type_path` only ever produces
         // GenericParam/Def/Error for these).
         _ => Type::Error,
@@ -388,7 +593,22 @@ fn build_fn_sig(
     decls: &DeclIndex,
     diags: &mut Vec<Diagnostic>,
 ) -> FnSig {
-    let generics = f
+    let mut const_params: HashMap<Symbol, Type> = f
+        .generics
+        .iter()
+        .filter_map(|generic| {
+            let syntax = generic.const_ty.as_ref()?;
+            let ty = lower_type_expr(syntax, resolved, decls, diags);
+            if !matches!(ty, Type::Primitive(kind) if kind.is_integer()) {
+                diags.push(
+                    Diagnostic::error("a const generic parameter must have an integer type")
+                        .with_label(syntax.span(), "not an integer type"),
+                );
+            }
+            Some((generic.name.name.clone(), ty))
+        })
+        .collect();
+    let mut generics: Vec<(Symbol, Vec<GenericBound>)> = f
         .generics
         .iter()
         .map(|g| {
@@ -401,6 +621,11 @@ fn build_fn_sig(
             )
         })
         .collect();
+    if f.params.last().is_some_and(|param| param.variadic) {
+        let name = crate::sig::variadic_len_param();
+        generics.push((name.clone(), Vec::new()));
+        const_params.insert(name, Type::Primitive(PrimitiveKind::Usize));
+    }
     let params = f
         .params
         .iter()
@@ -423,6 +648,7 @@ fn build_fn_sig(
         params,
         ret,
         generics,
+        const_params,
         return_origins: Vec::new(),
     }
 }

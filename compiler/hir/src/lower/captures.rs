@@ -36,6 +36,7 @@ pub(super) fn collect_closure_locals(
         | HirExprKind::Unary { expr: inner, .. }
         | HirExprKind::Field { base: inner, .. }
         | HirExprKind::Loop { body: inner } => collect_closure_locals(inner, used, bound),
+        HirExprKind::PackExistential { value, .. } => collect_closure_locals(value, used, bound),
         HirExprKind::Binary { lhs, rhs, .. }
         | HirExprKind::Assign {
             target: lhs,
@@ -67,6 +68,7 @@ pub(super) fn collect_closure_locals(
             }
         }
         HirExprKind::CallGenericMethod { receiver, args, .. }
+        | HirExprKind::CallWitness { receiver, args, .. }
         | HirExprKind::CallArrayMethod { receiver, args, .. }
         | HirExprKind::CallMethod { receiver, args, .. } => {
             collect_closure_locals(receiver, used, bound);
@@ -120,6 +122,9 @@ pub(super) fn collect_closure_locals(
             }
         }
         HirExprKind::Literal(_)
+        | HirExprKind::AssociatedConst { .. }
+        | HirExprKind::ConstParam(_)
+        | HirExprKind::FixedArrayLen(_)
         | HirExprKind::FnRef(_)
         | HirExprKind::Unit
         | HirExprKind::Continue => {}

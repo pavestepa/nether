@@ -157,6 +157,7 @@ fn call_operands(
             all.extend(args.iter().cloned());
             Some(all)
         }
+        Rvalue::CallWitness { args, .. } => Some(args.clone()),
         _ => None,
     }
 }

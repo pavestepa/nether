@@ -37,7 +37,7 @@ system — not one or the other.
 |---|---|
 | Memory management | **both** ARC (for `T`) and unique ownership + borrow checking (for `:T`) — the programmer chooses per type/binding, not the language globally. Stage 2 enforces moves, borrow exclusivity, returned-reference origins, callable summaries, and ordinary last-use shortening |
 | Polymorphism | traits, static dispatch by default; existential (`any Trait`) and opaque (`some Trait`) types for the rest |
-| Generics | monomorphized in release builds; witness-table/dictionary dispatch in development builds *(dev-mode witness tables: not yet implemented — Stage 3+; Stage 1 stays always-monomorphized)* |
+| Generics | monomorphized in release builds; dictionary-safe bodies use witness-table dispatch in development builds, with monomorphized fallback for layout-dependent bodies |
 | Concurrency | async/await over a Tokio-backed runtime, plus raw OS threads *(not yet implemented — Stage 4)* |
 | Unsafe code | explicit `unsafe`, raw pointers, C ABI FFI *(not yet implemented — Stage 5)* |
 | Lifetimes | no explicit lifetime syntax; inferred origins, callable summaries, and loop/local-closure-sensitive last-use shortening power borrow checking |
@@ -95,10 +95,9 @@ load-bearing, but its role has changed from the pre-rewrite MVP:
 - Template string: `` `text ${expr} text` `` — interpolation via `${...}`,
   multiline supported, the `${...}` body is parsed as an ordinary Nether
   expression.
-- Arrays: `[]` (empty), `[1, 2, 3]` (literal elements). *Distinguishing
-  growable-vector literals from fixed-size inline-array literals (`{T, N}`)
-  per the full target grammar is not yet implemented — Stage 3; today `[]`
-  continues to mean the bundled `Array<T>` heap type.*
+- Arrays: `[]` (empty), `[1, 2, 3]` (literal elements). The expected type
+  selects the representation: `Array<T>` builds a growable runtime array,
+  while `{T, N}` builds an inline fixed array and checks the literal length.
 
 ### 2.5 Semicolons **[current behavior, unchanged by Stage 1]**
 
@@ -550,9 +549,9 @@ fn show(args ...String) {
 ```
 
 Only one variadic parameter is allowed per function, and it must be the
-last parameter. This is sugar over `Array<Type>` in Stage 1; lowering it
-instead to a fixed-size, compile-time-sized collection is unstaged
-follow-up work (roadmap §3).
+last parameter. It lowers to a hidden const-generic fixed array whose length
+is the number of trailing arguments at each call site; it is not a growable
+`Array<Type>` inside the callee.
 
 ---
 
@@ -601,9 +600,10 @@ combines all three compiler-derived operations. `Eq` recursively compares
 supported fields for both ARC and unique values and diagnoses unsupported or
 cyclic derive graphs. `Hash` feeds the same structural family into the
 compiler builtin `hash(value) u64`, using a deterministic unkeyed fold. Integer,
-bool, char, tuple, nested `Hash`, and unique fields are supported; strings and
-floating-point fields remain rejected until their stable hashing semantics are
-specified. Generic user-defined clone overrides remain Stage 3 work.
+bool, char, `String`, tuple, nested `Hash`, and unique fields are supported;
+strings hash their UTF-8 bytes. Floating-point fields remain rejected until
+`Eq`/hash semantics for signed zero and NaN are specified. Generic user-defined
+clone overrides remain Stage 3 work.
 
 ---
 
@@ -653,10 +653,10 @@ impl Dog Sound {
 }
 ```
 
-Not yet implemented: associated types/constants, const generics, existential
-(`any Trait`) and opaque (`some Trait`) types, blanket/conditional impls —
-all **Stage 3**. A trait name still cannot be used as a bare value
-type today; it may only appear as a generic bound. Multiple traits on one
+Associated types/constants, const generics, and existential (`any Trait`) and
+opaque (`some Trait`) types are implemented. A trait name is not itself a
+value type; use `any Trait` for a runtime package or `some Trait` for an opaque
+return. Blanket/conditional impls remain unsupported. Multiple traits on one
 `impl` are comma-separated (`impl Dog Sound, Clone { ... }`). Generic
 parameters accept one or more `+`-separated inline bounds, canonically
 `<T Sound + Named>`. The colon form `<T: Sound>` is invalid. Every bound is
@@ -672,14 +672,15 @@ diagnosed.
 
 ## 13. Generics **[current behavior, unchanged by Stage 1]**
 
-Generic functions/methods/types/traits are monomorphized between HIR
-and MIR — no generic code remains in the final binary. See
+Release generic functions/methods/types/traits are monomorphized between HIR
+and MIR. At `-O0`, a generic free function whose constrained type parameters
+are direct value parameters and whose signature is layout-independent is
+erased to one `any Trait` body and dispatched through witness closures.
+Layout-dependent signatures, generic methods, associated-constant selection,
+and other non-erasable shapes use the monomorphized fallback. See
 [`../generics.md`](../generics.md) for the full example-driven guide.
-Development-mode witness-table/dictionary dispatch (so `nether build`
-doesn't have to monomorphize every generic body) is specified for the full
-language but **not yet implemented — Stage 3**; both modes are required to
-produce identical *behavior*, never identical *codegen strategy*, once that
-lands.
+Development and release strategies are tested with the same source programs
+and are required to produce identical behavior.
 
 ---
 
@@ -797,8 +798,8 @@ Full retain/release insertion rules live in
 | Multiple inline generic bounds (`T A + B`) | **Stage 3 — done** |
 | `where` clauses on generic declarations | **Stage 3 — done** |
 | `default impl` with concrete instance-method specialization | **Stage 3 — done** |
-| Associated types, const generics, `any`/`some` | Stage 3 |
-| Development-mode witness-table generics dispatch | Stage 3 |
+| Associated types/constants, const generics, `any`/`some` | **Stage 3 — done** |
+| Development-mode witness-table generics dispatch | **Stage 3 — done** |
 | async/await, Tokio runtime bridge | Stage 4 |
 | unsafe, raw pointers, C ABI FFI | Stage 5 |
 | Atomic ARC, `Send`/`Sync`, `Nether.toml` package manifest, CLI `run`/`test`/`--release`/`--emit-*` | Stage 6 |

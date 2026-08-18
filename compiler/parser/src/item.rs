@@ -1,6 +1,7 @@
 use nether_ast::{
-    EnumDecl, EnumVariant, Field, FnDecl, GenericParam, ImplBlock, Item, ModDecl, Param, Path,
-    SelfParam, StructDecl, StructDeclKind, TraitDecl, TypeAliasDecl, TypeExpr, UseDecl, Visibility,
+    AssociatedConst, AssociatedType, EnumDecl, EnumVariant, Field, FnDecl, GenericParam, ImplBlock,
+    Item, ModDecl, Param, Path, SelfParam, StructDecl, StructDeclKind, TraitDecl, TypeAliasDecl,
+    TypeExpr, UseDecl, Visibility,
 };
 use nether_diagnostics::Span;
 use nether_lexer::{Keyword, Punct, Token};
@@ -309,8 +310,18 @@ impl Parser {
         self.parse_where_clause(&mut generics);
         self.expect_punct(Punct::LBrace, "to start an impl body");
         let mut methods = Vec::new();
+        let mut associated_consts = Vec::new();
+        let mut associated_types = Vec::new();
         while !matches!(self.peek(), Token::Punct(Punct::RBrace)) && !self.is_eof() {
             let doc = self.take_doc_comments();
+            if self.next_member_is_const() {
+                associated_consts.push(self.parse_associated_const(false));
+                continue;
+            }
+            if self.next_member_is_type() {
+                associated_types.push(self.parse_associated_type(false));
+                continue;
+            }
             match self.parse_method_decl(doc) {
                 Some(method) => methods.push(method),
                 None => {
@@ -326,6 +337,8 @@ impl Parser {
             target,
             target_args,
             traits,
+            associated_consts,
+            associated_types,
             methods,
             span: start.to(end),
         })
@@ -407,8 +420,18 @@ impl Parser {
         self.parse_where_clause(&mut generics);
         self.expect_punct(Punct::LBrace, "to start a trait body");
         let mut methods = Vec::new();
+        let mut associated_consts = Vec::new();
+        let mut associated_types = Vec::new();
         while !matches!(self.peek(), Token::Punct(Punct::RBrace)) && !self.is_eof() {
             let mdoc = self.take_doc_comments();
+            if self.next_member_is_const() {
+                associated_consts.push(self.parse_associated_const(true));
+                continue;
+            }
+            if self.next_member_is_type() {
+                associated_types.push(self.parse_associated_type(true));
+                continue;
+            }
             match self.parse_method_decl(mdoc) {
                 Some(m) => methods.push(m),
                 None => {
@@ -423,6 +446,8 @@ impl Parser {
             visibility,
             generics,
             parents,
+            associated_consts,
+            associated_types,
             methods,
             doc,
             span: start.to(end),
@@ -445,6 +470,78 @@ impl Parser {
             traits.push(self.parse_type_expr());
         }
         traits
+    }
+
+    fn next_member_is_const(&self) -> bool {
+        matches!(self.peek(), Token::Keyword(Keyword::Const))
+            || matches!(self.peek(), Token::Keyword(Keyword::Pub))
+                && matches!(self.peek_at(1), Token::Keyword(Keyword::Const))
+    }
+
+    fn next_member_is_type(&self) -> bool {
+        matches!(self.peek(), Token::Keyword(Keyword::Type))
+            || matches!(self.peek(), Token::Keyword(Keyword::Pub))
+                && matches!(self.peek_at(1), Token::Keyword(Keyword::Type))
+    }
+
+    fn parse_associated_type(&mut self, in_trait: bool) -> AssociatedType {
+        let start = self.peek_span();
+        let visibility = if self.eat_keyword(Keyword::Pub) {
+            Visibility::Public
+        } else {
+            Visibility::Private
+        };
+        self.expect_keyword(Keyword::Type);
+        let id = self.next_id();
+        let name = self.expect_ident();
+        let value = self.eat_punct(Punct::Eq).then(|| self.parse_type_expr());
+        if !in_trait && value.is_none() {
+            self.error(
+                name.span,
+                "an associated type in an `impl` requires a value",
+            );
+        }
+        let end = self.expect_punct(Punct::Semi, "after an associated type");
+        AssociatedType {
+            id,
+            name,
+            visibility,
+            value,
+            span: start.to(end),
+        }
+    }
+
+    fn parse_associated_const(&mut self, in_trait: bool) -> AssociatedConst {
+        let start = self.peek_span();
+        let visibility = if self.eat_keyword(Keyword::Pub) {
+            Visibility::Public
+        } else {
+            Visibility::Private
+        };
+        self.expect_keyword(Keyword::Const);
+        let id = self.next_id();
+        let name = self.expect_ident();
+        let ty = self.parse_type_expr();
+        let value = if self.eat_punct(Punct::Eq) {
+            Some(self.parse_assign_expr())
+        } else {
+            None
+        };
+        if !in_trait && value.is_none() {
+            self.error(
+                name.span,
+                "an associated constant in an `impl` requires a value",
+            );
+        }
+        let end = self.expect_punct(Punct::Semi, "after an associated constant");
+        AssociatedConst {
+            id,
+            name,
+            visibility,
+            ty,
+            value,
+            span: start.to(end),
+        }
     }
 
     fn parse_use_decl(&mut self, visibility: Visibility, start: Span) -> Option<UseDecl> {
@@ -591,10 +688,13 @@ impl Parser {
             self.peek(),
             Token::Punct(Punct::Colon)
                 | Token::Keyword(Keyword::Weak)
+                | Token::Keyword(Keyword::Any)
+                | Token::Keyword(Keyword::Some)
                 | Token::Punct(Punct::LBracket)
                 | Token::Punct(Punct::LParen)
                 | Token::Ident(_)
-        )
+        ) || (matches!(self.peek(), Token::Punct(Punct::LBrace))
+            && matches!(self.peek_at(2), Token::Punct(Punct::Comma)))
     }
 
     /// A method receiver — `self`/`mut self` (ARC domain) or `: self`/
@@ -701,7 +801,20 @@ impl Parser {
         }
         let mut params = Vec::new();
         while !matches!(self.peek(), Token::Punct(Punct::Gt)) && !self.is_eof() {
+            let is_const = self.eat_keyword(Keyword::Const);
             let name = self.expect_ident();
+            if is_const {
+                let const_ty = self.parse_type_expr();
+                params.push(GenericParam {
+                    name,
+                    bounds: Vec::new(),
+                    const_ty: Some(const_ty),
+                });
+                if !self.eat_punct(Punct::Comma) {
+                    break;
+                }
+                continue;
+            }
             let has_legacy_colon = self.eat_punct(Punct::Colon);
             if has_legacy_colon {
                 self.error(
@@ -720,7 +833,11 @@ impl Parser {
             } else {
                 Vec::new()
             };
-            params.push(GenericParam { name, bounds });
+            params.push(GenericParam {
+                name,
+                bounds,
+                const_ty: None,
+            });
             if !self.eat_punct(Punct::Comma) {
                 break;
             }

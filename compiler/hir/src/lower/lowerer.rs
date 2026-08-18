@@ -7,6 +7,7 @@ pub(super) struct Lowerer<'a> {
     pub(super) expr_types: &'a HashMap<NodeId, Type>,
     pub(super) local_types_by_id: &'a HashMap<ResolverLocalId, Type>,
     pub(super) call_generic_args: &'a HashMap<NodeId, Vec<Type>>,
+    pub(super) existential_coercions: &'a HashMap<NodeId, Type>,
     pub(super) sigs: &'a Signatures,
     pub(super) fn_by_def: &'a HashMap<DefId, HirFnId>,
     pub(super) methods: &'a HashMap<(DefId, Symbol, ReceiverDomain), MethodFnSet>,
@@ -19,7 +20,7 @@ pub(super) struct Lowerer<'a> {
 }
 
 impl Lowerer<'_> {
-    fn runtime_ty(&self, ty: &Type) -> Type {
+    pub(super) fn runtime_ty(&self, ty: &Type) -> Type {
         let ty = subst_type(ty, &self.type_subst);
         match ty {
             Type::Unique(inner)
@@ -167,7 +168,10 @@ impl Lowerer<'_> {
             // needed stripping that `strip_unique()` alone would have
             // missed entirely.
             let ty = if param_sig.variadic {
-                Type::Array(Box::new(param_sig.ty.clone()))
+                Type::FixedArray(
+                    Box::new(param_sig.ty.clone()),
+                    Box::new(Type::Generic(nether_typecheck::variadic_len_param())),
+                )
             } else {
                 match &param_sig.ty {
                     Type::Ref(_) | Type::MutRef(_) => subst_type(&param_sig.ty, &self.type_subst),

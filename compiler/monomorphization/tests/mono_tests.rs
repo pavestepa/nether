@@ -1,5 +1,8 @@
 use nether_ast::Symbol;
-use nether_monomorphization::{monomorphize, MonoExpr, MonoExprKind, MonoFnId, MonoModule};
+use nether_monomorphization::{
+    monomorphize, monomorphize_with_strategy, GenericStrategy, MonoExpr, MonoExprKind, MonoFnId,
+    MonoModule,
+};
 
 fn mono_source(source: &str) -> MonoModule {
     let mut map = nether_diagnostics::SourceMap::new();
@@ -25,6 +28,20 @@ fn mono_source(source: &str) -> MonoModule {
         .get(&Symbol::new("main"))
         .expect("no `main` in test source");
     monomorphize(&hir, main_id)
+}
+
+fn mono_source_dev(source: &str) -> MonoModule {
+    let mut map = nether_diagnostics::SourceMap::new();
+    let file = map.add_file("test.nr", source);
+    let (module, parse_diags) = nether_parser::parse_module(source, file);
+    assert!(parse_diags.is_empty(), "{parse_diags:?}");
+    let (resolved, resolve_diags) = nether_resolver::resolve(&module);
+    assert!(resolve_diags.is_empty(), "{resolve_diags:?}");
+    let (tables, check_diags) = nether_typecheck::check(&module, &resolved);
+    assert!(check_diags.is_empty(), "{check_diags:?}");
+    let hir = nether_hir::lower(&module, &resolved, tables);
+    let main_id = hir.fn_by_name[&Symbol::new("main")];
+    monomorphize_with_strategy(&hir, main_id, GenericStrategy::WitnessTables)
 }
 
 fn find_expr<'a>(expr: &'a MonoExpr, pred: &dyn Fn(&MonoExprKind) -> bool) -> Option<&'a MonoExpr> {
@@ -127,11 +144,7 @@ fn all_calls(module: &MonoModule, from: MonoFnId, out: &mut Vec<MonoFnId>) {
                 walk(lhs, out);
                 walk(rhs, out);
             }
-            MonoExprKind::Return(value) => {
-                if let Some(value) = value {
-                    walk(value, out);
-                }
-            }
+            MonoExprKind::Return(Some(value)) => walk(value, out),
             _ => {}
         }
     }
@@ -296,11 +309,13 @@ trait Sound {
         return "...";
     }
 }
+
 struct Dog { name String }
 struct Cat Sound { name String }
 impl Dog Sound {
     sound(self) String { return "Woof"; }
 }
+
 fn make_noise<T Sound>(x T) String {
     return x.sound();
 }
@@ -440,4 +455,38 @@ fn main() {
         }),
         "expected transform<Boxed<i32>, String> specialization"
     );
+}
+
+#[test]
+fn dev_strategy_shares_dictionary_safe_generic_body() {
+    let mono = mono_source_dev(
+        r#"
+trait Noise { noise(self) String { return "default"; } }
+struct Wolf { name String }
+struct Fox Noise { name String }
+impl Wolf Noise { noise(self) String { return "woof"; } }
+fn make_noise<T Noise>(value T) String { return value.noise(); }
+fn main() {
+    println(make_noise(Wolf { name = "w" }));
+    println(make_noise(Fox { name = "f" }));
+}
+"#,
+    );
+    assert_eq!(
+        mono.functions
+            .iter()
+            .filter(|f| f.name.as_str() == "make_noise")
+            .count(),
+        1
+    );
+    let generic = mono
+        .functions
+        .iter()
+        .find(|f| f.name.as_str() == "make_noise")
+        .unwrap();
+    assert!(find_expr(&generic.body, &|kind| matches!(
+        kind,
+        MonoExprKind::CallWitness { .. }
+    ))
+    .is_some());
 }

@@ -32,9 +32,13 @@ pub enum Resolution {
     /// `Dog.new` — the type/enum and the method's index within
     /// [`def::Def::methods`].
     StaticMember(DefId, u32),
+    /// `Dog.LEGS` — a type/enum-associated constant.
+    StaticConst(DefId, u32),
     /// Resolved to an in-scope generic type parameter (type position only;
     /// `typecheck` substitutes the concrete type during monomorphization).
     GenericParam,
+    /// A compile-time integer parameter used in value position.
+    ConstParam,
     /// Could not be resolved; a diagnostic has already been emitted for
     /// this path, so downstream stages should not report it again.
     Error,
@@ -113,6 +117,7 @@ pub fn resolve_with_prelude(
         defs: &defs,
         scopes: Scopes::new(),
         generic_scopes: Vec::new(),
+        const_generic_scopes: Vec::new(),
         type_generics,
         locals: LocalIdGen::default(),
         path_res: HashMap::new(),
@@ -149,6 +154,7 @@ struct Resolver<'a> {
     /// generic item's signature/body and popped on leaving. Checked before
     /// falling back to `defs` when resolving a type-position path.
     generic_scopes: Vec<HashSet<Symbol>>,
+    const_generic_scopes: Vec<HashSet<Symbol>>,
     /// Generic parameters implicitly in scope inside `impl Type { ... }`.
     /// The grammar deliberately writes the target as a bare name; the
     /// declaration's parameters supply the impl's generic environment.
@@ -173,15 +179,28 @@ impl Resolver<'_> {
 
     fn push_generics(&mut self, generics: &[GenericParam]) {
         let names = generics.iter().map(|g| g.name.name.clone()).collect();
+        let const_names = generics
+            .iter()
+            .filter(|generic| generic.const_ty.is_some())
+            .map(|generic| generic.name.name.clone())
+            .collect();
         self.generic_scopes.push(names);
+        self.const_generic_scopes.push(const_names);
     }
 
     fn pop_generics(&mut self) {
         self.generic_scopes.pop();
+        self.const_generic_scopes.pop();
     }
 
     fn is_generic_param(&self, name: &Symbol) -> bool {
         self.generic_scopes.iter().any(|scope| scope.contains(name))
+    }
+
+    fn is_const_generic_param(&self, name: &Symbol) -> bool {
+        self.const_generic_scopes
+            .iter()
+            .any(|scope| scope.contains(name))
     }
 
     // ---- items ----
@@ -193,12 +212,26 @@ impl Resolver<'_> {
             Item::Trait(i) => {
                 self.push_generics(&i.generics);
                 for generic in &i.generics {
+                    if let Some(const_ty) = &generic.const_ty {
+                        self.resolve_type_expr(const_ty);
+                    }
                     for bound in &generic.bounds {
                         self.resolve_type_expr(bound);
                     }
                 }
                 for parent in &i.parents {
                     self.resolve_type_expr(parent);
+                }
+                for constant in &i.associated_consts {
+                    self.resolve_type_expr(&constant.ty);
+                    if let Some(value) = &constant.value {
+                        self.resolve_expr(value);
+                    }
+                }
+                for associated in &i.associated_types {
+                    if let Some(value) = &associated.value {
+                        self.resolve_type_expr(value);
+                    }
                 }
                 for method in &i.methods {
                     // Resolve each bound in the method's own generics too.
@@ -217,6 +250,9 @@ impl Resolver<'_> {
     fn resolve_struct_decl(&mut self, t: &StructDecl) {
         self.push_generics(&t.generics);
         for g in &t.generics {
+            if let Some(const_ty) = &g.const_ty {
+                self.resolve_type_expr(const_ty);
+            }
             for bound in &g.bounds {
                 self.resolve_type_expr(bound);
             }
@@ -243,6 +279,9 @@ impl Resolver<'_> {
     fn resolve_enum_decl(&mut self, e: &EnumDecl) {
         self.push_generics(&e.generics);
         for g in &e.generics {
+            if let Some(const_ty) = &g.const_ty {
+                self.resolve_type_expr(const_ty);
+            }
             for bound in &g.bounds {
                 self.resolve_type_expr(bound);
             }
@@ -268,6 +307,9 @@ impl Resolver<'_> {
         if !b.generics.is_empty() || !b.target_args.is_empty() {
             self.push_generics(&b.generics);
             for g in &b.generics {
+                if let Some(const_ty) = &g.const_ty {
+                    self.resolve_type_expr(const_ty);
+                }
                 for bound in &g.bounds {
                     self.resolve_type_expr(bound);
                 }
@@ -277,6 +319,17 @@ impl Resolver<'_> {
             }
             for trait_ref in &b.traits {
                 self.resolve_type_expr(trait_ref);
+            }
+            for constant in &b.associated_consts {
+                self.resolve_type_expr(&constant.ty);
+                if let Some(value) = &constant.value {
+                    self.resolve_expr(value);
+                }
+            }
+            for associated in &b.associated_types {
+                if let Some(value) = &associated.value {
+                    self.resolve_type_expr(value);
+                }
             }
             for method in &b.methods {
                 self.resolve_fn_decl(method);
@@ -293,6 +346,17 @@ impl Resolver<'_> {
         for trait_ref in &b.traits {
             self.resolve_type_expr(trait_ref);
         }
+        for constant in &b.associated_consts {
+            self.resolve_type_expr(&constant.ty);
+            if let Some(value) = &constant.value {
+                self.resolve_expr(value);
+            }
+        }
+        for associated in &b.associated_types {
+            if let Some(value) = &associated.value {
+                self.resolve_type_expr(value);
+            }
+        }
         for method in &b.methods {
             self.resolve_fn_decl(method);
         }
@@ -307,6 +371,9 @@ impl Resolver<'_> {
     fn resolve_fn_decl(&mut self, f: &FnDecl) {
         self.push_generics(&f.generics);
         for g in &f.generics {
+            if let Some(const_ty) = &g.const_ty {
+                self.resolve_type_expr(const_ty);
+            }
             for bound in &g.bounds {
                 self.resolve_type_expr(bound);
             }
@@ -339,6 +406,7 @@ impl Resolver<'_> {
 
     fn resolve_type_expr(&mut self, ty: &TypeExpr) {
         match ty {
+            TypeExpr::Const(_, _) => {}
             TypeExpr::Named { path, generics, .. } => {
                 self.resolve_type_path(path);
                 for g in generics {
@@ -352,9 +420,17 @@ impl Resolver<'_> {
             }
             TypeExpr::Array(inner, _)
             | TypeExpr::Weak(inner, _)
+            | TypeExpr::Any(inner, _)
+            | TypeExpr::Some(inner, _)
             | TypeExpr::Unique(inner, _)
             | TypeExpr::Ref(inner, _)
             | TypeExpr::MutRef(inner, _) => self.resolve_type_expr(inner),
+            TypeExpr::FixedArray {
+                element, length, ..
+            } => {
+                self.resolve_type_expr(element);
+                self.resolve_type_expr(length);
+            }
             TypeExpr::Function { params, ret, .. } => {
                 for p in params {
                     self.resolve_type_expr(p);
@@ -366,7 +442,7 @@ impl Resolver<'_> {
 
     fn resolve_type_path(&mut self, path: &Path) {
         let first = &path.segments[0];
-        if path.segments.len() == 1 && self.is_generic_param(&first.name) {
+        if self.is_generic_param(&first.name) {
             self.path_res.insert(
                 path.id,
                 PathResolution {
@@ -387,7 +463,9 @@ impl Resolver<'_> {
                     .map(|id| (index, id))
             });
         match named {
-            Some((index, id)) if index + 1 == path.segments.len() => {
+            Some((index, id))
+                if index + 1 == path.segments.len() || (index == 0 && path.segments.len() == 2) =>
+            {
                 self.path_res.insert(
                     path.id,
                     PathResolution {

@@ -70,9 +70,12 @@ impl<'m, 'ctx> Layout<'m, 'ctx> {
     pub fn llvm_type(&self, ty: &Type) -> Ty<'ctx> {
         match ty {
             Type::Primitive(p) => self.primitive_type(*p),
-            Type::String | Type::Array(_) | Type::Function(_, _) | Type::Weak(_) => {
-                self.m.ptr_type()
-            }
+            Type::String
+            | Type::Array(_)
+            | Type::Function(_, _)
+            | Type::Weak(_)
+            | Type::Any(_, _)
+            | Type::Some(_, _) => self.m.ptr_type(),
             Type::Struct(_, _) | Type::TupleStruct(_, _) => match alloc_kind(ty, self.defs) {
                 AllocKind::Heap => self.m.ptr_type(),
                 AllocKind::Stack => self.struct_layout(ty).ty.into(),
@@ -80,6 +83,13 @@ impl<'m, 'ctx> Layout<'m, 'ctx> {
             Type::Tuple(elems) => {
                 let field_tys: Vec<Ty<'ctx>> = elems.iter().map(|t| self.llvm_type(t)).collect();
                 self.m.struct_type(&field_tys).into()
+            }
+            Type::FixedArray(element, length) => {
+                let Type::Const(length) = length.as_ref() else {
+                    unreachable!("fixed-array length must be concrete before codegen")
+                };
+                let field = self.llvm_type(element);
+                self.m.struct_type(&vec![field; *length as usize]).into()
             }
             Type::Enum(_, _) => self.enum_layout(ty).ty.into(),
             // `:T` shares `T`'s representation in Stage 1 (language-spec
@@ -94,7 +104,7 @@ impl<'m, 'ctx> Layout<'m, 'ctx> {
             Type::Unique(inner) => self.llvm_type(inner),
             Type::Ref(_) | Type::MutRef(_) => self.m.ptr_type(),
             Type::Never | Type::Error => self.m.int_type(1),
-            Type::Trait(_) | Type::Generic(_) => {
+            Type::Trait(_) | Type::Generic(_) | Type::Associated(_, _) | Type::Const(_) => {
                 unreachable!("{ty:?} never appears as a value's type by the time monomorphized MIR reaches codegen")
             }
         }

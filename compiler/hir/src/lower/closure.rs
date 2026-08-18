@@ -6,7 +6,7 @@ impl Lowerer<'_> {
         let iter_hir = self.lower_expr(iter);
         let iter_ty = iter_hir.ty.clone();
         let elem_ty = match &iter_ty {
-            Type::Array(inner) => (**inner).clone(),
+            Type::Array(inner) | Type::FixedArray(inner, _) => (**inner).clone(),
             _ => Type::Error,
         };
 
@@ -33,13 +33,19 @@ impl Lowerer<'_> {
             },
         };
 
-        let len_call = HirExpr {
-            kind: HirExprKind::CallArrayMethod {
-                receiver: Box::new(local_ref(iter_local, iter_ty.clone())),
-                method: Symbol::new("len"),
-                args: Vec::new(),
+        let len_call = match &iter_ty {
+            Type::FixedArray(_, length) => HirExpr {
+                kind: HirExprKind::FixedArrayLen((**length).clone()),
+                ty: Type::Primitive(PrimitiveKind::Usize),
             },
-            ty: Type::Primitive(PrimitiveKind::Usize),
+            _ => HirExpr {
+                kind: HirExprKind::CallArrayMethod {
+                    receiver: Box::new(local_ref(iter_local, iter_ty.clone())),
+                    method: Symbol::new("len"),
+                    args: Vec::new(),
+                },
+                ty: Type::Primitive(PrimitiveKind::Usize),
+            },
         };
         let cond = HirExpr {
             kind: HirExprKind::Binary {

@@ -23,6 +23,7 @@ pub(super) struct Checker<'a> {
     pub(super) expr_types: &'a mut HashMap<NodeId, Type>,
     pub(super) local_types: &'a mut HashMap<NodeId, Type>,
     pub(super) call_generic_args: &'a mut HashMap<NodeId, Vec<Type>>,
+    pub(super) existential_coercions: &'a mut HashMap<NodeId, Type>,
     pub(super) diagnostics: &'a mut Vec<Diagnostic>,
     pub(super) locals: HashMap<LocalId, (Type, bool)>,
     /// Move-tracking state for the unique-ownership domain (language-spec
@@ -63,11 +64,14 @@ pub(super) struct Checker<'a> {
     /// otherwise flag identically).
     pub(super) suppress_diagnostics: bool,
     pub(super) generics: HashMap<Symbol, Vec<GenericBound>>,
+    pub(super) const_generics: HashMap<Symbol, Type>,
+    pub(super) opaque_witness: Option<Type>,
     pub(super) return_ty: Type,
     pub(super) loop_depth: usize,
 }
 
 impl<'a> Checker<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         resolved: &'a ResolvedNames,
         sigs: &'a Signatures,
@@ -75,6 +79,7 @@ impl<'a> Checker<'a> {
         expr_types: &'a mut HashMap<NodeId, Type>,
         local_types: &'a mut HashMap<NodeId, Type>,
         call_generic_args: &'a mut HashMap<NodeId, Vec<Type>>,
+        existential_coercions: &'a mut HashMap<NodeId, Type>,
         diagnostics: &'a mut Vec<Diagnostic>,
     ) -> Self {
         Checker {
@@ -84,6 +89,7 @@ impl<'a> Checker<'a> {
             expr_types,
             local_types,
             call_generic_args,
+            existential_coercions,
             diagnostics,
             locals: HashMap::new(),
             moved: HashMap::new(),
@@ -102,6 +108,8 @@ impl<'a> Checker<'a> {
             active_borrows: HashMap::new(),
             suppress_diagnostics: false,
             generics: HashMap::new(),
+            const_generics: HashMap::new(),
+            opaque_witness: None,
             return_ty: Type::unit(),
             loop_depth: 0,
         }
@@ -389,6 +397,8 @@ impl<'a> Checker<'a> {
 
     pub(super) fn check_fn_decl(&mut self, f: &FnDecl, sig: &FnSig, self_ty: Option<Type>) {
         self.generics = sig.generics.iter().cloned().collect();
+        self.const_generics = sig.const_params.clone();
+        self.opaque_witness = None;
         self.locals.clear();
         self.local_scopes.clear();
         self.borrow_origins.clear();
@@ -436,7 +446,10 @@ impl<'a> Checker<'a> {
             // local, matching what the call site actually passes in
             // (`nether_hir::lower::lower_variadic_aware_args`).
             let local_ty = if param_sig.variadic {
-                Type::Array(Box::new(param_sig.ty.clone()))
+                Type::FixedArray(
+                    Box::new(param_sig.ty.clone()),
+                    Box::new(Type::Generic(crate::sig::variadic_len_param())),
+                )
             } else {
                 param_sig.ty.clone()
             };
@@ -612,7 +625,8 @@ impl<'a> Checker<'a> {
                 let declared_ty = let_stmt
                     .ty
                     .as_ref()
-                    .map(|t| lower_type_expr(t, self.resolved, self.decls, self.diagnostics));
+                    .map(|t| lower_type_expr(t, self.resolved, self.decls, self.diagnostics))
+                    .map(|ty| self.sigs.normalize_associated(&ty));
                 let has_declared_type = declared_ty.is_some();
                 let stored_borrow = declared_ty.as_ref().and_then(|declared| {
                     self.check_stored_borrow_initializer(&let_stmt.value, declared)

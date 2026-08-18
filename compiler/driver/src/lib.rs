@@ -151,7 +151,14 @@ pub fn compile(path: &Path, options: &CompileOptions) -> Result<CheckResult, std
                     .and_then(|def| lowered.fn_by_def.get(&def))
                     .copied();
                 if let Some(main_id) = entry_main {
-                    let m = nether_monomorphization::monomorphize(&lowered, main_id);
+                    let strategy = if options.opt_level == 0 {
+                        nether_monomorphization::GenericStrategy::WitnessTables
+                    } else {
+                        nether_monomorphization::GenericStrategy::Monomorphize
+                    };
+                    let m = nether_monomorphization::monomorphize_with_strategy(
+                        &lowered, main_id, strategy,
+                    );
                     let mut functions =
                         nether_mir::build_mir(&m, &r.definitions, &lowered.signatures);
                     nether_mir::insert_arc(&mut functions);
