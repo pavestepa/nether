@@ -1,6 +1,13 @@
 use nether_ast::Symbol;
-use nether_mir::{build_mir, insert_arc, Instr, MirFunction, Operand, Rvalue, Terminator};
+use nether_mir::{
+    build_mir, insert_arc, split_await_points, BlockId, Instr, MirFunction, Operand, Rvalue,
+    Terminator,
+};
 
+#[path = "mir_tests/async_split.rs"]
+mod async_split;
+#[path = "mir_tests/unsafe_ffi.rs"]
+mod unsafe_ffi;
 #[path = "mir_tests/weak_match_and_loops.rs"]
 mod weak_match_and_loops;
 
@@ -30,6 +37,7 @@ fn build(source: &str) -> Vec<MirFunction> {
     let mono = nether_monomorphization::monomorphize(&hir, main_id);
     let mut functions = build_mir(&mono, &resolved.definitions, &hir.signatures);
     insert_arc(&mut functions);
+    split_await_points(&mut functions);
     functions
 }
 
@@ -453,4 +461,47 @@ fn main() {
     // consumed straight into its storage, never independently held
     // afterward.
     assert_eq!(shape, vec!["retain", "release"]);
+}
+
+#[test]
+fn a_fresh_field_value_moved_into_a_construct_is_cleared_not_released() {
+    // Regression test for a real double-free, caught only by actually
+    // running compiled code against a real allocator, not by inspecting
+    // MIR/IR shape alone: a *freshly materialized* field value (a bare
+    // literal here, not an alias of an existing named local — contrast
+    // `constructing_a_struct_from_an_existing_local_retains_the_field_value`,
+    // where `name` aliases a parameter and gets a real `Retain`) moves
+    // into `Dog`'s own storage with no retain at all (this crate's own
+    // RVO convention). That field's own temporary local is left holding a
+    // now-stale duplicate of the same reference — harmless in an ordinary
+    // function (the temporary's `alloca` is simply discarded), but a real
+    // bug for `nether_codegen`'s async-frame drop glue, which would
+    // otherwise find that field non-null and release it a second time on
+    // top of `Dog`'s own eventual drop shim. `Instr::Clear` — never
+    // `Instr::Release` — is the correct fix: there is no second credit to
+    // release, only a stale pointer to null out.
+    let functions = build(
+        r#"
+struct Dog { name String }
+fn make() Dog {
+    return Dog { name = "Rex" };
+}
+fn main() {
+    let d = make();
+    println(d.name);
+}
+"#,
+    );
+    let make = find_fn(&functions, "make");
+    let instrs = all_instrs(make);
+    assert!(
+        instrs.iter().any(|i| matches!(i, Instr::Clear(_))),
+        "the fresh field temporary must be cleared once its value moves into Dog's own storage: {instrs:?}"
+    );
+    assert!(
+        retain_release_shape(make).is_empty(),
+        "no Retain/Release at all is expected here — Dog itself is freshly \
+         constructed and returned directly (RVO), and its field's own \
+         credit transfers via Clear, not Release"
+    );
 }

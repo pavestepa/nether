@@ -329,9 +329,31 @@ impl Mono<'_> {
                 let function = self.instantiate_closure(params, captures, body, &ty, subst);
                 let captures = captures
                     .iter()
-                    .map(|capture| MonoExpr {
-                        kind: MonoExprKind::Local(capture.local),
-                        ty: self.subst_ty(&capture.ty, subst),
+                    .map(|capture| {
+                        let inner_ty = self.subst_ty(&capture.ty, subst);
+                        match capture.mode {
+                            CaptureMode::ByValue => MonoExpr {
+                                kind: MonoExprKind::Local(capture.local),
+                                ty: inner_ty,
+                            },
+                            // `CaptureMode::ByRef` (Stage 7): the
+                            // environment stores the outer local's own
+                            // address rather than a copy of its value —
+                            // `MonoExprKind::Borrow` already lowers to
+                            // `Rvalue::AddressOf` (an ordinary, ARC-exempt
+                            // `Type::MutRef` result, since a reference
+                            // type never owns its referent), the exact
+                            // same mechanism `&raw mut expr`/stored
+                            // `:&mut T` borrows already use — no new MIR
+                            // machinery needed.
+                            CaptureMode::ByRef => MonoExpr {
+                                kind: MonoExprKind::Borrow(Box::new(MonoExpr {
+                                    kind: MonoExprKind::Local(capture.local),
+                                    ty: inner_ty.clone(),
+                                })),
+                                ty: Type::MutRef(Box::new(inner_ty)),
+                            },
+                        }
                     })
                     .collect();
                 MonoExprKind::Closure { function, captures }
@@ -367,13 +389,19 @@ impl Mono<'_> {
             .iter()
             .map(|capture| MonoCapture {
                 local: capture.local,
+                // The callee's own view of a `ByRef` capture stays the
+                // plain element type, matching `HirCapture.ty` — only the
+                // env field/construction side (just above) sees the
+                // pointer; see `MonoCapture::ty`'s own docs.
                 ty: self.subst_ty(&capture.ty, subst),
+                mode: capture.mode,
             })
             .collect();
         self.functions.push(MonoFunction {
             id,
             name: Symbol::new(format!("closure_{}", id.0)),
             is_async: false,
+            is_extern: false,
             owner: None,
             is_closure: true,
             self_param: None,
@@ -411,6 +439,7 @@ impl Mono<'_> {
             id,
             name: Symbol::new(format!("fn_adapter_{}", target.0)),
             is_async: false,
+            is_extern: false,
             owner: None,
             is_closure: true,
             self_param: None,
@@ -506,6 +535,7 @@ impl Mono<'_> {
             id,
             name: Symbol::new(format!("witness_{}_{}", method_name, id.0)),
             is_async: false,
+            is_extern: false,
             owner: None,
             is_closure: true,
             self_param: None,
@@ -514,6 +544,7 @@ impl Mono<'_> {
             captures: vec![MonoCapture {
                 local: HirLocalId::from_index(0),
                 ty: concrete.clone(),
+                mode: CaptureMode::ByValue,
             }],
             params,
             ret: ret.clone(),

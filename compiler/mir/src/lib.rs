@@ -62,10 +62,12 @@
 //!   as other managed values.
 
 mod arc;
+mod async_split;
 mod build;
 mod node;
 
 pub use arc::insert_arc;
+pub use async_split::split_await_points;
 pub use build::build_mir;
 pub use node::{
     BasicBlock, BlockId, CallTarget, Instr, Local, LocalDecl, MirFunction, Operand, Place,

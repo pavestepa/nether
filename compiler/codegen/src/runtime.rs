@@ -31,6 +31,12 @@ pub struct Runtime<'ctx> {
     pub task_block_on: Func<'ctx>,
     pub task_spawn: Func<'ctx>,
     pub timer_sleep: Func<'ctx>,
+    /// `nether_rt_thread::nether_rt_thread_spawn(env: ptr, code: ptr) -> ptr`
+    /// (language-spec §19, Stage 6) — a real OS thread, architecturally
+    /// independent of `task_spawn`'s Tokio bridge above.
+    pub thread_spawn: Func<'ctx>,
+    /// `nether_rt_thread::nether_rt_thread_join(handle: ptr)`
+    pub thread_join: Func<'ctx>,
     /// `nether_rt_arc::nether_rt_arc_weak_retain(ptr)` -- bumps a `weak T`
     /// value's own weak count, never its referent's strong count (spec
     /// §13). Emitted for [`nether_mir::Instr::WeakRetain`].
@@ -111,19 +117,22 @@ impl<'ctx> Runtime<'ctx> {
             retain: m.declare_function("nether_rt_arc_retain", void_fn(&[ptr])),
             release: m.declare_function("nether_rt_arc_release", void_fn(&[ptr])),
             existential_drop: m.declare_function("nether_rt_existential_drop", void_fn(&[ptr])),
-            task_completed_poll: m.declare_function(
-                "nether_rt_task_completed_poll",
-                m.fn_type(&[ptr], Some(m.bool_type())),
-            ),
+            // `task_completed_poll`/`task_poll` return Rust `bool` across
+            // the C ABI, so — like every other bool-returning runtime call
+            // documented at this struct's own top — they're declared `i8`,
+            // not LLVM's native `i1`; a caller `int_cast`s to `i1` itself
+            // (`function.rs`), mirroring `weak_upgrade`/`array_pop`.
+            task_completed_poll: m
+                .declare_function("nether_rt_task_completed_poll", m.fn_type(&[ptr], Some(i8_ty))),
             task_drop: m.declare_function("nether_rt_task_drop", void_fn(&[ptr])),
-            task_poll: m.declare_function(
-                "nether_rt_task_poll",
-                m.fn_type(&[ptr], Some(m.bool_type())),
-            ),
+            task_poll: m.declare_function("nether_rt_task_poll", m.fn_type(&[ptr], Some(i8_ty))),
             task_block_on: m.declare_function("nether_rt_task_block_on", void_fn(&[ptr])),
             task_spawn: m.declare_function("nether_rt_task_spawn", m.fn_type(&[ptr], Some(ptr))),
             timer_sleep: m
                 .declare_function("nether_rt_timer_sleep", m.fn_type(&[i64_ty], Some(ptr))),
+            thread_spawn: m
+                .declare_function("nether_rt_thread_spawn", m.fn_type(&[ptr, ptr], Some(ptr))),
+            thread_join: m.declare_function("nether_rt_thread_join", void_fn(&[ptr])),
             weak_retain: m.declare_function("nether_rt_arc_weak_retain", void_fn(&[ptr])),
             weak_release: m.declare_function("nether_rt_arc_weak_release", void_fn(&[ptr])),
             weak_upgrade: m.declare_function(

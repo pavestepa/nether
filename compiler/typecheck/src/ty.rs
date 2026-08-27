@@ -53,6 +53,26 @@ impl PrimitiveKind {
     }
 }
 
+/// How a closure captures one free variable from its enclosing scope
+/// (language-spec §16, Stage 7's `mut (...) => {}` closures).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureMode {
+    /// Copies the value into the closure's own environment at creation
+    /// time — mutating it inside the body never affects the outer
+    /// binding. The only mode before Stage 7, and still the only one for
+    /// an ordinary or `move` closure.
+    ByValue,
+    /// `mut (...) => {}` only, and only for a capture whose outer local
+    /// is itself declared `mut`: the environment stores the address of
+    /// the outer local's own storage instead of a copy of its value, so
+    /// every read/write inside the closure body transparently reads/
+    /// writes the *same* storage the outer binding uses — the captured
+    /// local's own type stays its ordinary `T` throughout typecheck/HIR;
+    /// only `nether_monomorphization`/`nether_mir`/`nether_codegen` know
+    /// the storage is aliased.
+    ByRef,
+}
+
 /// Nether's structured internal type representation
 /// (`docs/architecture/type-system.md`). Deliberately never a string —
 /// every variant here is compared/hashed structurally.
@@ -96,6 +116,15 @@ pub enum Type {
     Some(DefId, Vec<Type>),
     /// A suspended computation produced by calling an `async fn`.
     Task(Box<Type>),
+    /// An opaque handle to a real OS thread produced by `thread.spawn`
+    /// (language-spec §19, Stage 6). Structurally mirrors `Task`'s own
+    /// `Type`-level footprint (an ordinary heap-managed pointer with a
+    /// generic output type — `codegen/src/layout.rs`, `shims.rs`) but
+    /// carries none of `Task`'s async-frame machinery: `.join()` is a
+    /// plain blocking builtin call, never a suspension point, so nothing
+    /// in `frame.rs`/`function/async_fn.rs` needs to know about this
+    /// type at all.
+    Thread(Box<Type>),
     /// An unsubstituted generic type parameter, scoped to the item
     /// currently being checked. Monomorphization substitutes a concrete
     /// `Type` for this once a generic item is
@@ -119,6 +148,15 @@ pub enum Type {
     /// `:&mut T` — an exclusive borrow, always within the unique-ownership
     /// domain (language-spec §3.1).
     MutRef(Box<Type>),
+    /// `*const T` — a raw, unchecked pointer (language-spec §17, Stage
+    /// 5). No borrow-tracking participates in forming one (`&raw const`/
+    /// `&raw mut` bypass the unique-ownership borrow system entirely —
+    /// see `nether_hir`'s own lowering docs); only *dereferencing* one
+    /// requires an `unsafe` context.
+    RawConstPtr(Box<Type>),
+    /// `*mut T` — a raw, unchecked mutable pointer (language-spec §17,
+    /// Stage 5). See [`Type::RawConstPtr`]'s own docs.
+    RawMutPtr(Box<Type>),
     /// The type of `return`/`break`/`continue` and other
     /// never-produces-a-value expressions — unifies with any other type
     /// in branch-merging contexts (`if`/`match`), the same technique
@@ -199,8 +237,10 @@ impl Type {
             | Type::Weak(inner)
             | Type::Unique(inner)
             | Type::Ref(inner)
-            | Type::MutRef(inner) => inner.contains_error(),
-            Type::Task(output) => output.contains_error(),
+            | Type::MutRef(inner)
+            | Type::RawConstPtr(inner)
+            | Type::RawMutPtr(inner) => inner.contains_error(),
+            Type::Task(output) | Type::Thread(output) => output.contains_error(),
             Type::Function(params, ret) => {
                 params.iter().any(Type::contains_error) || ret.contains_error()
             }
@@ -226,8 +266,10 @@ impl Type {
             | Type::Weak(inner)
             | Type::Unique(inner)
             | Type::Ref(inner)
-            | Type::MutRef(inner) => inner.contains_generic(),
-            Type::Task(output) => output.contains_generic(),
+            | Type::MutRef(inner)
+            | Type::RawConstPtr(inner)
+            | Type::RawMutPtr(inner) => inner.contains_generic(),
+            Type::Task(output) | Type::Thread(output) => output.contains_generic(),
             Type::Function(params, ret) => {
                 params.iter().any(Type::contains_generic) || ret.contains_generic()
             }
@@ -270,7 +312,8 @@ impl Type {
             }
             (Type::Array(a), Type::Array(b))
             | (Type::Weak(a), Type::Weak(b))
-            | (Type::Task(a), Type::Task(b)) => a.compatible(b),
+            | (Type::Task(a), Type::Task(b))
+            | (Type::Thread(a), Type::Thread(b)) => a.compatible(b),
             (Type::FixedArray(a_elem, a_len), Type::FixedArray(b_elem, b_len)) => {
                 a_len == b_len && a_elem.compatible(b_elem)
             }
@@ -288,7 +331,14 @@ impl Type {
             // recurse into their inner type.
             (Type::Unique(a), Type::Unique(b))
             | (Type::Ref(a), Type::Ref(b))
-            | (Type::MutRef(a), Type::MutRef(b)) => a.compatible(b),
+            | (Type::MutRef(a), Type::MutRef(b))
+            | (Type::RawConstPtr(a), Type::RawConstPtr(b))
+            | (Type::RawMutPtr(a), Type::RawMutPtr(b)) => a.compatible(b),
+            // `*mut T` degrades implicitly to an expected `*const T` (one
+            // direction only — mirrors Rust's own raw-pointer coercion);
+            // the reverse never holds, same asymmetry as the `Weak` case
+            // right below.
+            (Type::RawMutPtr(a), Type::RawConstPtr(b)) => a.compatible(b),
             (_, Type::Weak(inner)) => **inner == *self,
             _ => false,
         }

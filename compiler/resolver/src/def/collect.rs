@@ -25,6 +25,16 @@ fn builtin_definitions() -> Definitions {
     defs.defs[task.0 as usize]
         .methods
         .push(Symbol::new("spawn"));
+    // Stage 6's raw-OS-thread namespace (language-spec §19) — mirrors
+    // `task` above exactly, a value-like method receiver recognized by
+    // `nether_typecheck`/`nether_hir` rather than materialized as a
+    // runtime value. `Thread<T>` (the value `thread.spawn` produces) is
+    // never a source-spelled type name, same as `Task<T>` — both are
+    // purely inferred, so neither needs a `Definitions` entry of its own.
+    let thread = defs.insert_builtin(Symbol::new("thread"), DefKind::Type);
+    defs.defs[thread.0 as usize]
+        .methods
+        .push(Symbol::new("spawn"));
 
     // `Array`, like `Option`/`Result`, is *not* seeded here — it's an
     // ordinary generic `type Array<T>;` declaration in
@@ -62,6 +72,15 @@ fn builtin_definitions() -> Definitions {
     defs.insert_builtin(Symbol::new("Eq"), DefKind::Trait);
     // `Hash` opts a type into compiler-derived structural hashing.
     defs.insert_builtin(Symbol::new("Hash"), DefKind::Trait);
+    // `Send`/`Sync` (language-spec §19, Stage 6) are auto-derived marker
+    // traits, computed structurally by `nether_typecheck::send_sync`
+    // rather than requiring a source-level opt-in like the three above —
+    // declaring them at all is only ever legal as `unsafe impl TypeName
+    // Send { }`/`unsafe impl TypeName Sync { }`, asserting an override
+    // the compiler could not otherwise prove
+    // (`nether_typecheck::check::declarations`).
+    defs.insert_builtin(Symbol::new("Send"), DefKind::Trait);
+    defs.insert_builtin(Symbol::new("Sync"), DefKind::Trait);
 
     defs
 }
@@ -102,6 +121,15 @@ pub fn collect(module: &Module, prelude_file: Option<FileId>) -> (Definitions, V
             }
             Item::Fn(f) => {
                 defs.insert_checked(&f.name, DefKind::Fn, f.visibility, &mut diags);
+            }
+            Item::Extern(block) => {
+                // Every `extern "C" { fn foo(...); }` member is registered
+                // as an ordinary top-level `Fn` def, as if hoisted out of
+                // the block — the same namespace ordinary functions
+                // already use, since it's called the same way.
+                for f in &block.functions {
+                    defs.insert_checked(&f.name, DefKind::Fn, f.visibility, &mut diags);
+                }
             }
             Item::Impl(_) | Item::Use(_) | Item::Mod(_) => {}
         }

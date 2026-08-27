@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use nether_ast::{BinaryOp, Literal, SelfParam, Symbol, UnaryOp};
 use nether_resolver::DefId;
-use nether_typecheck::{GenericBound, ReceiverDomain, Signatures, Type};
+use nether_typecheck::{CaptureMode, GenericBound, ReceiverDomain, Signatures, Type};
 
 /// Identifies one function or method for the lifetime of one lowered
 /// [`HirModule`] — minted fresh here rather than reusing
@@ -92,10 +92,16 @@ impl HirModule {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct HirFunction {
     pub id: HirFnId,
     pub name: Symbol,
     pub is_async: bool,
+    /// `true` for an `extern "C" { ... }` block member — `body` is a
+    /// trivial placeholder in this case (no Nether-side body exists);
+    /// `nether_mir::build_mir` special-cases this flag to skip normal
+    /// body-lowering entirely rather than lower the placeholder.
+    pub is_extern: bool,
     /// `Some` for a method (the type/enum it belongs to), `None` for a
     /// standalone function.
     pub owner: Option<DefId>,
@@ -131,6 +137,10 @@ pub struct HirParam {
 pub struct HirCapture {
     pub local: HirLocalId,
     pub ty: Type,
+    /// [`CaptureMode::ByValue`] by default; upgraded to
+    /// [`CaptureMode::ByRef`] in `lower_closure` for a `mut (...) => ...`
+    /// closure's captures of `mut`-declared outer locals (Stage 7).
+    pub mode: CaptureMode,
 }
 
 /// One lowered expression: a smaller, uniform node set than

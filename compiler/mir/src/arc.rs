@@ -54,7 +54,15 @@ use crate::node::{CallTarget, Instr, Local, MirFunction, Operand, Rvalue};
 ///   nothing lasting. Where a native callee genuinely needs to keep a
 ///   reference (`nether_rt_array_push`, storing an element into the
 ///   array's own long-lived storage), it performs that retain itself —
-///   see `nether_codegen::shims`'s module docs.
+///   see `nether_codegen::shims`'s module docs. This post-call release
+///   is emitted as [`Instr::TransientRelease`], not [`Instr::Release`] —
+///   a real correctness fix found while adding `nether_codegen`'s
+///   async-frame drop glue: an argument passed to a builtin call this way
+///   (`println(held)`, say) is very often a still-alive named local, not
+///   a spent temporary, so a consumer that reacted to *every* `Release`
+///   as "this local's life just ended" (as an async frame's null-after-
+///   release bookkeeping does) would corrupt it the moment the very next
+///   statement tried to read it again.
 pub fn insert_arc(functions: &mut [MirFunction]) {
     let mutable_params: HashMap<MonoFnId, Vec<bool>> = functions
         .iter()
@@ -113,7 +121,7 @@ fn insert_arc_fn(f: &mut MirFunction, mutable_params: &HashMap<MonoFnId, Vec<boo
                     new_instrs.push(Instr::Assign(place, rvalue));
                     if releases_after_call {
                         for &l in &heap_args {
-                            new_instrs.push(Instr::Release(l));
+                            new_instrs.push(Instr::TransientRelease(l));
                         }
                     }
                     if retain_dest {

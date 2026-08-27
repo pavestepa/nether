@@ -3,14 +3,24 @@ use std::sync::OnceLock;
 
 use nether_driver::CompileOptions;
 
+#[path = "driver_tests/concurrency.rs"]
+mod concurrency;
 #[path = "driver_tests/diagnostics_and_examples.rs"]
 mod diagnostics_and_examples;
 #[path = "driver_tests/features.rs"]
 mod features;
+#[path = "driver_tests/link_attribute.rs"]
+mod link_attribute;
+#[path = "driver_tests/package_manifest.rs"]
+mod package_manifest;
 #[path = "driver_tests/returned_references.rs"]
 mod returned_references;
 #[path = "driver_tests/stdlib_and_specialization.rs"]
 mod stdlib_and_specialization;
+#[path = "driver_tests/syntax_cleanup.rs"]
+mod syntax_cleanup;
+#[path = "driver_tests/unsafe_ffi.rs"]
+mod unsafe_ffi;
 
 /// Ensures `runtime/*`'s static libraries exist before this test's own
 /// `nether_driver::check` call tries to link against them. End-to-end
@@ -32,6 +42,8 @@ fn ensure_runtime_built() {
                 "nether-rt-io",
                 "-p",
                 "nether-rt-task",
+                "-p",
+                "nether-rt-thread",
             ])
             .status()
             .expect("failed to invoke cargo to build the runtime crates");

@@ -465,7 +465,7 @@ fn has_heap_content(ty: &Type, defs: &Definitions, sigs: &Signatures) -> bool {
         | Type::Weak(_)
         | Type::Any(_, _)
         | Type::Some(_, _) => true,
-        Type::Task(_) => true,
+        Type::Task(_) | Type::Thread(_) => true,
         Type::Struct(_, _) | Type::TupleStruct(_, _) => match alloc_kind(ty, defs) {
             AllocKind::Heap => true,
             AllocKind::Stack => fields_of(ty, sigs)
@@ -500,7 +500,7 @@ fn is_heap_leaf(ty: &Type, defs: &Definitions) -> bool {
         | Type::Function(_, _)
         | Type::Any(_, _)
         | Type::Some(_, _) => true,
-        Type::Task(_) => true,
+        Type::Task(_) | Type::Thread(_) => true,
         Type::Struct(_, _) | Type::TupleStruct(_, _) => alloc_kind(ty, defs) == AllocKind::Heap,
         _ => false,
     }

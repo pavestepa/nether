@@ -268,6 +268,33 @@ fn parses_explicit_move_closure() {
 }
 
 #[test]
+fn parses_explicit_mut_closure() {
+    let (module, diags) = parse_with_diagnostics("fn main() { let f = mut () => { 1 }; }\n");
+    assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
+    let Item::Fn(main) = &module.items[0] else {
+        panic!("expected function");
+    };
+    let Stmt::Let(binding) = &main.body.as_ref().unwrap().stmts[0] else {
+        panic!("expected let binding");
+    };
+    assert!(matches!(
+        binding.value.kind,
+        ExprKind::Closure {
+            move_capture: false,
+            mut_capture: true,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn move_and_mut_closure_modifiers_cannot_combine() {
+    let (_, diags) =
+        parse_with_diagnostics("fn main() { let f = move mut () => { 1 }; }\n");
+    assert!(!diags.is_empty(), "expected a parse error, found none");
+}
+
+#[test]
 fn bare_block_is_not_an_expression() {
     let (_, diags) = parse_with_diagnostics(
         r#"

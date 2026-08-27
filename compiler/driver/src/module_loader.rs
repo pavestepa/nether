@@ -12,6 +12,71 @@ fn bundled_stdlib_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stdlib")
 }
 
+/// Every external root a `mod name;`/`use name.Thing;` may address
+/// without a local sibling file — the bundled stdlib under both its
+/// names, always present, plus every `Nether.toml`-declared local-path
+/// dependency (language-spec §20, Stage 6). Generalizes what was, before
+/// Stage 6, two hardcoded special cases (`"stdlib"`/`"std"`) into one
+/// map both [`ModuleLoader::load`]'s `mod` loop and
+/// [`resolve_use_module`] consult identically — a dependency gets
+/// exactly the same "external root, own independent `self`/`crate`/
+/// `super` namespace" treatment the stdlib already had, just keyed by a
+/// manifest-declared name instead of a literal.
+fn external_roots(entry_path: &Path) -> HashMap<String, PathBuf> {
+    let mut roots = HashMap::new();
+    roots.insert("stdlib".to_string(), bundled_stdlib_root());
+    roots.insert("std".to_string(), bundled_stdlib_root());
+    if let Some(manifest_dir) = find_manifest(entry_path) {
+        roots.extend(load_manifest_dependencies(&manifest_dir));
+    }
+    roots
+}
+
+/// Walks up from `entry_path`'s own directory looking for `Nether.toml`,
+/// the same "search ancestors" convention Cargo itself uses — a manifest
+/// need not sit directly next to the entry file. Absent anywhere is not
+/// an error: a manifest-less compile keeps working exactly as it always
+/// has (`load_manifest_dependencies`'s own docs).
+fn find_manifest(entry_path: &Path) -> Option<PathBuf> {
+    let mut dir = entry_path.parent()?;
+    loop {
+        if dir.join("Nether.toml").is_file() {
+            return Some(dir.to_path_buf());
+        }
+        dir = dir.parent()?;
+    }
+}
+
+/// Parses `<manifest_dir>/Nether.toml`'s `[dependencies]` table — each
+/// entry `name = { path = "..." }`, resolved relative to the manifest's
+/// own directory — into `{name: absolute root path}`. No version
+/// resolution, no registry, no lockfile: purely local-path dependencies,
+/// this stage's own explicit scope. A missing or malformed manifest, or
+/// a dependency entry with no `path`, is silently skipped rather than a
+/// hard error here — a *missing* dependency root is instead reported
+/// where it's actually used, the same "cannot find module" diagnostic
+/// [`resolve_use_module`] already produces for any other unresolved
+/// module path.
+fn load_manifest_dependencies(manifest_dir: &Path) -> HashMap<String, PathBuf> {
+    let mut deps = HashMap::new();
+    let Ok(source) = std::fs::read_to_string(manifest_dir.join("Nether.toml")) else {
+        eprintln!("DEBUG: read_to_string failed");
+        return deps;
+    };
+    let Ok(value) = toml::from_str::<toml::Value>(&source) else {
+        return deps;
+    };
+    let Some(table) = value.get("dependencies").and_then(toml::Value::as_table) else {
+        return deps;
+    };
+    for (name, spec) in table {
+        if let Some(path) = spec.get("path").and_then(toml::Value::as_str) {
+            deps.insert(name.clone(), manifest_dir.join(path));
+        }
+    }
+    deps
+}
+
 /// Loads the entry file and its module graph. `mod user;` declares a
 /// child at `user.nr` or `user/mod.nr`; `use` imports a declaration from
 /// a loaded relative module. `self`, `super` and `crate` may start a use
@@ -44,7 +109,7 @@ pub(super) fn load_module_graph(
     source_map: &mut SourceMap,
 ) -> std::io::Result<(Module, Vec<Diagnostic>, Option<nether_diagnostics::FileId>)> {
     let entry_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let mut loader = ModuleLoader::new(source_map);
+    let mut loader = ModuleLoader::new(source_map, external_roots(&entry_path));
 
     if let Some(diagnostic) = reject_legacy_extension(&entry_path) {
         return Ok((
@@ -105,10 +170,12 @@ struct ModuleLoader<'a> {
     imports: HashMap<nether_ast::NodeId, FileId>,
     variant_imports: HashMap<nether_ast::NodeId, FileId>,
     next_node_id: u32,
+    /// See [`external_roots`]'s own docs.
+    external_roots: HashMap<String, PathBuf>,
 }
 
 impl<'a> ModuleLoader<'a> {
-    fn new(source_map: &'a mut SourceMap) -> Self {
+    fn new(source_map: &'a mut SourceMap, external_roots: HashMap<String, PathBuf>) -> Self {
         Self {
             source_map,
             visited: HashMap::new(),
@@ -117,6 +184,7 @@ impl<'a> ModuleLoader<'a> {
             imports: HashMap::new(),
             variant_imports: HashMap::new(),
             next_node_id: 0,
+            external_roots,
         }
     }
 
@@ -167,9 +235,14 @@ impl<'a> ModuleLoader<'a> {
             let nether_ast::Item::Mod(mod_decl) = item else {
                 continue;
             };
-            // `mod std;` mounts the bundled standard-library root.
-            if mod_decl.name.name.as_str() == "std" {
-                let candidate = bundled_stdlib_root().join("mod.nr");
+            // `mod std;` / `mod <dependency-name>;` mounts an external
+            // root (the bundled stdlib, or a `Nether.toml`-declared
+            // local-path dependency) at its own `mod.nr` — a fresh,
+            // independent `crate_root` (`crate_root: None` below), the
+            // same treatment `use`-only access already gets in
+            // `resolve_use_module`.
+            if let Some(root) = self.external_roots.get(mod_decl.name.name.as_str()) {
+                let candidate = root.join("mod.nr");
                 if candidate.is_file() {
                     self.load(&candidate, None, None)?;
                     continue;
@@ -220,8 +293,14 @@ impl<'a> ModuleLoader<'a> {
     ) -> std::io::Result<()> {
         let total = use_decl.path.segments.len();
         let module_segments = &use_decl.path.segments[..total - 1];
-        let first_attempt =
-            resolve_use_module(importer, importer_file, parent, crate_root, module_segments);
+        let first_attempt = resolve_use_module(
+            importer,
+            importer_file,
+            parent,
+            crate_root,
+            module_segments,
+            &self.external_roots,
+        );
         // A `use module.Enum.Variant;` path (3+ segments) is ambiguous
         // from segment count alone with a genuinely nested module import
         // (`use a.b.C;`) — try the longer, ordinary interpretation
@@ -242,6 +321,7 @@ impl<'a> ModuleLoader<'a> {
                     parent,
                     crate_root,
                     &use_decl.path.segments[..total - 2],
+                    &self.external_roots,
                 ),
                 &use_decl.path.segments[..total - 2],
             )
@@ -299,6 +379,7 @@ fn resolve_use_module(
     parent: Option<&(PathBuf, nether_diagnostics::FileId)>,
     crate_root: &(PathBuf, nether_diagnostics::FileId),
     segments: &[nether_ast::Ident],
+    external_roots: &HashMap<String, PathBuf>,
 ) -> Result<ModuleTarget, String> {
     let first = segments
         .first()
@@ -346,20 +427,13 @@ fn resolve_use_module(
         });
     }
 
-    // Bundled modules are an external root rather than children that each
-    // user crate must redeclare with `mod stdlib;`.
-    if first == "stdlib" {
-        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        if let Some(path) = resolve_module_file_from_root(&workspace, segments) {
-            return Ok(ModuleTarget::File { path, parent: None });
-        }
-    }
-    // `std` is an alias for the same bundled root under the name a
-    // `mod std;` declaration mounts it as (`std.option.Option` reaches
-    // the same file as `stdlib.option.Option`) — dropping the leading
-    // `std` segment itself before resolving under `stdlib/`.
-    if first == "std" {
-        if let Some(path) = resolve_module_file_from_root(&bundled_stdlib_root(), &segments[1..]) {
+    // An external root (the bundled stdlib under either of its two
+    // names, or a `Nether.toml`-declared local-path dependency) rather
+    // than a child every user crate must redeclare with `mod name;` —
+    // `use name.Thing;` alone is enough, dropping the leading `name`
+    // segment itself before resolving under its own root.
+    if let Some(root) = external_roots.get(first) {
+        if let Some(path) = resolve_module_file_from_root(root, &segments[1..]) {
             return Ok(ModuleTarget::File { path, parent: None });
         }
     }
@@ -460,4 +534,38 @@ fn legacy_extension_or_missing_child_diagnostic(
             "create `{}.nr` or `{}/mod.nr` next to this module",
             name.name, name.name
         ))
+}
+
+#[cfg(test)]
+mod manifest_tests {
+    use super::*;
+
+    #[test]
+    fn finds_and_parses_a_path_dependency() {
+        let dir = std::env::temp_dir().join("nether_manifest_unit_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("Nether.toml"),
+            r#"
+[package]
+name = "app"
+
+[dependencies]
+mathlib = { path = "../mathlib" }
+"#,
+        )
+        .unwrap();
+        assert_eq!(find_manifest(&dir.join("main.nr")), Some(dir.clone()));
+        let deps = load_manifest_dependencies(&dir);
+        assert_eq!(deps.get("mathlib"), Some(&dir.join("../mathlib")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_manifest_found_returns_none() {
+        let dir = std::env::temp_dir().join("nether_manifest_unit_test_absent");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(load_manifest_dependencies(&dir).len(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

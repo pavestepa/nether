@@ -40,6 +40,8 @@ pub enum Keyword {
     Return,
     True,
     False,
+    Unsafe,
+    Extern,
 }
 
 pub fn keyword_from_str(s: &str) -> Option<Keyword> {
@@ -77,6 +79,8 @@ pub fn keyword_from_str(s: &str) -> Option<Keyword> {
         "return" => Keyword::Return,
         "true" => Keyword::True,
         "false" => Keyword::False,
+        "unsafe" => Keyword::Unsafe,
+        "extern" => Keyword::Extern,
         _ => return None,
     })
 }
@@ -110,9 +114,13 @@ pub enum Punct {
     Gt,
     Ge,
     Bang,
-    /// `&` — reference-chain types in the unique-ownership domain
-    /// (`:&T`, `:&mut T`; language-spec §3.1). Always reached after a
-    /// leading `:` — there is no bare, always-ARC reference form.
+    /// `&` — two distinct uses: reference-chain *types* in the
+    /// unique-ownership domain (`:&T`, `:&mut T`; language-spec §3.1),
+    /// always reached after a leading `:` since there is no bare,
+    /// always-ARC reference form; and, in *expression* position, the
+    /// prefix of `&raw const expr`/`&raw mut expr` (language-spec §17,
+    /// Stage 5) — the only expression-level use of this token, since
+    /// there is no bare `&expr` reference-taking operator either.
     Amp,
     AmpAmp,
     PipePipe,

@@ -244,6 +244,14 @@ impl Resolver<'_> {
             Item::Use(u) => self.resolve_use_decl(u),
             Item::Mod(_) => {}
             Item::TypeAlias(alias) => self.resolve_type_expr(&alias.ty),
+            Item::Extern(block) => {
+                for f in &block.functions {
+                    // `resolve_fn_decl` already tolerates `f.body: None`
+                    // (a trait method with no default) — an extern
+                    // signature is the same shape.
+                    self.resolve_fn_decl(f);
+                }
+            }
         }
     }
 
@@ -424,7 +432,9 @@ impl Resolver<'_> {
             | TypeExpr::Some(inner, _)
             | TypeExpr::Unique(inner, _)
             | TypeExpr::Ref(inner, _)
-            | TypeExpr::MutRef(inner, _) => self.resolve_type_expr(inner),
+            | TypeExpr::MutRef(inner, _)
+            | TypeExpr::RawConstPtr(inner, _)
+            | TypeExpr::RawMutPtr(inner, _) => self.resolve_type_expr(inner),
             TypeExpr::FixedArray {
                 element, length, ..
             } => {

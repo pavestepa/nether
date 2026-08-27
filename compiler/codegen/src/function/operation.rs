@@ -4,7 +4,16 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
     pub(super) fn gen_rvalue(&mut self, rvalue: &Rvalue, dest_ty: &Type) -> Value<'ctx> {
         match rvalue {
             Rvalue::Use(op) => self.gen_operand(op),
-            Rvalue::Await(task) => self.gen_await(task, dest_ty),
+            // `nether_mir::split_await_points` always eliminates
+            // `Rvalue::Await` for an `is_async` function's own MIR before
+            // it reaches codegen (`crate::function::async_fn`'s module
+            // docs), and `Await` never appears in a non-async function's
+            // MIR at all (`await` is rejected outside an `async fn` —
+            // `nether_typecheck`) — so this arm is unreachable by
+            // construction, not a gap.
+            Rvalue::Await(_) => unreachable!(
+                "Rvalue::Await must be lowered into Terminator::Await before codegen"
+            ),
             Rvalue::AddressOf(place) => self.address_of_place(place),
             Rvalue::Deref(reference) => {
                 let address = self.gen_operand(reference);
@@ -371,42 +380,68 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
                     .mir_functions
                     .get(id)
                     .expect("every CallTarget::Fn refers to MIR in this same module");
-                let arg_vals: Vec<Value<'ctx>> = args
-                    .iter()
-                    .zip(&mir_target.params)
-                    .map(|(arg, &param)| {
-                        if mir_target.local_decl(param).mutable
-                            && !matches!(
+                // An `extern "C"` target crosses the real C ABI, not
+                // Nether's own internal calling convention: no
+                // mutable-parameter-by-pointer rewriting (that convention
+                // is purely internal — see `crate::declare`'s doc comment
+                // on `is_extern`), and `bool` crosses as `i8`, never
+                // LLVM's native `i1` (mirrors every other C-ABI boundary
+                // this crate already declares — `runtime.rs`'s own module
+                // docs).
+                let arg_vals: Vec<Value<'ctx>> = if mir_target.is_extern {
+                    args.iter()
+                        .zip(&mir_target.params)
+                        .map(|(arg, &param)| {
+                            let val = self.gen_operand(arg);
+                            if matches!(
                                 mir_target.local_decl(param).ty,
-                                Type::Ref(_) | Type::MutRef(_)
-                            )
-                        {
-                            let Operand::Local(local) = arg else {
-                                panic!("a mutable parameter requires a local argument");
-                            };
-                            self.locals[local.index()]
-                        } else {
-                            self.gen_operand(arg)
-                        }
-                    })
-                    .collect();
-                let result = self
+                                Type::Primitive(PrimitiveKind::Bool)
+                            ) {
+                                self.m.int_cast(val, self.m.int_type(8), false, "ffi_bool_widen")
+                            } else {
+                                val
+                            }
+                        })
+                        .collect()
+                } else {
+                    args.iter()
+                        .zip(&mir_target.params)
+                        .map(|(arg, &param)| {
+                            if mir_target.local_decl(param).mutable
+                                && !matches!(
+                                    mir_target.local_decl(param).ty,
+                                    Type::Ref(_) | Type::MutRef(_)
+                                )
+                            {
+                                let Operand::Local(local) = arg else {
+                                    panic!("a mutable parameter requires a local argument");
+                                };
+                                self.locals[local.index()]
+                            } else {
+                                self.gen_operand(arg)
+                            }
+                        })
+                        .collect()
+                };
+                // An `is_async` target's own LLVM symbol is its *start*
+                // function (`crate::declare`'s `is_async` branch,
+                // `function::async_fn`'s module docs) — calling it only
+                // ever constructs and returns a `Task<T>` frame pointer,
+                // never runs the callee's body, so the raw call result is
+                // already exactly the right value with no wrapping step
+                // needed (unlike the eager-then-wrap shortcut this
+                // replaced).
+                let call_result = self
                     .m
                     .call(f, &arg_vals, "call")
                     .unwrap_or_else(|| self.gen_unit());
-                if mir_target.is_async {
-                    let output = if is_aggregate(&mir_target.ret, self.defs()) {
-                        let slot = self
-                            .m
-                            .alloca(self.layout.llvm_type(&mir_target.ret), "async_output");
-                        self.m.store(slot, result);
-                        slot
-                    } else {
-                        result
-                    };
-                    return self.gen_completed_task(output, &mir_target.ret);
+                if mir_target.is_extern && matches!(dest_ty, Type::Primitive(PrimitiveKind::Bool))
+                {
+                    self.m
+                        .int_cast(call_result, self.m.bool_type(), false, "ffi_bool_narrow")
+                } else {
+                    call_result
                 }
-                result
             }
             CallTarget::Dynamic(callee) => {
                 let arg_vals: Vec<Value<'ctx>> = args.iter().map(|a| self.gen_operand(a)).collect();
@@ -441,9 +476,12 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
         if is_aggregate(dest_ty, self.defs()) {
             // The callee returns this aggregate by value (see
             // `Self::gen_terminator`'s matching `Return` handling) — spill
-            // it into a fresh `alloca` so it rejoins this crate's uniform
-            // "an aggregate operand is always an address" representation.
-            let slot = self.m.alloca(self.layout.llvm_type(dest_ty), "call_result");
+            // it into a fresh slot so it rejoins this crate's uniform "an
+            // aggregate operand is always an address" representation.
+            // Must be an entry-block slot, not an ordinary `self.m.alloca`
+            // at the current (later) block — see `Self::entry_alloca`'s
+            // own docs for the real stack-corruption bug that caused.
+            let slot = self.entry_alloca(self.layout.llvm_type(dest_ty), "call_result");
             self.m.store(slot, result);
             slot
         } else {

@@ -55,7 +55,27 @@ impl FnBuilder<'_> {
             for (id, op, ty) in bindings {
                 let local = self.as_local(op, ty.clone());
                 self.bind_hir_local(id, local);
-                if self.sigs.has_managed_content(&ty, self.defs) {
+                // A top-level `HirPattern::Binding` (`x => ...`, matching
+                // the *whole* scrutinee with no destructuring — every
+                // `for`-loop desugaring's own single arm, among others)
+                // doesn't materialize a fresh local at all:
+                // `lower_pattern_bindings` hands back `scrutinee_local`
+                // itself, unchanged, so `local == scrutinee_local` here.
+                // `match_scope` (above) already carries that same local's
+                // one credit and will release it once this whole `match`
+                // is done; pushing it into *this* arm's own scope too
+                // would double-count a single retain as two releases —
+                // a real, previously unfixed memory-safety bug this exact
+                // shape triggered (any `for`/`while let`-style loop
+                // reassigning a heap-typed accumulator each iteration; see
+                // `compiler/driver/tests/driver_tests/stdlib_and_specialization.rs`'s
+                // former `#[ignore]`d
+                // `string_concatenation_by_reassignment_inside_a_loop_over_an_array_parameter_corrupts_memory`).
+                // A nested binding (`Some(x) => ...`) always gets its own
+                // independently retained `Field`/`VariantField` local
+                // instead, so this check only ever suppresses the
+                // whole-scrutinee case.
+                if self.sigs.has_managed_content(&ty, self.defs) && local != scrutinee_local {
                     self.scopes.last_mut().unwrap().push(local);
                 }
             }

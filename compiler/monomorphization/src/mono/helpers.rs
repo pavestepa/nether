@@ -5,6 +5,7 @@ pub(super) fn placeholder_for(hir_fn: &HirFunction) -> MonoFunction {
         id: MonoFnId(0),
         name: hir_fn.name.clone(),
         is_async: hir_fn.is_async,
+        is_extern: hir_fn.is_extern,
         owner: hir_fn.owner,
         is_closure: false,
         self_param: hir_fn.self_param,
@@ -63,6 +64,7 @@ pub(super) fn subst_type(ty: &Type, subst: &HashMap<Symbol, Type>) -> Type {
             Type::Some(*id, args.iter().map(|t| subst_type(t, subst)).collect())
         }
         Type::Task(output) => Type::Task(Box::new(subst_type(output, subst))),
+        Type::Thread(output) => Type::Thread(Box::new(subst_type(output, subst))),
         Type::Array(elem) => Type::Array(Box::new(subst_type(elem, subst))),
         Type::FixedArray(element, length) => Type::FixedArray(
             Box::new(subst_type(element, subst)),
@@ -76,6 +78,8 @@ pub(super) fn subst_type(ty: &Type, subst: &HashMap<Symbol, Type>) -> Type {
         Type::Unique(inner) => Type::Unique(Box::new(subst_type(inner, subst))),
         Type::Ref(inner) => Type::Ref(Box::new(subst_type(inner, subst))),
         Type::MutRef(inner) => Type::MutRef(Box::new(subst_type(inner, subst))),
+        Type::RawConstPtr(inner) => Type::RawConstPtr(Box::new(subst_type(inner, subst))),
+        Type::RawMutPtr(inner) => Type::RawMutPtr(Box::new(subst_type(inner, subst))),
         Type::Primitive(_)
         | Type::Const(_)
         | Type::String
@@ -134,6 +138,11 @@ pub(super) fn collect_generic_bindings(
                 collect_generic_bindings(output, concrete_output, out);
             }
         }
+        Type::Thread(output) => {
+            if let Type::Thread(concrete_output) = concrete {
+                collect_generic_bindings(output, concrete_output, out);
+            }
+        }
         Type::Struct(_, args) => {
             if let Type::Struct(_, concrete_args) = concrete {
                 for (d, c) in args.iter().zip(concrete_args) {
@@ -184,6 +193,16 @@ pub(super) fn collect_generic_bindings(
         }
         Type::MutRef(inner) => {
             if let Type::MutRef(concrete_inner) = concrete {
+                collect_generic_bindings(inner, concrete_inner, out);
+            }
+        }
+        Type::RawConstPtr(inner) => {
+            if let Type::RawConstPtr(concrete_inner) = concrete {
+                collect_generic_bindings(inner, concrete_inner, out);
+            }
+        }
+        Type::RawMutPtr(inner) => {
+            if let Type::RawMutPtr(concrete_inner) = concrete {
                 collect_generic_bindings(inner, concrete_inner, out);
             }
         }

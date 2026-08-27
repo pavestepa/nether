@@ -38,7 +38,7 @@ rebuilding.
 
 ## 2. Stage sequence
 
-**Implementation snapshot (2026-08-19).** Stages 1, 2, and 3 are complete.
+**Implementation snapshot (2026-08-27).** Stages 1 through 7 are complete.
 Stage 2 has
 flow-sensitive move checking, reference parameters and receiver calls,
 lexically scoped stored heap borrows, plus the first three `to(value)`
@@ -49,11 +49,12 @@ imports/re-exports, fields, and methods;
 Method/closure origin summaries, loop/local-closure-sensitive last-use
 shortening, inline-reference codegen, explicit `move` closures and `to<T>`
 are implemented. Unique heap values use an unrefcounted runtime allocation
-and promote explicitly into ARC for `:T -> T`.
-Stages 4–6 have not started as staged projects. Beyond Stage 3's first slice,
-the pre-existing compiler already has
-the baseline trait system and limited concrete instance-method
-specialization described elsewhere in the docs.
+and promote explicitly into ARC for `:T -> T`. Stage 6 added atomic ARC,
+compiler-derived `Send`/`Sync`, raw OS threads, spawned-borrow diagnostics,
+the `Nether.toml` package manifest, and the CLI overhaul. Stage 7 added
+newline-aware optional semicolons, block comments, the fixed-array vs.
+growable-array literal split, mutable (`mut (...) => {...}`) closure
+captures, and confirmed variadics-as-fixed-array was already correct.
 
 **Stage 1 (this rewrite's first slice) — done.** Four value forms
 (`T`/`:T`/`t`/`:t`) as explicit, structural syntax; casing demoted from
@@ -222,50 +223,418 @@ fall back to monomorphization. `-O1` through `-O3` retain full
 monomorphization/devirtualization/specialization. Variadics now lower to a
 hidden const-sized fixed array.
 
-**Stage 4 — async/await + Tokio runtime bridge.** `async fn`, prefix
-`await expr`, compiler-generated state-machine lowering, the Nether runtime
-ABI boundary to a Rust/Tokio-backed runtime (`task_spawn`, `timer_sleep`,
-etc. — Tokio itself never exposed to Nether source), `task.spawn(...)`.
+**Stage 4 — async/await + Tokio runtime bridge — done.** `async fn`
+(including generic and method forms) and prefix `await expr` are real
+compiler-generated state machines, not eager execution wrapped in a
+completed-looking value: `nether_mir::split_await_points` turns every
+`await` into a `Terminator::Await` suspension point in the CFG (run
+immediately after `insert_arc`, so already-inserted retain/release
+instructions relocate as a unit rather than needing rederiving), and
+`nether_codegen`'s `frame`/`function::async_fn` modules compile each
+`is_async` function into two LLVM functions — a `start` function that
+heap-allocates a frame and returns it as `Task<T>`, and a `poll` function
+carrying the translated MIR body, dispatching by a discriminant stored in
+the frame to resume at the right suspension point. Since this compiler's
+MIR is not SSA (every local already lives in its own persistent slot for
+a function's whole lifetime), turning per-function storage into per-frame
+storage is the entire state-machine transform — no liveness analysis was
+needed, only a flat "every local gets a frame field" layout. `task.spawn`
+schedules real, independent background progress via `tokio::spawn`
+(`runtime/task`'s `nether_rt_task_spawn`), restricted by typecheck to
+`async fn` bodies (mirroring `await`'s own restriction), since a runtime
+must already be active for `tokio::spawn` to resolve. `timer.sleep(...)`
+remains a native, deadline-polled task. See
+[`../architecture/arc-model.md`](./arc-model.md) §7 for the frame's own
+ARC drop-glue design and §3.3's `TransientRelease` split, both real
+correctness fixes found only by running generated code against a real
+allocator (see that document's own §5 note on why MIR-shape assertions
+alone are not enough for this pass) — not by inspecting MIR/IR shape.
 
-**Stage 5 — unsafe, raw pointers, C ABI FFI.** `unsafe` blocks/functions,
-`*mut T`/`*const T` and their owned forms, `extern "C"` declarations with
-FFI-safety checking (only ABI-safe types cross the boundary), `#[link]`.
+*Known, documented v1 gap, not silently left for someone to hit later:*
+a stack-kind aggregate local (`Tuple`/enum/stack `struct`) with nested
+heap-kind fields, live across an `await`, isn't covered by the frame's
+own null-after-release invariant if its inner field was already released
+in-scope before a later suspend — `nether_codegen::frame::frame_drop_shim`'s
+own doc comment flags this precisely; closing it needs real per-field
+liveness this stage deliberately didn't build (see arc-model.md §7).
+Real waker/reactor integration is likewise deferred — a spawned task is
+driven by cooperative re-polling (`runtime/task`'s existing busy-poll
+convention, matching `nether_rt_task_block_on`'s own `yield_now` loop),
+not woken only on the specific native event it's blocked on; worth
+revisiting once real OS-thread parallelism (Stage 6) makes the busy-poll
+cost worth removing.
 
-**Stage 6 — concurrency safety + package manager + CLI.** Atomic/thread-safe
-ARC, compiler-derived `Send`/`Sync` (+ `unsafe impl` escape hatch),
-`thread.spawn(...)` raw OS threads, spawned-borrow diagnostics (rejecting a
-short-lived borrow captured by a detached thread/task without requiring
-`'static` syntax), `Nether.toml` package manifest + local-path dependency
-graph, CLI overhaul (`run`, `test`, `--release`, `--emit-ast`/`--emit-hir`/
-`--emit-mir`/`--emit-llvm`).
+**Stage 5 — unsafe, raw pointers, C ABI FFI — done.** `unsafe fn`/`unsafe
+{ ... }` (a genuine block-scoped, save/restored `in_unsafe` context —
+unlike Stage 4's function-scoped-only `in_async` — but with zero runtime
+representation: HIR lowering erases `unsafe { ... }` entirely, reusing
+`lower_block_as_expr` directly). `*const T`/`*mut T` raw pointer types
+and their owned forms `:*const T`/`:*mut T` (free — the parser's existing
+generic `:`-prefix wrapping and HIR's existing inline-`Unique`-erasure
+rule for stack-kind inner types both already applied unchanged, no new
+code needed for the owned form specifically). `&raw const expr`/`&raw
+mut expr` address-of, computing the address of an arbitrary *place*
+(any local/field/index/deref chain) with no borrow-checker involvement —
+and prefix `*expr` dereference, both reusing the *existing*
+`HirExprKind::Borrow`/`Deref` → `Rvalue::AddressOf`/`Deref` MIR pipeline
+unchanged, since `lower_place` already recursed through arbitrary
+projection chains generically, just never reachable for anything but a
+whole local before this stage. `extern "C" { ... }` declarations with
+FFI-safety checking (a numeric/`bool` primitive, a raw pointer of any
+pointee type, or `()` only — aggregates rejected outright, sidestepping
+the real System V AMD64/AAPCS64 struct-register-classification gap
+confirmed absent from this codebase, rather than risking a silent
+miscompile) and `#[link(name = "...")]`, threaded into the real `cc`
+invocation as `-l<name>` (`link::link`, extended with a `link_libs`
+parameter collected by flat-walking the already-loaded module graph's
+`Item::Extern` blocks — no new IR-level plumbing needed, since this is
+purely a linker-invocation concern, not program semantics).
 
-*Sequencing note:* atomic ARC arguably wants to land before or alongside
-Stage 4's async runtime, since a Tokio bridge implies cross-thread
-references. This is flagged here as an open sequencing question for
-whoever scopes Stage 4 in detail — not resolved by this document.
+The original design question — whether to reuse the existing `to<T>`
+builtin as a reference-to-pointer conversion, on the condition that it
+target a borrowed *place* (a field/element), not just a whole local — was
+resolved against `to<T>` after directly confirming `:&T`/`:&mut T`
+borrow-formation is gated by `Checker::bare_local_of`, entangled with
+`LocalId`-keyed exclusivity tracking with no field/place variant;
+extending that would mean a real disjoint-field-borrow project in its own
+right, not a Stage 5 detail. Per the pointer-syntax design's own stated
+fallback, `&raw const`/`&raw mut` was used instead — arguably the more
+correct model on its own terms, since forming a raw pointer carries no
+aliasing guarantee to violate (Rust's own reasoning for the same split).
+
+An `extern "C"` declaration doesn't fit `HirFunction`/`MonoFunction`/
+`MirFunction`'s existing "has a real body" shape — rather than invent a
+wholly separate `ExternFunction` record threaded through four crates'
+worth of call-target resolution, each of those three structs instead
+gained a plain `is_extern: bool` flag: HIR gives it a trivial placeholder
+body (never read), `nether_mir::build_mir`'s `FnBuilder::build` returns a
+minimal `MirFunction` early for it (declared params, one `Unreachable`
+block, no real instructions), and `nether_codegen` special-cases the flag
+twice — declaring under the function's own real (unmangled) name with a
+direct scalar/pointer C-ABI type mapping instead of Nether's internal
+mutable/aggregate-by-pointer convention, and skipping body codegen
+entirely. This reuses the entire ordinary call-graph reachability walk,
+`HirFnId`/`MonoFnId` addressing, and `CallTarget::Fn` call-site codegen
+unchanged — an `extern "C" fn` is called exactly like any other function,
+except `gen_call` widens/narrows `bool` arguments/return to/from `i8` at
+the boundary specifically for `is_extern` targets, the same class of fix
+Stage 4 needed for the runtime poll ABI (`i1` is never safe to use across
+a real C ABI).
+
+**Stage 6 — concurrency safety + package manager + CLI — done.**
+`runtime/arc`'s strong/weak counts are now `AtomicI64`, mirroring
+`std::sync::Arc`/`Weak`'s own dealloc design exactly (the weak count
+starts at 1, an implicit reference released by whichever `release` call
+drops the strong count to zero — funnels the dealloc decision through a
+single counter's fetch-sub instead of two independent counters racing
+each other, which a naive port of the old single-threaded "check both
+counts, dealloc if both zero" logic would double-free under real
+concurrency). Verified with real multi-thread stress tests in
+`runtime/arc`'s own suite (several `std::thread::spawn` threads
+hammering retain/release/weak-upgrade on one shared allocation), not
+just a code-shape check — this stage's own version of Stage 4/5's
+established lesson that ARC correctness bugs only surface by actually
+running contended code.
+
+`Send`/`Sync` (`compiler/typecheck/src/send_sync.rs`) are auto-derived,
+not opt-in like `Eq`/`Hash`/`Clone` — computed structurally, true by
+default, false only where a field makes it unsafe, overridable only
+through `unsafe impl TypeName Send { }`/`unsafe impl TypeName Sync { }`
+(reuses `ImplBlock`'s existing AST shape with one new `is_unsafe: bool`
+field; a plain, non-`unsafe` `impl Send`/`Sync` is rejected outright).
+`Sync` is far stricter than a naive Rust-mirroring reading would suggest
+and is where the real design work was: an ordinary `T` can have any
+number of live ARC handles, any one of which can mutate a field in place
+with no cross-alias exclusivity the language enforces (unlike
+`std::sync::Arc<T>`, which only ever exposes `&T`) — proving a nominal
+type is never mutated anywhere would need real whole-program analysis,
+which this design deliberately avoids by instead making every nominal
+type (`struct`/`enum`, `Array<T>`) `Sync` *only* via `unsafe impl`,
+never auto-derived, full stop. `Send` for an ARC-domain type needs
+fields both `Send` *and* `Sync` (mirrors `Arc<T>: Send` needing `T: Send
++ Sync` — other aliases may remain live on the origin thread); a unique
+(`:T`) type needs only `Send` fields (mirrors `Box<T>: Send`, no
+aliasing hazard).
+
+`thread.spawn(move () => { ... })` (new `runtime/thread` crate, plain
+`std::thread::spawn`, no Tokio dependency — architecturally independent
+of `task.spawn`'s cooperative single-runtime model) requires a
+zero-parameter `move` closure literal and a `()`-returning body (a
+documented v1 scope decision — an arbitrary return type would need a
+per-call-site result-boxing wrapper function in codegen, mirroring
+`Task<T>`'s own frame machinery, judged not worth the complexity for
+this stage). Reuses the ordinary closure-construction/dynamic-call ABI
+unchanged (`env`'s own field 0 is the code pointer, exactly
+`CallTarget::Dynamic`'s existing technique) — no new MIR `Rvalue`
+needed. `Type::Thread(Box<Type>)` mirrors `Type::Task`'s own footprint
+at every touch point (a plain heap pointer, `AllocKind::Heap`) but
+carries none of `Task`'s async-frame machinery, since `.join()` is a
+plain blocking call, never a suspension point.
+
+Spawned-borrow diagnostics (`task.spawn` *and* `thread.spawn`) reuse the
+exact origin-classification rule `check_returned_reference_origin`
+already proved sound for return statements — a captured reference whose
+origin is `BorrowOrigin::Local` (owned by the spawning function itself)
+is rejected exactly as if it had been returned; `BorrowOrigin::Parameter`
+remains allowed. Applied to `task.spawn` too, not just the new
+`thread.spawn` — before this stage `task.spawn` had *zero* capture
+restriction beyond "argument has type `Task<T>`," a real, documented gap
+the roadmap itself had already named, not scope creep.
+
+`Nether.toml` local-path dependencies generalize a mechanism that
+already existed for the bundled stdlib: `mod std;`/`use stdlib.*` were
+two hardcoded special cases mounting an external root with its own
+independent `crate_root`; both became one `external_roots: HashMap<String,
+PathBuf>` map, seeded with the stdlib's two names plus every
+manifest-declared dependency — no new resolution mechanism, just the
+existing one keyed generically. No version resolution, no registry, no
+lockfile, purely local paths, per this stage's own explicit scope.
+
+CLI overhaul (`run`, `test`, `--release`, `--emit-ast`/`--emit-hir`/
+`--emit-mir`/`--emit-llvm`) extended the existing hand-rolled argument
+parser rather than adding a `clap` dependency — `nether-cli`'s
+dependency footprint stayed at just `nether-diagnostics`/`nether-driver`,
+consistent with this workspace's existing minimal-dependency posture
+elsewhere (`runtime/thread` similarly took no new dependency beyond
+`nether-rt-arc`). `--emit-ast`/`--emit-hir`/`--emit-mir` needed no driver
+change at all — `CheckResult` already exposed `module`/`hir`/`mir`
+publicly, just missing `Debug` impls on `HirFunction`/`MirFunction`/two
+of their own field types (a small, contained gap, fixed directly);
+`--emit-llvm` was the one flag needing a real `CompileOptions` field,
+since `CheckResult` deliberately never keeps the LLVM module itself
+around. `test`'s pass/fail framing is real process-exit-code plumbing,
+verified against a genuine crash (an array out-of-bounds access, which
+aborts the process) as well as the ordinary success path — not just the
+happy path.
+
+*A real bug, found only by running compiled code, not by inspecting
+types:* `thread.spawn`'s own typecheck path called `check_closure`
+directly instead of going through `check_expr`'s wrapping, which is what
+actually records the closure expression's type into `expr_types` for
+HIR's `ty_of` to read back later. The closure's own env pointer
+silently defaulted to `Type::Error`'s LLVM representation (`i1`) instead
+of `ptr`, produced no compiler error at all, and only surfaced as an
+`inkwell` panic ("found IntValue, expected PointerValue") the first time
+a `thread.spawn` program was actually compiled and run — the exact same
+class of "MIR/IR-shape-correct but semantically wrong" bug Stage 4/5's
+own retrospectives already flagged as only catchable by real execution,
+now with its own Stage 6 instance.
+
+*Sequencing note — resolved.* The question above (atomic ARC arguably
+wanting to land before or alongside Stage 4's async runtime, since a
+Tokio bridge implies cross-thread references) is resolved by keeping
+Stage 4 strictly single-threaded: every Nether task, spawned or not, runs
+on the one `current_thread` Tokio runtime `nether_rt_task_block_on`
+builds — Tokio's current-thread scheduler never migrates a spawned task
+to a different OS thread, so `runtime/task`'s `SpawnedTask` adapter can
+soundly be `unsafe impl Send` without needing atomic ARC at all (the impl
+never actually crosses a real thread boundary; only Tokio's own
+type-system requirement is being satisfied, not a genuine concurrency
+need). This is a real invariant, documented at the `unsafe impl` site
+itself — if Stage 6 ever moves this runtime to a multi-thread scheduler,
+that `Send` impl becomes unsound and must be revisited together with
+atomic ARC, exactly the dependency this note originally flagged. Until
+then, Stage 4 delivers real *concurrency* (interleaved progress on one
+thread) without *parallelism* (simultaneous execution across threads),
+which needs no atomic ARC.
+
+**Stage 7 — syntax cleanup — done.** Formalizes what had been an
+"unstaged" grab-bag into a real stage, once it turned out most of its
+five items needed real design work rather than being drive-by fixes.
+
+*Variadics-as-fixed-array — already done, no code change needed.* Turned
+out Stage 3 had already made variadic parameters lower to a hidden
+const-generic fixed array (`nether_hir::lower::expr::lower_variadic_aware_args`),
+confirmed by a pre-existing, already-passing typecheck test. Only a stale
+doc comment (still describing the old `Array<T>` desugaring) needed fixing.
+
+*Block comments — done.* `/* ... */`, non-nesting (first `*/` closes it
+regardless of any `/*` seen since — the simpler C/Go/JS/Kotlin convention,
+not Rust/Swift's nesting one), reported as an unterminated-comment
+diagnostic on EOF. No parser/HIR/MIR changes — purely a `compiler/lexer`
+addition mirroring the existing `//`/`///` scanning.
+
+*Fixed-array vs. growable-array literal split — done.* `[1, 2, 3]` now
+unconditionally builds `Array<T>` and `{1, 2, 3}` unconditionally builds
+`{T, N}` — before this stage, `[...]` ambiguously coerced into either
+representation depending on expected-type context. New
+`ExprKind::FixedArray` in the AST, a `{`-based `parse_fixed_array_expr`
+mirroring `parse_array_expr`, and a typecheck split (`check_array`/
+`check_fixed_array` sharing a `check_array_elems` helper) were the only
+new surface needed — confirmed by direct inspection that
+`nether_mir::build::expr`'s `MonoExprKind::Array` handling already
+branched on `expr.ty`'s `Type::FixedArray`-ness to choose
+`Rvalue::Tuple` vs. `Rvalue::Array`, so HIR/MIR/codegen needed zero new
+code, only the new AST/parser/typecheck surface. Verified end-to-end: a
+real compiled/executed test proving `.push()` works on `[...]` and direct
+indexing works on `{...}`.
+
+*Newline-aware optional semicolons — done.* A Go-style ASI: the lexer
+synthesizes a real `;` token when the last-emitted token is one of a
+fixed trigger set (identifier, literal, `self`, `return`/`break`/
+`continue`, or `)`/`]`) and a newline follows, gated by three suppression
+conditions — inside `(...)`/`[...]` (`paren_bracket_depth`), inside a
+`struct`/`enum` declaration's field list (`brace_suppresses_asi`, keyed
+off the preceding `struct`/`enum` keyword), and whenever the very next
+non-whitespace character is `}` (protects Nether's tail-expression block
+semantics — inserting a semicolon right before a block's own closing
+brace would silently discard its value, not just risk a parse error).
+`]` closing a `#[...]` attribute is excluded from the trigger set too
+(`bracket_is_attribute`), so an attribute is never separated from its
+item by a synthesized semicolon. Deliberately **not** Go's own full
+trigger list: Go also triggers after a closing `}`, but Nether's parser
+has nowhere that tolerates a stray/empty statement, so this is a
+documented, deliberate divergence — see spec §2.5 for the resulting gap
+(a `let` binding whose value is a struct/fixed-array literal ending in
+`}`, on its own line, still needs its `;`).
+
+Needed five iterative rounds — implement, run the *full* workspace test
+suite, find a real regression against actual existing source, fix,
+repeat — before reaching a stable design; each of the five real bugs
+found was caught by the full suite, not a synthetic example, matching
+this project's own established "real bugs only surface by actually
+running things" lesson (Stage 4/5/6's own retrospectives above):
+inserting a semicolon inside a multi-line parameter/argument list (fixed
+by `paren_bracket_depth`); inserting one after an `impl` block's inner
+method's closing `}`, read by the item parser as a stray token before
+the `impl` block's own closing `}` (fixed by excluding `}` from the
+trigger set entirely, rather than Go's own choice to include it); inserting
+one inside a struct declaration's field list, breaking the canonical
+`struct Lang { name String }` spec example (fixed by
+`brace_suppresses_asi`); inserting one right before a block's own closing
+`}`, which would have silently changed a closure body's tail-expression
+value from a string to `()` (fixed by the unconditional "next
+non-whitespace is `}`" suppression, confirmed against a real
+closure-capture codegen test); and inserting one between a `#[link(...)]`
+attribute's closing `]` and the `extern "C"` block it decorates (fixed by
+`bracket_is_attribute`, confirmed against a real FFI end-to-end test).
+
+*Two real, pre-existing miscompilations, found only by running compiled
+code — neither caused by Stage 7, both only surfaced by its own
+end-to-end tests, both since fixed in a follow-up session.*
+
+**Match/pattern double-release.** Verifying Stage 7's driver-level test
+(a loop concatenating strings) crashed non-deterministically on repeated
+calls. Root cause: `nether_mir::build::pattern::lower_match` tracked a
+heap-typed scrutinee's one retained credit in *two* places — the match's
+own `match_scope` (so an arm that never names it still releases it) and,
+redundantly, the matching arm's own bindings scope — because a top-level
+`HirPattern::Binding` (every `for`-loop desugaring's single arm, among
+other shapes) doesn't materialize a fresh local at all; it hands the
+arm its binding via the scrutinee's own local, unchanged. Both scopes'
+release logic then fired for the *same* local: one retain paying for two
+releases, freeing a still-referenced string one call early and
+corrupting whatever allocation reused that freed memory on a later call.
+Fixed by skipping the redundant arm-scope entry whenever a binding's own
+local is literally the scrutinee's — see
+`compiler/mir/src/build/pattern.rs`'s `lower_match` and the (formerly
+`#[ignore]`d, now real, passing) regression test in
+`compiler/driver/tests/driver_tests/stdlib_and_specialization.rs`.
+
+**Non-entry-block `alloca` on AArch64.** A struct field read after two
+`mut self` method calls went stale (reflected only one mutation)
+whenever the *same function* also called any other separate function
+anywhere in its body — unrelated to the struct entirely, merely being
+present was enough; confirmed unrelated to ASI by reproducing it against
+the pre-Stage-7 baseline with fully explicit semicolons. Root cause,
+found with `otool -tv` disassembly rather than by inspecting LLVM IR
+(already unoptimized and correct on paper): several `nether_codegen`
+helpers for a scratch value only known to be needed partway through
+building a block — a discarded `()` statement value, an aggregate call
+result, a struct/tuple/variant/array-literal construction slot — called
+`self.m.alloca(...)` directly at whatever block the builder happened to
+be positioned in. LLVM only treats an `alloca` in the function's *entry*
+block as a fixed-offset stack slot; anywhere else it must lower to a
+genuine dynamic stack adjustment, never freed before the function
+returns. On this project's own AArch64 target, that lowering emits a
+spill store to the (unmoved) current stack pointer even for a
+zero-sized `{}` — which landed exactly on the bottom word of the
+function's fixed frame, silently clobbering whatever local happened to
+live there (here, a cached `&mut self` receiver address, cached once to
+reuse across two `counter.increment()` calls — the second call read
+back garbage instead of `counter`'s real address, losing the mutation).
+Fixed by hoisting every such scratch slot into the entry block: a new
+`nether_llvm::ModuleCx::entry_alloca` (saves the builder's position,
+repositions before the entry block's first instruction, allocates,
+restores) backs both a single shared `FnCodegen::unit_slot` (sound
+because `{}` carries no data for two "instances" to ever conflict over)
+and a per-call-site `FnCodegen::entry_alloca` helper used everywhere
+else a scratch aggregate slot had been allocated at the current block.
+
+*Mutable closure captures — done, with two documented v1 scope limits.*
+`mut (...) => {...}` (a new closure-level modifier occupying `move`'s own
+keyword slot — the two can't combine) captures every `mut`-declared outer
+local the body touches by reference instead of by value: `HirCapture`/
+`MonoCapture` gained a `CaptureMode::ByValue`/`ByRef` field (new shared
+`nether_typecheck::CaptureMode`, since no single existing crate's local-id
+space spans HIR through codegen). Classification happens twice,
+independently, in the two places that already track per-local
+mutability: `nether_hir::Lowerer` (a new `mutable_locals: HashSet<HirLocalId>`
+accumulated top-down as a function body lowers, exactly mirroring how
+`locals_map` itself accumulates) and `nether_typecheck::check_closure`
+(reusing `Checker.locals`'s existing mutability flag) — the latter purely
+to drive the spawn-borrow-style escape check below, since typecheck has
+no access to HIR's own id space to consult HIR's decision directly.
+
+The by-reference mechanism itself needed no new MIR/codegen primitive:
+`MonoExprKind::Borrow`/`Rvalue::AddressOf` — the same machinery `&raw
+mut`/stored `:&mut T` borrows already use — already produces an
+ARC-exempt `Type::MutRef` pointer value for free, so the only new
+codegen work was teaching the closure-body prologue to `load` that
+pointer once and use *it* as the captured local's own storage (instead
+of aliasing the environment field's own slot, by-value capture's
+existing behavior) — transparent to the local's own declared type, which
+stays the plain element type throughout typecheck/HIR/the callee's own
+body. A new `nether_mir::FnBuilder::declare_local_aliased` forces
+`needs_drop = false` on such a local regardless of its type's own
+managed-content-ness, since its storage aliases the *outer* local's own
+memory and never owns a fresh reference to anything.
+
+Two real, disclosed v1 scope limits, not silent unsoundness:
+
+- **Heap-category captures stay by-value.** `nether_codegen::function::
+  address_of_place`'s existing, load-bearing rule for a bare heap-typed
+  local deliberately returns the value's *own* pointer (an ARC reference
+  already IS a handle to the shared object — that's what makes ordinary
+  field mutation through a `:&mut T` work) rather than the address of the
+  *variable's own storage slot* a by-reference capture needs in order to
+  let the closure reassign the outer binding itself. Reusing it for a
+  heap capture would alias the object, not the binding — this was caught
+  by a real segfault (a `mut`-capturing closure reassigning a captured
+  `String`) during Stage 7's own verification, not a synthetic example,
+  the same "run it for real" lesson as every earlier stage's own
+  retrospective. Fixed by gating promotion on `alloc_kind(ty) ==
+  AllocKind::Stack` in both classification sites — a heap-category `mut`
+  capture silently falls back to today's by-value behavior instead
+  (still fully correct for field mutation/mutating method calls, since
+  those already worked through the shared pointer before this stage;
+  only *reassigning* the captured binding itself silently doesn't write
+  back). Closing this needs a real "address of a variable's own slot"
+  primitive distinct from "address of what a reference already points
+  to."
+- **Escape checking covers only a directly returned closure literal.**
+  A `mut`-capturing closure holds the raw address of each by-reference
+  capture's own storage for as long as the closure value is alive — sound
+  only while it never outlives the stack frame that storage lives in.
+  `check_return` rejects `return mut () => {...};` directly (a new
+  `Checker.closure_mut_captures: HashMap<NodeId, Vec<LocalId>>`,
+  populated by `check_closure`, consulted unconditionally — unlike the
+  existing returned-reference-origin check, which only fires when the
+  function's own return type is itself `Ref`/`MutRef`, this fires for
+  *any* returned closure regardless of return type, since a captured
+  plain local's own address is never safe to hand back — no `Parameter`
+  vs `Local` origin distinction applies the way it does for an ordinary
+  reference parameter, because even a plain *value* parameter's own
+  stack slot lives in the callee's own frame). Storing the closure in a
+  `let` and returning that binding instead, or smuggling it out through a
+  struct field, an array, or a plain function argument, is not tracked —
+  a real, disclosed gap the same shape as this project's other
+  documented v1 slices (Stage 4's frame-liveness gap, Stage 5's aggregate
+  FFI gap), not a silent one.
 
 ---
 
-## 3. Unstaged syntax cleanup
-
-Small, low-risk syntax items the full spec calls for for that don't yet have
-a stage assignment. Pick these up opportunistically, most naturally
-alongside Stage 3's other grammar work:
-
-- Newline-aware optional semicolons (spec §2.5) — needs real lexer/parser
-  work (not a text preprocessing pass), not merely dropping a token
-  requirement.
-- Block comments (`/* ... */`).
-- Distinguishing fixed-size inline-array literals (`{T, N}`) from growable
-  vector literals (`[]`) — today `[]` means `Array<T>` unconditionally.
-- Variadic parameters lowering to a fixed-size compile-time collection
-  (`...T` as a hidden const-generic-sized array) instead of today's
-  `Array<T>` desugaring.
-- Mutable closure captures (`FnMut`-style capture-by-reference).
-
----
-
-## 4. Verifying a stage is complete
+## 3. Verifying a stage is complete
 
 Each stage should leave `cargo test --workspace` fully green, or every
 exception explicitly `#[ignore]`d with a comment naming the specific stage

@@ -11,7 +11,7 @@ compiler/
   ast/ diagnostics/ lexer/ parser/ resolver/ typecheck/
   hir/ monomorphization/ mir/ llvm/ codegen/ driver/
 runtime/
-  arc/ string/ array/ io/
+  arc/ string/ array/ io/ task/ thread/
 stdlib/
   mod.nr option.nr result.nr array.nr
 cli/
@@ -199,6 +199,7 @@ pub struct CompileOptions {
     pub opt_level: u8,
     pub output_path: Option<PathBuf>,
     pub link: bool,
+    pub emit_llvm_path: Option<PathBuf>,
 }
 
 pub fn compile(
@@ -210,12 +211,16 @@ pub fn compile(
 The driver never runs a semantic stage after an earlier error diagnostic.
 Cross-target object emission is supported; linking is intentionally
 limited to the host target. Runtime static libraries must already have
-been built for linking.
+been built for linking. An optional `Nether.toml` next to (or in an
+ancestor of) the entry file declares local-path dependencies
+(`module_loader.rs`'s `external_roots`) — no version resolution, no
+registry, purely local paths; absent is not an error.
 
 ## `runtime/arc`
 
-Implements the single-threaded strong/weak reference-counted allocation
-header and C ABI:
+Implements the strong/weak reference-counted allocation header and C
+ABI, atomic since Stage 6 (`AtomicI64` counts, mirroring
+`std::sync::Arc`/`Weak`'s own dealloc design — see `arc-model.md`):
 
 - allocation with an optional generated payload-drop callback;
 - strong retain/release;
@@ -224,6 +229,25 @@ header and C ABI:
 
 The payload is destroyed when the strong count reaches zero; the header
 remains until the last weak observer is released.
+
+## `runtime/task`
+
+The `task.spawn`/`await` runtime bridge (Stage 4): a `current_thread`
+Tokio runtime, a `TaskHeader` ABI convention (poll fn pointer, output-drop
+fn pointer, output) every `async fn`'s compiler-generated frame follows,
+and `timer.sleep`. Deliberately single-threaded — see `roadmap.md`'s
+Stage 4 sequencing note on why `SpawnedTask`'s `unsafe impl Send` stays
+sound without needing this crate to change when `runtime/thread` (below)
+was added.
+
+## `runtime/thread`
+
+`thread.spawn`/`.join()`'s runtime half (Stage 6): plain
+`std::thread::spawn`, no Tokio dependency, architecturally independent of
+`runtime/task`. A spawned closure's own code pointer/environment reuse
+the same ABI `nether_codegen`'s ordinary dynamic-closure-call path
+already produces; v1 requires a `()`-returning closure, so no
+result-boxing is needed.
 
 ## `runtime/string`
 
@@ -253,17 +277,27 @@ option/result runtime crates.
 
 ## `cli`
 
-The `nether` binary exposes `check`, `build` and `ast`, with:
+The `nether` binary exposes `check`, `build`, `ast`, `run`, and `test`
+(Stage 6 added the last two — `run` executes the linked binary with
+stdout/stderr/exit code passed straight through; `test` does the same,
+additionally framed as `test <path> ... ok`/`FAILED` by the process's
+own exit code, but always propagates that exit code either way), with:
 
 ```text
 --target <llvm-triple>
--O0 | -O1 | -O2 | -O3
+-O0 | -O1 | -O2 | -O3 | --release  (sugar for -O3)
 -o <output-path>
 --emit-object
+--emit-ast | --emit-hir | --emit-mir | --emit-llvm
 ```
 
-It renders structured diagnostics and returns a nonzero status for
-front-end or toolchain failures.
+The `--emit-*` flags each write a debug dump to a sibling file
+(`<output-or-source>.ast`/`.hir`/`.mir`/`.ll`), mirroring
+`--emit-object`'s own sibling-naming convention. Hand-rolled argument
+parsing throughout — no `clap` dependency, consistent with this
+workspace's minimal-dependency posture elsewhere. It renders structured
+diagnostics and returns a nonzero status for front-end or toolchain
+failures.
 
 ## Testing and remaining extension points
 

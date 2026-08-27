@@ -46,6 +46,17 @@ pub(super) struct Checker<'a> {
     pub(super) closure_origins: HashMap<NodeId, Vec<ClosureOrigin>>,
     pub(super) local_callable_origins: HashMap<LocalId, Vec<ClosureOrigin>>,
     pub(super) closure_captured_reference_uses: HashMap<NodeId, Vec<(LocalId, usize)>>,
+    /// Every `mut`-declared outer local a `mut (...) => {...}` closure
+    /// captures by reference (Stage 7, `CaptureMode::ByRef` — see that
+    /// type's own docs), keyed by the closure expression's own
+    /// [`NodeId`]. Consulted only at `return` (`Self::
+    /// check_returned_closure_mut_captures`): a captured local's own
+    /// storage is unconditionally tied to this function's stack frame
+    /// (unlike a reference *parameter*, which already points at storage
+    /// further up the call stack), so a closure recorded here is unsafe
+    /// to hand back directly, regardless of whether the capture came
+    /// from a parameter or a `let`.
+    pub(super) closure_mut_captures: HashMap<NodeId, Vec<LocalId>>,
     pub(super) local_callable_capture_uses: HashMap<LocalId, Vec<(LocalId, usize)>>,
     pub(super) deferred_closure_uses: Vec<HashSet<LocalId>>,
     pub(super) pending_callable_releases: HashSet<LocalId>,
@@ -68,6 +79,14 @@ pub(super) struct Checker<'a> {
     pub(super) opaque_witness: Option<Type>,
     pub(super) return_ty: Type,
     pub(super) in_async: bool,
+    /// Whether raw-pointer dereference and calls to `unsafe fn`/
+    /// `extern "C" fn` are currently permitted (language-spec §17, Stage
+    /// 5). Unlike `in_async` (set once per function, never restored —
+    /// there is no block-scoped "async block"), this genuinely needs
+    /// save/restore: an `unsafe { ... }` block only extends permission
+    /// for its own body, then reverts to whatever this was before —
+    /// see `Self::check_unsafe_block`.
+    pub(super) in_unsafe: bool,
     pub(super) loop_depth: usize,
 }
 
@@ -100,6 +119,7 @@ impl<'a> Checker<'a> {
             closure_origins: HashMap::new(),
             local_callable_origins: HashMap::new(),
             closure_captured_reference_uses: HashMap::new(),
+            closure_mut_captures: HashMap::new(),
             local_callable_capture_uses: HashMap::new(),
             deferred_closure_uses: Vec::new(),
             pending_callable_releases: HashSet::new(),
@@ -113,6 +133,7 @@ impl<'a> Checker<'a> {
             opaque_witness: None,
             return_ty: Type::unit(),
             in_async: false,
+            in_unsafe: false,
             loop_depth: 0,
         }
     }
@@ -399,6 +420,7 @@ impl<'a> Checker<'a> {
 
     pub(super) fn check_fn_decl(&mut self, f: &FnDecl, sig: &FnSig, self_ty: Option<Type>) {
         self.in_async = f.is_async;
+        self.in_unsafe = f.is_unsafe;
         self.generics = sig.generics.iter().cloned().collect();
         self.const_generics = sig.const_params.clone();
         self.opaque_witness = None;
@@ -409,6 +431,7 @@ impl<'a> Checker<'a> {
         self.closure_origins.clear();
         self.local_callable_origins.clear();
         self.closure_captured_reference_uses.clear();
+        self.closure_mut_captures.clear();
         self.local_callable_capture_uses.clear();
         self.deferred_closure_uses.clear();
         self.pending_callable_releases.clear();
@@ -622,6 +645,47 @@ impl<'a> Checker<'a> {
         result
     }
 
+    /// `unsafe { ... }` (language-spec §17, Stage 5) — extends `in_unsafe`
+    /// permission for exactly the nested block's own checking, then
+    /// restores whatever it was before, so unsafe-ness never leaks past
+    /// the block's own closing `}` (unlike `in_async`, which is set once
+    /// per function and never restored — there is no nested-scope
+    /// "async block" to mirror this against).
+    pub(super) fn check_unsafe_block(&mut self, block: &Block, expected: Option<&Type>) -> Type {
+        let was_unsafe = self.in_unsafe;
+        self.in_unsafe = true;
+        let result = self.check_block_with_expected(block, expected);
+        self.in_unsafe = was_unsafe;
+        result
+    }
+
+    /// Calling an `unsafe fn` or an `extern "C" fn` requires the caller to
+    /// be in an unsafe context (language-spec §17, Stage 5) — mirrors
+    /// Rust: any FFI boundary crossing is inherently unsafe, since the
+    /// compiler cannot verify the C side's behavior. Called only from an
+    /// actual call site (`check_call_args`'s callers), never when a
+    /// function is merely *referenced* as a first-class value — taking a
+    /// function pointer to an unsafe fn is itself safe in Rust's own
+    /// model, and this crate's `Type::Function` carries no per-value
+    /// unsafe flag to check later through an indirect call anyway
+    /// (documented v1 gap: calling an unsafe/extern function through a
+    /// value it was coerced to loses this check — a real but narrow
+    /// static-checking gap, not a memory-safety one, since the generated
+    /// call itself is unchanged either way).
+    pub(super) fn check_unsafe_call_permission(&mut self, sig: &FnSig, span: Span) {
+        if (sig.is_unsafe || sig.is_extern) && !self.in_unsafe {
+            let what = if sig.is_extern {
+                "an `extern` function"
+            } else {
+                "an `unsafe fn`"
+            };
+            self.err(
+                span,
+                format!("calling {what} is only allowed inside an `unsafe` block or function"),
+            );
+        }
+    }
+
     pub(super) fn check_stmt(&mut self, stmt: &Stmt) -> Type {
         match stmt {
             Stmt::Let(let_stmt) => {
@@ -788,7 +852,7 @@ pub(super) fn count_local_uses_in_expr(
                 }
             }
         }
-        ExprKind::Tuple(items) | ExprKind::Array(items) => {
+        ExprKind::Tuple(items) | ExprKind::Array(items) | ExprKind::FixedArray(items) => {
             for item in items {
                 count_local_uses_in_expr(item, resolved, counts, pinned, pin);
             }
@@ -800,8 +864,15 @@ pub(super) fn count_local_uses_in_expr(
                 }
             }
         }
-        ExprKind::Unary { expr, .. } | ExprKind::MutArg(expr) | ExprKind::Await(expr) => {
-            count_local_uses_in_expr(expr, resolved, counts, pinned, pin)
+        ExprKind::Unary { expr, .. }
+        | ExprKind::MutArg(expr)
+        | ExprKind::Await(expr)
+        | ExprKind::RawDeref(expr) => count_local_uses_in_expr(expr, resolved, counts, pinned, pin),
+        ExprKind::RawBorrow { place, .. } => {
+            count_local_uses_in_expr(place, resolved, counts, pinned, pin)
+        }
+        ExprKind::Unsafe(block) => {
+            count_local_uses_in_block(block, resolved, counts, pinned, pin)
         }
         ExprKind::Binary { lhs, rhs, .. }
         | ExprKind::Assign {

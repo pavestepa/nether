@@ -7,7 +7,11 @@ pub(super) fn closure_captures(body: &HirExpr, params: &[HirParam]) -> Vec<HirCa
     let mut captures: Vec<_> = used
         .into_iter()
         .filter(|(local, _)| !bound.contains(local))
-        .map(|(local, ty)| HirCapture { local, ty })
+        .map(|(local, ty)| HirCapture {
+            local,
+            ty,
+            mode: CaptureMode::ByValue,
+        })
         .collect();
     captures.sort_by_key(|capture| capture.local.0);
     captures

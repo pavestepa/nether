@@ -23,9 +23,45 @@ pub enum ExprKind {
     Literal(Literal),
     Path(Path),
     Tuple(Vec<Expr>),
+    /// `[1, 2, 3]` — always a growable `Array<T>` (language-spec §2.4,
+    /// Stage 7). Distinct from [`ExprKind::FixedArray`]'s `{1, 2, 3}` —
+    /// before Stage 7 this single node also stood in for a fixed-size
+    /// `{T, N}` literal whenever the surrounding expected type called
+    /// for one; that context-driven coercion is gone; the bracket kind
+    /// alone now decides the representation.
     Array(Vec<Expr>),
+    /// `{1, 2, 3}` — always an inline `{T, N}` fixed-size array
+    /// (language-spec §2.4, Stage 7). Unambiguous at parse time with no
+    /// preceding type name: a bare `{ ... }` is never a block expression
+    /// (§2.6) and never a struct literal (that always has a `Path`
+    /// immediately before the `{`), so encountering `{` in expression-atom
+    /// position can only mean this.
+    FixedArray(Vec<Expr>),
     /// Prefix `await expr`. Type checking restricts it to async bodies.
     Await(Box<Expr>),
+    /// `unsafe { ... }` (language-spec §17, Stage 5) — a pure compile-time
+    /// permission gate enabling raw-pointer dereference and calls to
+    /// `unsafe fn`/`extern "C" fn` inside it. Has no runtime effect of its
+    /// own; `hir` lowering erases this wrapper entirely once typecheck has
+    /// used it to gate the checks inside.
+    Unsafe(Block),
+    /// `&raw const expr` / `&raw mut expr` (language-spec §17, Stage 5) —
+    /// takes the address of an arbitrary *place* (a local, field, index,
+    /// or deref chain — `typecheck` validates the shape) as a raw
+    /// pointer, bypassing the unique-ownership borrow-tracking system
+    /// entirely. Forming a raw pointer this way is always safe; only
+    /// dereferencing one (`RawDeref`) requires `unsafe`.
+    RawBorrow {
+        mutable: bool,
+        place: Box<Expr>,
+    },
+    /// Prefix `*expr` (language-spec §17, Stage 5) — dereferences a raw
+    /// pointer (`*const T`/`*mut T`), read or (as an assignment target)
+    /// write. Always requires `unsafe` context — unlike `Ref`/`MutRef`
+    /// dereference, which is auto-inserted by the compiler and never
+    /// written by hand, this is the one explicit surface dereference
+    /// operator in the language.
+    RawDeref(Box<Expr>),
     /// A backtick template string; see [`Literal::Str`] for the
     /// non-interpolating plain-string counterpart (language-spec §2.3).
     StringTemplate(Vec<TemplatePart>),
@@ -100,6 +136,13 @@ pub enum ExprKind {
         /// `move (...) => ...` explicitly transfers captured unique values
         /// into the closure environment at closure creation.
         move_capture: bool,
+        /// `mut (...) => ...` (Stage 7) captures every `mut`-declared
+        /// outer local the body touches by mutable reference instead of
+        /// by value — mutating it inside the body writes back to the
+        /// outer binding. Mutually exclusive with `move_capture`: the
+        /// parser only ever recognizes one of `move`/`mut` before a
+        /// closure's parameter list.
+        mut_capture: bool,
         params: Vec<Param>,
         body: Box<Expr>,
     },

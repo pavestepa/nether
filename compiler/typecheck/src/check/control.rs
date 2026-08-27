@@ -468,7 +468,46 @@ impl Checker<'_> {
         } else if matches!(expected_ret, Type::Ref(_) | Type::MutRef(_)) {
             self.check_returned_reference_origin(value.as_deref(), span);
         }
+        if let Some(v) = value.as_deref() {
+            self.check_returned_closure_mut_captures(v, span);
+        }
         Type::Never
+    }
+
+    /// A `mut (...) => {...}` closure's by-reference captures
+    /// (`Self::closure_mut_captures`, populated by `Self::check_closure`)
+    /// hold the raw address of each captured local's own storage for as
+    /// long as the closure value itself is alive — sound only while the
+    /// closure never outlives the stack frame that storage lives in.
+    /// Unlike a returned `:&T`/`:&mut T` (`Self::check_returned_reference_origin`,
+    /// where a *parameter*'s origin is safe to return because it already
+    /// points further up the call stack), a mutably captured *plain*
+    /// local's own address is unconditionally tied to this function's own
+    /// frame — it makes no difference whether the local arrived as a
+    /// parameter or was declared with a `let`, so any capture at all
+    /// makes a directly returned closure unsafe to hand back.
+    ///
+    /// v1 scope, documented (language-spec §16, roadmap): only a closure
+    /// literal written directly in the `return` expression is checked.
+    /// Storing one in a `let` and returning that binding instead, or
+    /// smuggling it out through a struct field, an array, or a plain
+    /// function argument, is not tracked — a real, disclosed gap rather
+    /// than a silent one.
+    fn check_returned_closure_mut_captures(&mut self, value: &Expr, span: Span) {
+        if !matches!(value.kind, ExprKind::Closure { .. }) {
+            return;
+        }
+        if self
+            .closure_mut_captures
+            .get(&value.id)
+            .is_some_and(|captures| !captures.is_empty())
+        {
+            self.err(
+                span,
+                "cannot return a closure that mutably captures a local owned by this function \
+                 — it may not outlive it",
+            );
+        }
     }
 
     fn check_returned_reference_origin(&mut self, value: Option<&Expr>, span: Span) {
@@ -690,6 +729,7 @@ impl Checker<'_> {
         &mut self,
         closure_id: NodeId,
         move_capture: bool,
+        mut_capture: bool,
         params: &[nether_ast::Param],
         body: &Expr,
         expected: Option<&Type>,
@@ -710,6 +750,51 @@ impl Checker<'_> {
             &mut ignored_pins,
             false,
         );
+        // `mut (...) => {...}` (language-spec §16, Stage 7): every
+        // captured local declared `mut`, not itself already
+        // reference-typed, and inline/stack-category becomes a
+        // by-reference capture — mirrors `nether_hir::lower_closure`'s
+        // own `CaptureMode` classification, computed independently here
+        // since typecheck has no access to HIR's local id space. Recorded
+        // before the reference-capture filter below strips everything but
+        // `outer_reference_locals`.
+        //
+        // v1 scope, documented (language-spec §16): a heap-category `mut`
+        // capture (a `struct`, `String`, `Array<T>`, ...) silently stays
+        // `ByValue` rather than being promoted — not an error, since
+        // by-value capture of a heap type already lets a `mut` closure
+        // mutate its fields or call mutating methods on it today (the
+        // captured pointer still addresses the *same* shared object,
+        // `mut` or not); only *reassigning the captured binding itself*
+        // from inside the closure fails to write back, a real but
+        // narrower gap. `nether_codegen::function::address_of_place`'s
+        // existing, load-bearing rule for `&raw`/stored `:&mut T` borrows
+        // deliberately returns a heap value's *own* pointer for "the
+        // address of a heap local" (an ARC reference already IS a handle
+        // to the shared object), not the address of the *variable's own
+        // storage slot* a by-reference capture would need in order to let
+        // the closure rebind the outer variable itself — reusing that
+        // mechanism here would alias the object, not the binding.
+        // Closing this needs a real "address of a variable's own slot"
+        // primitive distinct from "address of what a reference already
+        // points to," out of scope here.
+        if mut_capture {
+            let mut_captured: Vec<LocalId> = capture_counts
+                .keys()
+                .copied()
+                .filter(|local| {
+                    let Some((ty, true)) = self.locals.get(local) else {
+                        return false;
+                    };
+                    !matches!(ty, Type::Ref(_) | Type::MutRef(_))
+                        && crate::alloc::alloc_kind(ty, &self.resolved.definitions)
+                            == crate::alloc::AllocKind::Stack
+                })
+                .collect();
+            if !mut_captured.is_empty() {
+                self.closure_mut_captures.insert(closure_id, mut_captured);
+            }
+        }
         capture_counts.retain(|local, _| outer_reference_locals.contains(local));
         let captured_references = capture_counts.keys().copied().collect::<HashSet<_>>();
         if !capture_counts.is_empty() {

@@ -253,3 +253,42 @@ fn main() {}
         "has no field named `name`",
     );
 }
+
+/// Stage 7: `[1, 2, 3]` (growable `Array<T>`) and `{1, 2, 3}` (inline
+/// `{T, N}`) are now two distinct literal forms with no context-driven
+/// coercion between them — before Stage 7, `[1, 2, 3]` alone would
+/// silently become a `{T, N}` value whenever the expected type called
+/// for one.
+#[test]
+fn square_bracket_and_curly_brace_array_literals_are_distinct_types() {
+    assert_ok(
+        r#"
+fn main() {
+    let growable Array<i32> = [1, 2, 3];
+    let fixed {i32, 3} = {4, 5, 6};
+}
+"#,
+    );
+}
+
+#[test]
+fn square_bracket_literal_no_longer_coerces_into_a_fixed_array() {
+    assert_err(
+        r#"
+fn consume<const N usize>(values {i32, N}) i32 { return 7; }
+fn main() { consume<3>([1, 2, 3]); }
+"#,
+        "expected `{i32, 3}`, found `[i32]`",
+    );
+}
+
+#[test]
+fn curly_brace_literal_no_longer_coerces_into_a_growable_array() {
+    assert_err(
+        r#"
+fn consume(values Array<i32>) i32 { return 7; }
+fn main() { consume({1, 2, 3}); }
+"#,
+        "expected `[i32]`, found `{i32, 3}`",
+    );
+}

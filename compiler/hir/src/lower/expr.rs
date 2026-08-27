@@ -38,7 +38,14 @@ impl Lowerer<'_> {
                 kind: HirExprKind::Tuple(elems.iter().map(|e| self.lower_expr(e)).collect()),
                 ty,
             },
-            ExprKind::Array(elems) => HirExpr {
+            // `{1,2,3}` (`ExprKind::FixedArray`) and `[1,2,3]`
+            // (`ExprKind::Array`) share one HIR node: `ty` (already
+            // `Type::FixedArray`/`Type::Array` per which surface syntax
+            // typecheck saw, `check/expr.rs`'s `check_fixed_array`/
+            // `check_array`) is exactly what `nether_mir::build::expr`
+            // already branches on to pick `Rvalue::Tuple` (inline) vs
+            // `Rvalue::Array` (heap) — no new MIR/codegen surface needed.
+            ExprKind::Array(elems) | ExprKind::FixedArray(elems) => HirExpr {
                 kind: HirExprKind::Array(elems.iter().map(|e| self.lower_expr(e)).collect()),
                 ty,
             },
@@ -115,6 +122,15 @@ impl Lowerer<'_> {
                 ty,
             },
             ExprKind::Block(block) => self.lower_block_as_expr(block),
+            ExprKind::Unsafe(block) => self.lower_block_as_expr(block),
+            ExprKind::RawBorrow { place, .. } => HirExpr {
+                kind: HirExprKind::Borrow(Box::new(self.lower_expr(place))),
+                ty,
+            },
+            ExprKind::RawDeref(inner) => HirExpr {
+                kind: HirExprKind::Deref(Box::new(self.lower_expr(inner))),
+                ty,
+            },
             ExprKind::While { cond, body } => HirExpr {
                 kind: HirExprKind::While {
                     cond: Box::new(self.lower_expr(cond)),
@@ -145,7 +161,12 @@ impl Lowerer<'_> {
                 kind: HirExprKind::Return(value.as_ref().map(|v| Box::new(self.lower_expr(v)))),
                 ty,
             },
-            ExprKind::Closure { params, body, .. } => self.lower_closure(params, body, ty),
+            ExprKind::Closure {
+                params,
+                body,
+                mut_capture,
+                ..
+            } => self.lower_closure(params, body, ty, *mut_capture),
             ExprKind::StructLit {
                 path,
                 fields,
@@ -169,9 +190,14 @@ impl Lowerer<'_> {
     /// converted through [`Self::convert_to_string`] first when the
     /// element type is `String` — the same conversion template-string
     /// interpolation already applies) is collected into one
-    /// [`HirExprKind::Array`], appended as the call's final actual
-    /// argument. The callee itself only ever sees an ordinary
-    /// `Array`-typed parameter — no new calling convention.
+    /// [`HirExprKind::Array`] typed `Type::FixedArray(element, Const(n))`,
+    /// appended as the call's final actual argument — a hidden
+    /// const-generic-sized inline array, never a heap-allocated
+    /// `Array<T>` (language-spec §11.1's own "not a growable array inside
+    /// the function body" rule; `nether_mir::build::expr` already
+    /// branches `HirExprKind::Array` on its own `Type::FixedArray`-ness to
+    /// materialize it inline via `Rvalue::Tuple`, the same representation
+    /// an ordinary tuple gets, rather than `Rvalue::Array`'s heap path).
     pub(super) fn lower_variadic_aware_args(&mut self, sig: &FnSig, args: &[Expr]) -> Vec<HirExpr> {
         let Some(last) = sig.params.last().filter(|p| p.variadic) else {
             return self.lower_args(args);

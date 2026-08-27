@@ -138,11 +138,77 @@ pub(super) fn build_fn_sigs(
     diags: &mut Vec<Diagnostic>,
 ) {
     for item in &module.items {
-        if let Item::Fn(f) = item {
-            if let Some(id) = resolved.definitions.lookup_in(f.span.file, &f.name.name) {
-                let sig = build_fn_sig(f, resolved, decls, diags);
-                sigs.fns.insert(id, sig);
+        match item {
+            Item::Fn(f) => {
+                if let Some(id) = resolved.definitions.lookup_in(f.span.file, &f.name.name) {
+                    let sig = build_fn_sig(f, resolved, decls, diags, false);
+                    sigs.fns.insert(id, sig);
+                }
             }
+            Item::Extern(block) => {
+                for f in &block.functions {
+                    if let Some(id) = resolved.definitions.lookup_in(f.span.file, &f.name.name) {
+                        let sig = build_fn_sig(f, resolved, decls, diags, true);
+                        sigs.fns.insert(id, sig);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// `unsafe impl TypeName Send { }` / `unsafe impl TypeName Sync { }`
+/// (language-spec §19, Stage 6) is the *only* legal use of `unsafe` on an
+/// `impl` block — asserting either marker trait is an unverifiable
+/// promise the compiler cannot check for itself
+/// (`nether_typecheck::send_sync`'s own module docs explain why `Sync`
+/// especially can't be auto-derived for most nominal types). Requires
+/// `unsafe` at all only for these two traits, with an empty body (pure
+/// markers, no methods to define).
+pub(super) fn validate_unsafe_impls(module: &Module, diags: &mut Vec<Diagnostic>) {
+    for item in &module.items {
+        let Item::Impl(block) = item else { continue };
+        let is_marker_trait = |name: &str| {
+            block.traits.len() == 1
+                && matches!(
+                    &block.traits[0],
+                    TypeExpr::Named { path, generics, .. }
+                        if generics.is_empty()
+                            && path.segments.len() == 1
+                            && path.segments[0].name.as_str() == name
+                )
+        };
+        let is_send_or_sync = is_marker_trait("Send") || is_marker_trait("Sync");
+        if block.is_unsafe {
+            if !is_send_or_sync {
+                diags.push(
+                    Diagnostic::error(
+                        "`unsafe impl` is only allowed for the `Send`/`Sync` marker traits",
+                    )
+                    .with_label(block.span, "here"),
+                );
+            }
+            if !block.methods.is_empty()
+                || !block.associated_consts.is_empty()
+                || !block.associated_types.is_empty()
+            {
+                diags.push(
+                    Diagnostic::error(
+                        "`unsafe impl Send`/`unsafe impl Sync` must have an empty body \
+                         — they are pure marker traits with no methods to define",
+                    )
+                    .with_label(block.span, "here"),
+                );
+            }
+        } else if is_send_or_sync {
+            diags.push(
+                Diagnostic::error(
+                    "`Send`/`Sync` can only be implemented via `unsafe impl` — asserting \
+                     either is an unverifiable promise the compiler cannot check for itself",
+                )
+                .with_label(block.span, "here"),
+            );
         }
     }
 }
@@ -424,6 +490,8 @@ pub(super) fn specialize_fn_sig(sig: &FnSig, subst: &HashMap<Symbol, Type>) -> F
         file: sig.file,
         self_param: sig.self_param,
         is_async: sig.is_async,
+        is_unsafe: sig.is_unsafe,
+        is_extern: sig.is_extern,
         params: sig
             .params
             .iter()

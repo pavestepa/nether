@@ -289,6 +289,32 @@ impl<'ctx> ModuleCx<'ctx> {
             .into()
     }
 
+    /// Inserts a fresh `alloca` at the *top* of `block` (before its first
+    /// existing instruction), regardless of the builder's current
+    /// position, then restores the builder to wherever it was.
+    ///
+    /// LLVM only ever treats an `alloca` as a fixed-offset stack slot when
+    /// it sits in the function's entry block; anywhere else it compiles
+    /// to a genuine *dynamic* stack adjustment that's never freed until
+    /// the function returns (a real bug this fixed: for a zero-sized
+    /// type, that lowering still emits a spill store to the unmoved
+    /// current stack pointer, silently clobbering whatever fixed-frame
+    /// local happened to live there). This is `nether_codegen`'s escape
+    /// hatch for a scratch slot only known to be needed partway through
+    /// building a *later* block — `block` must already hold at least one
+    /// instruction (every caller passes the entry block, which always
+    /// has its own hoisted locals from the function's prologue).
+    pub fn entry_alloca(&self, block: Block<'ctx>, ty: Ty<'ctx>, name: &str) -> Value<'ctx> {
+        let saved = self.current_block();
+        let first = block
+            .get_first_instruction()
+            .expect("entry block already holds the prologue's own hoisted locals");
+        self.builder.position_before(&first);
+        let result = self.alloca(ty, name);
+        self.position_at_end(saved);
+        result
+    }
+
     pub fn load(&self, ty: Ty<'ctx>, ptr: Value<'ctx>, name: &str) -> Value<'ctx> {
         self.builder
             .build_load(ty, ptr.into_pointer_value(), name)

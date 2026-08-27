@@ -22,6 +22,18 @@ impl Lowerer<'_> {
                 };
             }
             if path.segments.len() == 2
+                && path.segments[0].name.as_str() == "thread"
+                && path.segments[1].name.as_str() == "spawn"
+            {
+                return HirExpr {
+                    kind: HirExprKind::CallBuiltin {
+                        name: Symbol::new("__thread_spawn"),
+                        args: self.lower_args(args),
+                    },
+                    ty: result_ty,
+                };
+            }
+            if path.segments.len() == 2
                 && path.segments[0].name.as_str() == "timer"
                 && path.segments[1].name.as_str() == "sleep"
             {

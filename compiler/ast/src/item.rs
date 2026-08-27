@@ -38,6 +38,7 @@ pub enum Item {
     Fn(FnDecl),
     Use(UseDecl),
     Mod(ModDecl),
+    Extern(ExternBlock),
 }
 
 /// Declaration visibility. Nether is default-private: crossing a module
@@ -133,6 +134,12 @@ pub struct ImplBlock {
     pub id: NodeId,
     /// A generic fallback which explicitly permits concrete overrides.
     pub is_default: bool,
+    /// `unsafe impl TypeName Send { }` (language-spec §19, Stage 6) — the
+    /// only legal use of `unsafe` on an `impl` block: asserting the
+    /// compiler-unprovable `Send`/`Sync` marker traits by hand.
+    /// `nether_typecheck` rejects it everywhere else, and rejects a
+    /// non-`unsafe` `impl` of either trait (`check/declarations.rs`).
+    pub is_unsafe: bool,
     pub generics: Vec<GenericParam>,
     pub target: Ident,
     pub target_args: Vec<TypeExpr>,
@@ -245,6 +252,12 @@ pub struct FnDecl {
     pub visibility: Visibility,
     /// `async fn` (or `async method(...)` inside an impl/trait).
     pub is_async: bool,
+    /// `unsafe fn` (or `unsafe method(...)` inside an impl/trait) —
+    /// language-spec §17, Stage 5. The entire body is an implicit unsafe
+    /// context. `false`, always, for a member of an [`ExternBlock`] —
+    /// calling one is unsafe (like any FFI boundary crossing), but the
+    /// declaration itself carries no body to mark unsafe.
+    pub is_unsafe: bool,
     pub generics: Vec<GenericParam>,
     /// `None` for a static method / standalone function; `Some(_)` for an
     /// instance method (language-spec §6).
@@ -325,5 +338,27 @@ pub struct ModDecl {
     pub id: NodeId,
     pub name: Ident,
     pub visibility: Visibility,
+    pub span: Span,
+}
+
+/// `extern "C" { fn foo(a i32) i32; }` (language-spec §17, Stage 5) —
+/// structurally mirrors [`ImplBlock`]/[`TraitDecl`]: one node, a `Vec` of
+/// member signatures, sharing the block's own `abi`/`span`. Every member
+/// is parsed like a trait method with no default body (`;`-terminated,
+/// never `{ ... }`) — `typecheck` rejects a body on any of them, the
+/// mirror image of every *other* standalone `fn` requiring one.
+#[derive(Debug, Clone)]
+pub struct ExternBlock {
+    pub id: NodeId,
+    /// The ABI string literal (`"C"` — the only ABI Stage 5 supports;
+    /// parsed as a general string so a diagnostic can name what was
+    /// written if it's ever anything else).
+    pub abi: String,
+    /// From a preceding `#[link(name = "...")]` attribute, if present.
+    /// Collected by the driver into the final linker invocation
+    /// (`compiler/driver/src/link.rs`) — unrelated to program semantics,
+    /// so nothing downstream of parsing needs this field at all.
+    pub link: Option<String>,
+    pub functions: Vec<FnDecl>,
     pub span: Span,
 }

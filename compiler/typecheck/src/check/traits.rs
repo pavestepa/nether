@@ -127,7 +127,7 @@ pub(super) fn build_trait_method_table(
             methods.insert(
                 method.name.name.clone(),
                 TraitMethod {
-                    sig: build_fn_sig(method, resolved, decls, diags),
+                    sig: build_fn_sig(method, resolved, decls, diags, false),
                     default: method.body.as_ref().map(|_| TraitDefault {
                         source: id,
                         subst: identity_subst.clone(),
@@ -211,7 +211,7 @@ pub(super) fn build_impl_methods(
                 );
                 continue;
             }
-            let mut sig = build_fn_sig(m, resolved, decls, diags);
+            let mut sig = build_fn_sig(m, resolved, decls, diags, false);
             sig.generics.splice(0..0, owner_generics.clone());
             raw.push(RawMethod {
                 owner,

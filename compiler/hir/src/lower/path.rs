@@ -473,6 +473,17 @@ impl Lowerer<'_> {
                 };
             }
         }
+        if let Type::Thread(_) = receiver_ty {
+            if method.name.as_str() == "join" {
+                return HirExpr {
+                    kind: HirExprKind::CallBuiltin {
+                        name: Symbol::new("__thread_join"),
+                        args: vec![receiver],
+                    },
+                    ty: result_ty.clone(),
+                };
+            }
+        }
         if let Type::Any(trait_id, _) | Type::Some(trait_id, _) = receiver_ty {
             return HirExpr {
                 kind: HirExprKind::CallWitness {

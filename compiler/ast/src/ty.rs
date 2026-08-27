@@ -49,6 +49,16 @@ pub enum TypeExpr {
     /// `:&mut T` — an exclusive borrow, always within the unique-ownership
     /// domain (language-spec §3.1).
     MutRef(Box<TypeExpr>, Span),
+    /// `*const T` — a raw, unchecked pointer (language-spec §17, Stage 5).
+    /// Unlike `Ref`/`MutRef`, this has no unique-ownership-domain
+    /// restriction — it appears bare (`*const T`) as freely as within a
+    /// `Unique` wrapper (`:*const T`), since a raw pointer carries no
+    /// borrow-tracking to interact with the domain split in the first
+    /// place.
+    RawConstPtr(Box<TypeExpr>, Span),
+    /// `*mut T` — a raw, unchecked mutable pointer (language-spec §17,
+    /// Stage 5). See `RawConstPtr`'s own docs.
+    RawMutPtr(Box<TypeExpr>, Span),
     /// A function-typed value, e.g. a closure's inferred/annotated shape.
     Function {
         params: Vec<TypeExpr>,
@@ -71,6 +81,8 @@ impl TypeExpr {
             | TypeExpr::Unique(_, span)
             | TypeExpr::Ref(_, span)
             | TypeExpr::MutRef(_, span)
+            | TypeExpr::RawConstPtr(_, span)
+            | TypeExpr::RawMutPtr(_, span)
             | TypeExpr::Function { span, .. } => *span,
         }
     }

@@ -81,6 +81,17 @@ pub struct FnSig {
     pub file: FileId,
     pub self_param: Option<SelfParam>,
     pub is_async: bool,
+    /// `unsafe fn`/`unsafe method(...)` (language-spec §17, Stage 5) — an
+    /// ordinary function whose *own* body is an implicit unsafe context.
+    /// `false` for an `extern "C"` declaration (which carries no body of
+    /// its own to mark) — see `is_extern` for that case; calling either
+    /// one requires the *caller* to be in an unsafe context.
+    pub is_unsafe: bool,
+    /// `true` for a signature collected from an `extern "C" { ... }`
+    /// block member — no Nether-side body exists to compile; `nether_hir`/
+    /// `nether_mir` keep it out of the ordinary per-function body-lowering
+    /// path entirely (see `docs/architecture/roadmap.md`'s Stage 5 entry).
+    pub is_extern: bool,
     pub params: Vec<ParamSig>,
     pub ret: Type,
     /// This item's own generic parameters and their bounds, used for
@@ -348,6 +359,12 @@ impl Signatures {
             Type::MutRef(inner) => {
                 Type::MutRef(Box::new(self.normalize_associated_inner(inner, visiting)))
             }
+            Type::RawConstPtr(inner) => {
+                Type::RawConstPtr(Box::new(self.normalize_associated_inner(inner, visiting)))
+            }
+            Type::RawMutPtr(inner) => {
+                Type::RawMutPtr(Box::new(self.normalize_associated_inner(inner, visiting)))
+            }
             Type::Function(params, ret) => Type::Function(
                 params
                     .iter()
@@ -375,6 +392,20 @@ impl Signatures {
             _ => ty,
         };
         self.implements_marker(ty, defs, "Eq")
+    }
+
+    /// Whether `ty` carries an explicit `unsafe impl TypeName Send { }`
+    /// (language-spec §19, Stage 6) — see [`crate::send_sync`], the only
+    /// consumer, for why this overrides the auto-derived default rather
+    /// than being required for it.
+    pub fn declares_send(&self, ty: &Type, defs: &Definitions) -> bool {
+        self.implements_marker(ty, defs, "Send")
+    }
+
+    /// Whether `ty` carries an explicit `unsafe impl TypeName Sync { }`.
+    /// See [`Self::declares_send`].
+    pub fn declares_sync(&self, ty: &Type, defs: &Definitions) -> bool {
+        self.implements_marker(ty, defs, "Sync")
     }
 
     fn can_derive_eq_inner(
@@ -691,7 +722,8 @@ impl Signatures {
             | Type::Weak(_)
             | Type::Any(_, _)
             | Type::Some(_, _)
-            | Type::Task(_) => true,
+            | Type::Task(_)
+            | Type::Thread(_) => true,
             Type::Struct(_, _) | Type::TupleStruct(_, _) => {
                 if alloc_kind(ty, defs) == AllocKind::Heap {
                     true

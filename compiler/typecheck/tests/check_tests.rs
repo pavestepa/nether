@@ -11,6 +11,8 @@ mod async_check;
 mod borrows;
 #[path = "check_tests/casing.rs"]
 mod casing;
+#[path = "check_tests/concurrency_check.rs"]
+mod concurrency_check;
 #[path = "check_tests/const_generics.rs"]
 mod const_generics;
 #[path = "check_tests/existentials.rs"]
@@ -21,12 +23,16 @@ mod expressions;
 mod generics;
 #[path = "check_tests/moves.rs"]
 mod moves;
+#[path = "check_tests/mutable_closure_captures.rs"]
+mod mutable_closure_captures;
 #[path = "check_tests/origins.rs"]
 mod origins;
 #[path = "check_tests/self_overloads.rs"]
 mod self_overloads;
 #[path = "check_tests/to_conversion.rs"]
 mod to_conversion;
+#[path = "check_tests/unsafe_ffi_check.rs"]
+mod unsafe_ffi_check;
 #[path = "check_tests/variadics_and_layout.rs"]
 mod variadics_and_layout;
 

@@ -20,3 +20,4 @@ nether-monomorphization = { path = "../monomorphization" }
 nether-mir = { path = "../mir" }
 nether-llvm = { path = "../llvm" }
 nether-codegen = { path = "../codegen" }
+toml = "1"

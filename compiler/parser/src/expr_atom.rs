@@ -49,9 +49,23 @@ impl Parser {
                 if !matches!(self.peek(), Token::Punct(Punct::LParen)) {
                     self.error(self.peek_span(), "expected `(` after `move`");
                 }
-                self.parse_closure_with_mode(start, true)
+                self.parse_closure_with_mode(start, true, false)
+            }
+            // `mut (...) => ...` (language-spec §16, Stage 7) — captures
+            // every `mut`-declared outer local the body touches by
+            // mutable reference instead of by value. Its own keyword slot
+            // sits parallel to `move`'s, so the two can never combine —
+            // `move mut (...)`/`mut move (...)` both fail with "expected
+            // `(`" the same way a stray keyword anywhere else would.
+            Token::Keyword(Keyword::Mut) => {
+                self.bump();
+                if !matches!(self.peek(), Token::Punct(Punct::LParen)) {
+                    self.error(self.peek_span(), "expected `(` after `mut`");
+                }
+                self.parse_closure_with_mode(start, false, true)
             }
             Token::Punct(Punct::LBracket) => self.parse_array_expr(start),
+            Token::Punct(Punct::LBrace) => self.parse_fixed_array_expr(start),
             Token::Punct(Punct::Colon) => {
                 self.bump();
                 self.parse_owned_struct_lit(start)
@@ -313,13 +327,14 @@ impl Parser {
     }
 
     pub(super) fn parse_closure(&mut self, start: nether_diagnostics::Span) -> Expr {
-        self.parse_closure_with_mode(start, false)
+        self.parse_closure_with_mode(start, false, false)
     }
 
     fn parse_closure_with_mode(
         &mut self,
         start: nether_diagnostics::Span,
         move_capture: bool,
+        mut_capture: bool,
     ) -> Expr {
         self.expect_punct(Punct::LParen, "to start a closure's parameters");
         let mut params = Vec::new();
@@ -338,6 +353,7 @@ impl Parser {
             id,
             kind: ExprKind::Closure {
                 move_capture,
+                mut_capture,
                 params,
                 body: Box::new(body),
             },
@@ -359,6 +375,30 @@ impl Parser {
         Expr {
             id,
             kind: ExprKind::Array(elems),
+            span: start.to(end),
+        }
+    }
+
+    /// `{1, 2, 3}` (language-spec §2.4, Stage 7) — an inline fixed-size
+    /// array literal, mirroring [`Self::parse_array_expr`] exactly except
+    /// for the bracket kind and the resulting node. Reachable only from
+    /// [`Self::parse_primary`]'s bare-`{` arm, which never fires for a
+    /// struct literal (that path already consumed a leading `Path`
+    /// before ever checking for `{`, in `path_expr_from_ident`).
+    pub(super) fn parse_fixed_array_expr(&mut self, start: nether_diagnostics::Span) -> Expr {
+        self.bump(); // '{'
+        let mut elems = Vec::new();
+        while !matches!(self.peek(), Token::Punct(Punct::RBrace)) && !self.is_eof() {
+            elems.push(self.parse_assign_expr());
+            if !self.eat_punct(Punct::Comma) {
+                break;
+            }
+        }
+        let end = self.expect_punct(Punct::RBrace, "to close a fixed-array literal");
+        let id = self.next_id();
+        Expr {
+            id,
+            kind: ExprKind::FixedArray(elems),
             span: start.to(end),
         }
     }

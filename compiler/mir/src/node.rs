@@ -1,7 +1,7 @@
 use nether_ast::{BinaryOp, Literal, Symbol, UnaryOp};
 use nether_monomorphization::MonoFnId;
 use nether_resolver::DefId;
-use nether_typecheck::{AllocKind, Type};
+use nether_typecheck::{AllocKind, CaptureMode, Type};
 
 /// Identifies one local (parameter, `let`-binding, or MIR-internal
 /// temporary) within a single [`MirFunction`] — a plain storage slot, not
@@ -39,6 +39,7 @@ pub struct BlockId(pub(crate) u32);
 /// `CallTarget::Fn` in this module refers to — `build_mir` builds one
 /// `MirFunction` per `MonoFunction` in the same order, so no separate id
 /// space is minted for this crate's own functions.
+#[derive(Debug, Clone)]
 pub struct MirFunction {
     /// Carried over unchanged from `nether_monomorphization::MonoFunction`
     /// — lets `nether_codegen` key a `MonoFnId -> LLVM function` table
@@ -53,9 +54,16 @@ pub struct MirFunction {
     pub owner: Option<DefId>,
     pub is_closure: bool,
     pub is_async: bool,
+    /// `true` for an `extern "C" { ... }` block member — `blocks` is a
+    /// trivial placeholder (`Terminator::Unreachable`, never actually
+    /// reached); `nether_codegen` special-cases this flag to declare the
+    /// symbol (real link name, C-ABI type mapping) rather than define a
+    /// body for it.
+    pub is_extern: bool,
     /// Locals initialized from fields in the hidden closure environment
-    /// parameter. Empty for ordinary functions.
-    pub closure_captures: Vec<Local>,
+    /// parameter, paired with how each one was captured. Empty for
+    /// ordinary functions.
+    pub closure_captures: Vec<(Local, CaptureMode)>,
     /// This function's arguments' locals, in calling-convention order —
     /// the receiver first if the function has a `self` parameter
     /// (matching `nether_hir`/`nether_monomorphization`'s own convention
@@ -78,6 +86,7 @@ impl MirFunction {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct LocalDecl {
     pub ty: Type,
     pub mutable: bool,
@@ -92,6 +101,7 @@ pub struct LocalDecl {
     pub needs_drop: bool,
 }
 
+#[derive(Debug, Clone)]
 pub struct BasicBlock {
     pub id: BlockId,
     pub instrs: Vec<Instr>,
@@ -228,7 +238,27 @@ pub enum Instr {
     /// remain valid because ARC release accepts null.
     Clear(Local),
     Retain(Local),
+    /// A genuine, ownership-ending release: scope exit, an overwritten
+    /// field/place's old value, or a purpose-built temporary's own single
+    /// use. In every case, `local`'s reference is spent for good the
+    /// instant this runs — nothing later in this function still expects
+    /// to find a live value there. Distinct from [`Instr::TransientRelease`]
+    /// for exactly this reason: `nether_codegen`'s async-frame codegen
+    /// nulls a local's frame field after this instruction specifically
+    /// (`FnCodegen::null_frame_field_after_release`), and would corrupt a
+    /// still-alive local if it treated the two the same.
     Release(Local),
+    /// The other half of `crate::arc::insert_arc`'s call-argument
+    /// retain/release pair for a native (`CallBuiltin`/`CallArrayMethod`)
+    /// callee (`arc-model.md` §3.3) — a purely transactional bump for the
+    /// call's own duration that nets to zero and leaves `local`'s own
+    /// ownership completely unaffected (`crate::arc`'s own module docs:
+    /// "grants the native callee nothing lasting"). Unlike
+    /// [`Instr::Release`], `local` may well still be read again later in
+    /// this same function — `println(held); println(held);` retains and
+    /// releases `held` around *each* call without ending its life either
+    /// time.
+    TransientRelease(Local),
     /// Bumps a `weak T` value's *weak* count — never its referent's
     /// strong count (`arc-model.md` §3.5) — inserted only where
     /// `nether_mir::build` constructs a fresh `weak T` from a `T`
@@ -266,4 +296,17 @@ pub enum Terminator {
     /// provably dead, the same concept as rustc's own MIR `Unreachable`
     /// terminator.
     Unreachable,
+    /// A real suspension point inside an `is_async` function, introduced
+    /// by [`crate::split_await_points`] in place of an ordinary
+    /// `Instr::Assign(_, Rvalue::Await(task))` — only ever appears in an
+    /// `is_async` function's blocks, and only after that pass has run.
+    /// `codegen` polls `task` once; on `Ready`, it must store the output
+    /// into `output_local` and continue at `resume` — on `Pending`, it
+    /// must persist enough state to re-enter *this* block (not `resume`)
+    /// on the next poll, since `output_local` isn't populated yet.
+    Await {
+        task: Operand,
+        output_local: Local,
+        resume: BlockId,
+    },
 }

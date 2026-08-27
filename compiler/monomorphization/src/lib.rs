@@ -67,7 +67,7 @@ use nether_hir::{
     HirStmtKind,
 };
 use nether_resolver::DefId;
-use nether_typecheck::{ReceiverDomain, Type};
+use nether_typecheck::{CaptureMode, ReceiverDomain, Type};
 
 pub use node::{
     MonoCapture, MonoExpr, MonoExprKind, MonoFnId, MonoFunction, MonoMatchArm, MonoModule,
@@ -240,6 +240,7 @@ impl<'a> Mono<'a> {
             id,
             name: hir_fn.name.clone(),
             is_async: hir_fn.is_async,
+            is_extern: hir_fn.is_extern,
             owner: hir_fn.owner,
             is_closure: false,
             self_param: hir_fn.self_param,
@@ -370,7 +371,8 @@ fn contains_erased_generic(ty: &Type, erased: &HashMap<Symbol, Type>) -> bool {
         | Type::Unique(inner)
         | Type::Ref(inner)
         | Type::MutRef(inner)
-        | Type::Task(inner) => contains_erased_generic(inner, erased),
+        | Type::Task(inner)
+        | Type::Thread(inner) => contains_erased_generic(inner, erased),
         Type::FixedArray(element, length) => {
             contains_erased_generic(element, erased) || contains_erased_generic(length, erased)
         }

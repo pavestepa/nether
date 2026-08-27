@@ -6,7 +6,8 @@ use nether_ast::{
 };
 use nether_resolver::{DefId, LocalId as ResolverLocalId, Resolution, ResolvedNames};
 use nether_typecheck::{
-    FnSig, GenericBound, PrimitiveKind, ReceiverDomain, Signatures, Type, TypeShape, TypedTables,
+    CaptureMode, FnSig, GenericBound, PrimitiveKind, ReceiverDomain, Signatures, Type, TypeShape,
+    TypedTables,
 };
 
 use crate::node::{
@@ -103,6 +104,7 @@ pub fn lower(module: &Module, resolved: &ResolvedNames, tables: TypedTables) -> 
             methods: &methods,
             locals_map: HashMap::new(),
             next_local: 0,
+            mutable_locals: HashSet::new(),
             generics: p.sig.generics.iter().cloned().collect(),
             type_subst: p.type_subst.clone(),
             self_override: None,
@@ -268,6 +270,23 @@ fn collect_pending_fns<'a>(
                             type_subst: HashMap::new(),
                             specialization: None,
                         });
+                    }
+                }
+            }
+            Item::Extern(block) => {
+                for f in &block.functions {
+                    if let Some(id) = resolved.definitions.lookup_in(f.span.file, &f.name.name) {
+                        if let Some(sig) = sigs.fns.get(&id).cloned() {
+                            pending.push(PendingFn {
+                                name: f.name.name.clone(),
+                                def_id: Some(id),
+                                owner: None,
+                                decl: f,
+                                sig,
+                                type_subst: HashMap::new(),
+                                specialization: None,
+                            });
+                        }
                     }
                 }
             }

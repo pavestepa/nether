@@ -211,6 +211,44 @@ struct Node {
 }
 
 #[test]
+fn fixed_array_literal_parses_distinctly_from_growable_array_literal() {
+    let module = parse_ok(
+        r#"
+fn main() {
+    let growable = [1, 2, 3];
+    let fixed = {4, 5, 6};
+    let one = {7};
+}
+"#,
+    );
+    let Item::Fn(main) = &module.items[0] else {
+        panic!("expected main")
+    };
+    let body = main.body.as_ref().unwrap();
+
+    let Stmt::Let(growable) = &body.stmts[0] else {
+        panic!("expected let")
+    };
+    let ExprKind::Array(elems) = &growable.value.kind else {
+        panic!("expected ExprKind::Array")
+    };
+    assert_eq!(elems.len(), 3);
+
+    let Stmt::Let(fixed) = &body.stmts[1] else {
+        panic!("expected let")
+    };
+    let ExprKind::FixedArray(elems) = &fixed.value.kind else {
+        panic!("expected ExprKind::FixedArray")
+    };
+    assert_eq!(elems.len(), 3);
+
+    let Stmt::Let(one) = &body.stmts[2] else {
+        panic!("expected let")
+    };
+    assert!(matches!(one.value.kind, ExprKind::FixedArray(_)));
+}
+
+#[test]
 fn malformed_item_reports_diagnostic_and_recovers() {
     let source = "struct;\nstruct Dog { name String }\n";
     let (module, diags) = parse_with_diagnostics(source);

@@ -1,12 +1,20 @@
 use nether_ast::{
-    AssociatedConst, AssociatedType, EnumDecl, EnumVariant, Field, FnDecl, GenericParam, ImplBlock,
-    Item, ModDecl, Param, Path, SelfParam, StructDecl, StructDeclKind, TraitDecl, TypeAliasDecl,
-    TypeExpr, UseDecl, Visibility,
+    AssociatedConst, AssociatedType, EnumDecl, EnumVariant, ExternBlock, Field, FnDecl,
+    GenericParam, ImplBlock, Item, ModDecl, Param, Path, SelfParam, StructDecl, StructDeclKind,
+    TraitDecl, TypeAliasDecl, TypeExpr, UseDecl, Visibility,
 };
 use nether_diagnostics::Span;
 use nether_lexer::{Keyword, Punct, Token};
 
 use crate::parser::Parser;
+
+/// The parsed result of every `#[...]` attribute preceding one item.
+struct ItemAttributes {
+    allow_pascal_case: bool,
+    /// From `#[link(name = "...")]` — only valid before an `extern`
+    /// block; see `parse_item`'s own validation.
+    link: Option<String>,
+}
 
 impl Parser {
     pub(crate) fn parse_items_until_eof(&mut self) -> Vec<Item> {
@@ -23,7 +31,7 @@ impl Parser {
     fn parse_item(&mut self) -> Option<Item> {
         let doc = self.take_doc_comments();
         let start = self.peek_span();
-        let allow_pascal_case = self.parse_item_attributes();
+        let attrs = self.parse_item_attributes();
         let visibility = if self.eat_keyword(Keyword::Pub) {
             Visibility::Public
         } else {
@@ -41,27 +49,55 @@ impl Parser {
                 "a prefix trait/derive list is only valid before `struct` or `enum`",
             );
         }
-        if allow_pascal_case && !matches!(self.peek(), Token::Keyword(Keyword::Type)) {
+        if attrs.allow_pascal_case && !matches!(self.peek(), Token::Keyword(Keyword::Type)) {
             self.error(
                 start,
                 "`allow_pascal_case` is only valid on a type alias declaration",
             );
+        }
+        if attrs.link.is_some() && !matches!(self.peek(), Token::Keyword(Keyword::Extern)) {
+            self.error(start, "`link` is only valid on an `extern` block");
+        }
+        // `async`/`unsafe fn` are peeled off generically, in either order,
+        // before the item-kind dispatch below — neither modifier is valid
+        // on anything but a standalone `fn` (an `extern` block's own
+        // members carry no modifiers of their own; see
+        // `parse_extern_fn_sig`).
+        let (is_async, is_unsafe) = self.eat_fn_modifiers();
+        if is_async || is_unsafe {
+            return match self.peek() {
+                Token::Keyword(Keyword::Fn) => self
+                    .parse_fn_decl(doc, visibility, start, is_async, is_unsafe)
+                    .map(Item::Fn),
+                Token::Keyword(Keyword::Impl) if is_unsafe && !is_async => self
+                    .parse_impl_block(false, true, start)
+                    .map(Item::Impl),
+                _ => {
+                    self.error(
+                        self.peek_span(),
+                        "`async`/`unsafe` must be followed by `fn`, or `unsafe` by `impl`",
+                    );
+                    None
+                }
+            };
         }
         match self.peek() {
             Token::Keyword(Keyword::Struct) => self
                 .parse_struct_decl(doc, visibility, start, derived_traits)
                 .map(Item::Struct),
             Token::Keyword(Keyword::Type) => self
-                .parse_type_alias_decl(doc, visibility, start, allow_pascal_case)
+                .parse_type_alias_decl(doc, visibility, start, attrs.allow_pascal_case)
                 .map(Item::TypeAlias),
-            Token::Keyword(Keyword::Impl) => self.parse_impl_block(false, start).map(Item::Impl),
+            Token::Keyword(Keyword::Impl) => self
+                .parse_impl_block(false, false, start)
+                .map(Item::Impl),
             Token::Keyword(Keyword::Default) => {
                 self.bump();
                 if !matches!(self.peek(), Token::Keyword(Keyword::Impl)) {
                     self.error(self.peek_span(), "`default` is only valid before `impl`");
                     None
                 } else {
-                    self.parse_impl_block(true, start).map(Item::Impl)
+                    self.parse_impl_block(true, false, start).map(Item::Impl)
                 }
             }
             Token::Keyword(Keyword::Enum) => self
@@ -71,26 +107,19 @@ impl Parser {
                 .parse_trait_decl(doc, visibility, start)
                 .map(Item::Trait),
             Token::Keyword(Keyword::Fn) => self
-                .parse_fn_decl(doc, visibility, start, false)
+                .parse_fn_decl(doc, visibility, start, false, false)
                 .map(Item::Fn),
-            Token::Keyword(Keyword::Async) => {
-                self.bump();
-                if !matches!(self.peek(), Token::Keyword(Keyword::Fn)) {
-                    self.error(self.peek_span(), "`async` must be followed by `fn`");
-                    None
-                } else {
-                    self.parse_fn_decl(doc, visibility, start, true)
-                        .map(Item::Fn)
-                }
-            }
             Token::Keyword(Keyword::Use) => self.parse_use_decl(visibility, start).map(Item::Use),
             Token::Keyword(Keyword::Mod) => self.parse_mod_decl(visibility, start).map(Item::Mod),
+            Token::Keyword(Keyword::Extern) => self
+                .parse_extern_block(attrs.link, start)
+                .map(Item::Extern),
             other => {
                 let span = self.peek_span();
                 self.error(
                     span,
                     format!(
-                        "expected an item (`struct`, `type`, `impl`, `enum`, `trait`, `fn`, `use`, `mod`), found {other:?}"
+                        "expected an item (`struct`, `type`, `impl`, `enum`, `trait`, `fn`, `use`, `mod`, `extern`), found {other:?}"
                     ),
                 );
                 None
@@ -128,16 +157,16 @@ impl Parser {
         traits
     }
 
-    /// Stage 3's first item attribute. Attributes are parsed centrally so
-    /// unknown names and use on the wrong item receive a focused diagnostic
-    /// rather than cascading into "expected an item" errors.
-    fn parse_item_attributes(&mut self) -> bool {
+    /// Attributes are parsed centrally so unknown names and use on the
+    /// wrong item receive a focused diagnostic rather than cascading into
+    /// "expected an item" errors.
+    fn parse_item_attributes(&mut self) -> ItemAttributes {
         let mut allow_pascal_case = false;
+        let mut link = None;
         while self.eat_punct(Punct::Hash) {
             let attribute_start = self.prev_span();
             self.expect_punct(Punct::LBracket, "after `#` in an item attribute");
             let name = self.expect_ident();
-            self.expect_punct(Punct::RBracket, "to close an item attribute");
             if name.name.as_str() == "allow_pascal_case" {
                 if allow_pascal_case {
                     self.error(
@@ -146,11 +175,48 @@ impl Parser {
                     );
                 }
                 allow_pascal_case = true;
+            } else if name.name.as_str() == "link" {
+                if link.is_some() {
+                    self.error(attribute_start.to(name.span), "duplicate `link` attribute");
+                }
+                link = self.parse_link_attribute_args();
             } else {
                 self.error(name.span, format!("unknown item attribute `{}`", name.name));
             }
+            self.expect_punct(Punct::RBracket, "to close an item attribute");
         }
-        allow_pascal_case
+        ItemAttributes {
+            allow_pascal_case,
+            link,
+        }
+    }
+
+    /// `(name = "sqlite3")` — Stage 5's `#[link(...)]` argument list, the
+    /// first attribute in this language to take one (`#[allow_pascal_case]`
+    /// takes none). Returns the library name, or `None` on a malformed
+    /// argument list (already diagnosed at the point of failure).
+    fn parse_link_attribute_args(&mut self) -> Option<String> {
+        self.expect_punct(Punct::LParen, "after `link` — expected `(name = \"...\")`");
+        let key = self.expect_ident();
+        if key.name.as_str() != "name" {
+            self.error(key.span, format!("expected `name`, found `{}`", key.name));
+        }
+        self.expect_punct(Punct::Eq, "after `name` in a `link` attribute");
+        let value = match self.peek().clone() {
+            Token::Str(s) => {
+                self.bump();
+                Some(s)
+            }
+            other => {
+                self.error(
+                    self.peek_span(),
+                    format!("expected a string literal library name, found {other:?}"),
+                );
+                None
+            }
+        };
+        self.expect_punct(Punct::RParen, "to close a `link` attribute");
+        value
     }
 
     /// Collects consecutive leading `///` doc-comment lines into one
@@ -312,7 +378,12 @@ impl Parser {
         }
     }
 
-    fn parse_impl_block(&mut self, is_default: bool, start: Span) -> Option<ImplBlock> {
+    fn parse_impl_block(
+        &mut self,
+        is_default: bool,
+        is_unsafe: bool,
+        start: Span,
+    ) -> Option<ImplBlock> {
         self.expect_keyword(Keyword::Impl);
         let id = self.next_id();
         let mut generics = self.parse_optional_generic_params();
@@ -345,6 +416,7 @@ impl Parser {
         Some(ImplBlock {
             id,
             is_default,
+            is_unsafe,
             generics,
             target,
             target_args,
@@ -590,6 +662,7 @@ impl Parser {
         visibility: Visibility,
         start: Span,
         is_async: bool,
+        is_unsafe: bool,
     ) -> Option<FnDecl> {
         self.expect_keyword(Keyword::Fn);
         let id = self.next_id();
@@ -616,6 +689,7 @@ impl Parser {
             name,
             visibility,
             is_async,
+            is_unsafe,
             generics,
             self_param: None,
             params,
@@ -637,7 +711,7 @@ impl Parser {
         } else {
             Visibility::Private
         };
-        let is_async = self.eat_keyword(Keyword::Async);
+        let (is_async, is_unsafe) = self.eat_fn_modifiers();
         if !matches!(self.peek(), Token::Ident(_)) {
             let span = self.peek_span();
             self.error(
@@ -671,11 +745,134 @@ impl Parser {
             name,
             visibility,
             is_async,
+            is_unsafe,
             generics,
             self_param,
             params,
             ret,
             body,
+            doc,
+            span: start.to(end),
+        })
+    }
+
+    /// Eats `async`/`unsafe` in either order, each at most once — this
+    /// codebase has no fixed canonical order for function modifiers
+    /// (only `async` existed before Stage 5), so both spellings
+    /// (`async unsafe fn`, `unsafe async fn`) are accepted uniformly.
+    fn eat_fn_modifiers(&mut self) -> (bool, bool) {
+        let mut is_async = false;
+        let mut is_unsafe = false;
+        loop {
+            if !is_async && self.eat_keyword(Keyword::Async) {
+                is_async = true;
+                continue;
+            }
+            if !is_unsafe && self.eat_keyword(Keyword::Unsafe) {
+                is_unsafe = true;
+                continue;
+            }
+            break;
+        }
+        (is_async, is_unsafe)
+    }
+
+    /// `extern "C" { fn foo(a i32) i32; ... }` (language-spec §17,
+    /// Stage 5) — structurally mirrors `parse_impl_block`/
+    /// `parse_trait_decl`: header, `{`, a loop of members, `}`.
+    fn parse_extern_block(&mut self, link: Option<String>, start: Span) -> Option<ExternBlock> {
+        self.expect_keyword(Keyword::Extern);
+        let id = self.next_id();
+        let abi = match self.peek().clone() {
+            Token::Str(s) => {
+                self.bump();
+                s
+            }
+            other => {
+                self.error(
+                    self.peek_span(),
+                    format!(
+                        "expected a string literal ABI name after `extern`, e.g. `extern \"C\"`, found {other:?}"
+                    ),
+                );
+                String::new()
+            }
+        };
+        if abi != "C" {
+            self.error(
+                self.prev_span(),
+                format!("unsupported extern ABI `{abi}` — only `\"C\"` is supported"),
+            );
+        }
+        self.expect_punct(Punct::LBrace, "to start an extern block");
+        let mut functions = Vec::new();
+        while !matches!(self.peek(), Token::Punct(Punct::RBrace)) && !self.is_eof() {
+            match self.parse_extern_fn_sig() {
+                Some(f) => functions.push(f),
+                None => {
+                    self.bump();
+                }
+            }
+        }
+        let end = self.expect_punct(Punct::RBrace, "to close an extern block");
+        Some(ExternBlock {
+            id,
+            abi,
+            link,
+            functions,
+            span: start.to(end),
+        })
+    }
+
+    /// One `extern "C"` block member — always a bodiless signature (`;`-
+    /// terminated, never `{ ... }`), the mirror image of every *other*
+    /// standalone `fn` (which requires a body). No `async`/`unsafe`
+    /// modifier of its own: calling any extern function is unsafe by
+    /// virtue of crossing the FFI boundary at all (checked by
+    /// `typecheck`, not spelled at the declaration site), and an extern
+    /// function can't be `async` (there is no Nether-side body to lower
+    /// into a state machine).
+    fn parse_extern_fn_sig(&mut self) -> Option<FnDecl> {
+        let doc = self.take_doc_comments();
+        let start = self.peek_span();
+        let visibility = if self.eat_keyword(Keyword::Pub) {
+            Visibility::Public
+        } else {
+            Visibility::Private
+        };
+        self.expect_keyword(Keyword::Fn);
+        let id = self.next_id();
+        let name = self.expect_ident();
+        let generics = self.parse_optional_generic_params();
+        self.expect_punct(Punct::LParen, "to start a parameter list");
+        let params = self.parse_params_list();
+        self.expect_punct(Punct::RParen, "to close a parameter list");
+        let ret = self.parse_optional_return_type();
+        if matches!(self.peek(), Token::Punct(Punct::LBrace)) {
+            self.error(
+                self.peek_span(),
+                "an `extern` function has no Nether-side body — remove it, or move this \
+                 declaration out of the `extern` block",
+            );
+            self.parse_block();
+        } else {
+            self.expect_punct(Punct::Semi, "after an `extern` function signature");
+        }
+        let end = ret
+            .as_ref()
+            .map(|r| r.span())
+            .unwrap_or_else(|| self.prev_span());
+        Some(FnDecl {
+            id,
+            name,
+            visibility,
+            is_async: false,
+            is_unsafe: false,
+            generics,
+            self_param: None,
+            params,
+            ret,
+            body: None,
             doc,
             span: start.to(end),
         })

@@ -13,8 +13,9 @@ use std::process::Command;
 /// The `runtime/*` static libraries every emitted object needs, in link
 /// order (a library must come *after* whatever references its symbols —
 /// `io` calls into `string`, `string`/`array` call into `arc`).
-const RUNTIME_LIBS: [&str; 5] = [
+const RUNTIME_LIBS: [&str; 6] = [
     "nether_rt_task",
+    "nether_rt_thread",
     "nether_rt_io",
     "nether_rt_string",
     "nether_rt_array",
@@ -55,7 +56,13 @@ fn locate_runtime_libs() -> Option<Vec<PathBuf>> {
 }
 
 /// Links `object` into a native executable at `out`, against the
-/// prebuilt `runtime/*` static libraries. Returns `Ok(None)` — not an
+/// prebuilt `runtime/*` static libraries plus any `#[link(name = "...")]`
+/// libraries an `extern "C"` block requested (language-spec §17, Stage
+/// 5 — collected by [`crate::compile`] from the module graph and passed
+/// through here as `-l<name>` arguments, appended after the runtime
+/// `.a` paths since a library must come after whatever references its
+/// symbols; assumes a standard system library search path — an explicit
+/// `-L<path>` is out of scope for v1). Returns `Ok(None)` — not an
 /// error — if those haven't been built yet (see [`locate_runtime_libs`]):
 /// this mirrors [`crate::check`]'s own "nothing further to do yet" style
 /// for a `main`-less module, since a missing, buildable-on-demand runtime
@@ -66,14 +73,16 @@ fn locate_runtime_libs() -> Option<Vec<PathBuf>> {
 /// (a real linker error — mismatched symbols, an unsupported target,
 /// etc. — always unexpected at this stage, since every symbol the object
 /// file leaves undefined is one of the four `runtime/*` libraries' own,
-/// per `nether_codegen`'s `runtime.rs`).
-pub fn link(object: &Path, out: &Path) -> std::io::Result<Option<PathBuf>> {
+/// per `nether_codegen`'s `runtime.rs`, or an explicitly requested
+/// `#[link]` library).
+pub fn link(object: &Path, out: &Path, link_libs: &[String]) -> std::io::Result<Option<PathBuf>> {
     let Some(libs) = locate_runtime_libs() else {
         return Ok(None);
     };
     let status = Command::new("cc")
         .arg(object)
         .args(&libs)
+        .args(link_libs.iter().map(|name| format!("-l{name}")))
         .arg("-o")
         .arg(out)
         .status()?;

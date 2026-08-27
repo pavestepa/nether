@@ -57,17 +57,41 @@
 //! symbols).
 //!
 //! Invariants: retain/release (strong or weak) are the only operations
-//! that change their respective count; single-threaded (Nether has no
-//! concurrency, spec §14), so no atomics are needed. A null payload
-//! pointer is a no-op for both (defensive — nothing in this workspace
-//! currently produces one, but it's a cheap guard against a real crash
-//! class rather than a hypothetical one).
+//! that change their respective count. Both counts are atomic (Stage 6):
+//! a Nether value can now genuinely cross a `thread.spawn` boundary
+//! (spec §14/§19), so two different OS threads can concurrently
+//! retain/release the same allocation. A null payload pointer is a no-op
+//! for both (defensive — nothing in this workspace currently produces
+//! one, but it's a cheap guard against a real crash class rather than a
+//! hypothetical one).
+//!
+//! Dealloc design mirrors `std::sync::Arc`/`Weak` exactly, for the same
+//! reason: `weak` starts at 1, not 0 — an *implicit* weak reference held
+//! collectively by "however many strong references currently exist,"
+//! released exactly once, by whichever `release` call drops the strong
+//! count to zero (see [`drop_implicit_weak_ref`]). This funnels the
+//! actual dealloc decision through a *single* counter's fetch-sub
+//! ("last one out wins," the standard atomic-refcount idiom) instead of
+//! two independent counters each reading the other and racing to decide
+//! — the two-independent-checks version this replaced was sound only
+//! because nothing was ever concurrent; ported naively to real threads it
+//! can double-free (both `release` and `weak_release` can each observe
+//! "the other count is already zero" from a stale read and both call
+//! `dealloc_header`). `retain`/`weak_retain` use `Relaxed` (duplicating a
+//! handle synchronizes nothing); the count-reaching-zero `release` path
+//! uses `Release` plus an `Acquire` fence before actually running the
+//! drop callback or freeing memory — the releasing thread must observe
+//! every other thread's prior writes to the payload first.
+//! `weak_upgrade` is a `compare_exchange` loop incrementing `strong`
+//! only while it's observed to still be non-zero, mirroring
+//! `std::sync::Weak::upgrade`.
 //!
 //! Future extension points: a cycle-detection lint (spec §14) would be a
 //! separate static-analysis tool, not a change here — this crate stays a
 //! minimal, correct refcounting primitive.
 
 use std::alloc::{alloc, dealloc, handle_alloc_error, Layout};
+use std::sync::atomic::{fence, AtomicI64, Ordering};
 
 /// Every allocation is aligned to this boundary — large enough for any
 /// primitive or pointer field a Nether struct can contain on
@@ -78,8 +102,10 @@ const ALIGN: usize = 16;
 /// this crate hands out.
 #[repr(C)]
 struct Header {
-    strong: i64,
-    weak: i64,
+    strong: AtomicI64,
+    /// Starts at 1 — see this crate's own module docs on the implicit
+    /// weak reference held collectively by the strong count.
+    weak: AtomicI64,
     /// The payload size passed to [`nether_rt_arc_alloc`] — freeing the
     /// block needs it back to reconstruct the exact [`Layout`] `dealloc`
     /// requires.
@@ -189,9 +215,10 @@ unsafe fn dealloc_header(header: *mut Header) {
 }
 
 /// Allocates a refcounted block of `size` payload bytes at strong count
-/// 1 and weak count 0, with `drop` recorded to run (if present) when the
-/// strong count reaches zero. Returns a pointer to the payload, not the
-/// header.
+/// 1 (and an internal weak count of 1 — the implicit weak reference held
+/// collectively by the strong count, see this crate's own module docs),
+/// with `drop` recorded to run (if present) when the strong count
+/// reaches zero. Returns a pointer to the payload, not the header.
 #[no_mangle]
 pub extern "C" fn nether_rt_arc_alloc(size: i64, drop: Option<extern "C" fn(*mut u8)>) -> *mut u8 {
     let layout = layout_for(size);
@@ -201,8 +228,8 @@ pub extern "C" fn nether_rt_arc_alloc(size: i64, drop: Option<extern "C" fn(*mut
             handle_alloc_error(layout);
         }
         base.cast::<Header>().write(Header {
-            strong: 1,
-            weak: 0,
+            strong: AtomicI64::new(1),
+            weak: AtomicI64::new(1),
             size,
             drop,
         });
@@ -222,14 +249,14 @@ pub unsafe extern "C" fn nether_rt_arc_retain(payload: *mut u8) {
     }
     unsafe {
         let header = header_of(payload);
-        (*header).strong += 1;
+        (*header).strong.fetch_add(1, Ordering::Relaxed);
     }
 }
 
 /// Decrements `payload`'s strong count; at zero, runs its drop callback
-/// (if any), then frees the block too if the weak count is *also* zero
-/// (see this crate's own module docs on why the two counts are tracked
-/// separately).
+/// (if any), then releases the implicit weak reference the strong count
+/// collectively held (freeing the block too if that was also the last
+/// weak reference — see this crate's own module docs).
 ///
 /// # Safety
 /// Same precondition as [`nether_rt_arc_retain`].
@@ -240,15 +267,33 @@ pub unsafe extern "C" fn nether_rt_arc_release(payload: *mut u8) {
     }
     unsafe {
         let header = header_of(payload);
-        (*header).strong -= 1;
-        if (*header).strong == 0 {
-            if let Some(drop_fn) = (*header).drop {
-                drop_fn(payload);
-            }
-            if (*header).weak == 0 {
-                dealloc_header(header);
-            }
+        if (*header).strong.fetch_sub(1, Ordering::Release) != 1 {
+            return;
         }
+        fence(Ordering::Acquire);
+        if let Some(drop_fn) = (*header).drop {
+            drop_fn(payload);
+        }
+        drop_implicit_weak_ref(header);
+    }
+}
+
+/// Decrements `header`'s weak count by one; frees the whole block if
+/// that was the last weak reference (real or the implicit one strong
+/// references collectively hold — see this crate's own module docs).
+/// The single funnel point every weak-count-reaching-zero decision goes
+/// through, so there is exactly one "last one out" winner even under
+/// real concurrent strong/weak releases racing each other.
+///
+/// # Safety
+/// `header` must point at a live header (not yet freed).
+unsafe fn drop_implicit_weak_ref(header: *mut Header) {
+    unsafe {
+        if (*header).weak.fetch_sub(1, Ordering::Release) != 1 {
+            return;
+        }
+        fence(Ordering::Acquire);
+        dealloc_header(header);
     }
 }
 
@@ -287,14 +332,16 @@ pub unsafe extern "C" fn nether_rt_arc_weak_retain(payload: *mut u8) {
     }
     unsafe {
         let header = header_of(payload);
-        (*header).weak += 1;
+        (*header).weak.fetch_add(1, Ordering::Relaxed);
     }
 }
 
-/// Decrements `payload`'s weak count; frees the block if the strong
-/// count has *also* already reached zero (the drop callback, if any,
+/// Decrements `payload`'s weak count; frees the block if that was the
+/// last weak reference — real or implicit (the drop callback, if any,
 /// already ran when the strong count itself hit zero — this only ever
-/// frees the raw memory block, never re-runs it).
+/// frees the raw memory block, never re-runs it). Routes through the
+/// same funnel [`nether_rt_arc_release`] uses when it releases its own
+/// implicit weak hold — see this crate's own module docs.
 ///
 /// # Safety
 /// Same precondition as [`nether_rt_arc_retain`].
@@ -305,10 +352,7 @@ pub unsafe extern "C" fn nether_rt_arc_weak_release(payload: *mut u8) {
     }
     unsafe {
         let header = header_of(payload);
-        (*header).weak -= 1;
-        if (*header).weak == 0 && (*header).strong == 0 {
-            dealloc_header(header);
-        }
+        drop_implicit_weak_ref(header);
     }
 }
 
@@ -338,12 +382,24 @@ pub unsafe extern "C" fn nether_rt_arc_weak_upgrade(
     }
     unsafe {
         let header = header_of(payload);
-        if (*header).strong == 0 {
-            return 0;
+        let mut current = (*header).strong.load(Ordering::Relaxed);
+        loop {
+            if current == 0 {
+                return 0;
+            }
+            match (*header).strong.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    *out_payload = payload;
+                    return 1;
+                }
+                Err(observed) => current = observed,
+            }
         }
-        (*header).strong += 1;
-        *out_payload = payload;
-        1
     }
 }
 
@@ -480,5 +536,92 @@ mod tests {
             );
             nether_rt_arc_weak_release(p);
         }
+    }
+
+    /// A raw pointer used from more than one real `std::thread`, for
+    /// tests only — Stage 6's own point is that this is now genuinely
+    /// sound at the Nether-ABI level (atomic counts), so these tests
+    /// exercise exactly that: real concurrent retain/release/upgrade
+    /// racing across real OS threads, not just single-threaded code
+    /// shape. Not `Send` by default (raw pointers never are).
+    struct SendPtr(*mut u8);
+    unsafe impl Send for SendPtr {}
+
+    #[test]
+    fn concurrent_retain_release_across_real_threads_drops_exactly_once() {
+        let _guard = DROP_TEST_LOCK.lock().unwrap();
+        let before = DROPS.load(Ordering::SeqCst);
+        let p = nether_rt_arc_alloc(8, Some(record_drop));
+
+        const THREADS: usize = 8;
+        const ITERS: usize = 2000;
+
+        // Each thread takes its own independent strong reference up
+        // front, hammers retain/release (net zero) many times to
+        // maximize real contention on the atomic counters, then
+        // releases its own independent reference at the end.
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                unsafe { nether_rt_arc_retain(p) };
+                let owned = SendPtr(p);
+                std::thread::spawn(move || {
+                    let owned = owned;
+                    for _ in 0..ITERS {
+                        unsafe {
+                            nether_rt_arc_retain(owned.0);
+                            nether_rt_arc_release(owned.0);
+                        }
+                    }
+                    unsafe { nether_rt_arc_release(owned.0) };
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        assert_eq!(
+            DROPS.load(Ordering::SeqCst),
+            before,
+            "still one live reference — the original allocation's own"
+        );
+        unsafe { nether_rt_arc_release(p) };
+        assert_eq!(
+            DROPS.load(Ordering::SeqCst),
+            before + 1,
+            "must drop exactly once under real contention — never zero (leak) or more than once (double-free)"
+        );
+    }
+
+    #[test]
+    fn concurrent_weak_upgrade_races_the_final_strong_release() {
+        let _guard = DROP_TEST_LOCK.lock().unwrap();
+        let before = DROPS.load(Ordering::SeqCst);
+        let p = nether_rt_arc_alloc(8, Some(record_drop));
+        unsafe { nether_rt_arc_weak_retain(p) };
+        let owned = SendPtr(p);
+
+        // Races real `weak_upgrade` CAS attempts (and their matching
+        // releases) against a concurrent final strong release from this
+        // thread — some upgrades should observe the referent still
+        // alive and succeed, some should correctly observe strong == 0
+        // and fail; none may ever read freed memory or double-free.
+        let upgrader = std::thread::spawn(move || {
+            let owned = owned;
+            for _ in 0..5000 {
+                let mut out: *mut u8 = std::ptr::null_mut();
+                let ok = unsafe { nether_rt_arc_weak_upgrade(owned.0, &mut out) };
+                if ok == 1 {
+                    unsafe { nether_rt_arc_release(owned.0) };
+                }
+            }
+        });
+        unsafe { nether_rt_arc_release(p) };
+        upgrader.join().unwrap();
+        assert_eq!(
+            DROPS.load(Ordering::SeqCst),
+            before + 1,
+            "must drop exactly once under real upgrade/release contention"
+        );
+        unsafe { nether_rt_arc_weak_release(p) };
     }
 }

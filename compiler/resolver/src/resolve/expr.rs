@@ -38,7 +38,7 @@ impl Resolver<'_> {
         match &expr.kind {
             ExprKind::Literal(_) | ExprKind::Continue => {}
             ExprKind::Path(path) => self.resolve_value_path(path),
-            ExprKind::Tuple(elems) | ExprKind::Array(elems) => {
+            ExprKind::Tuple(elems) | ExprKind::Array(elems) | ExprKind::FixedArray(elems) => {
                 for e in elems {
                     self.resolve_expr(e);
                 }
@@ -50,9 +50,12 @@ impl Resolver<'_> {
                     }
                 }
             }
-            ExprKind::Unary { expr, .. } | ExprKind::MutArg(expr) | ExprKind::Await(expr) => {
-                self.resolve_expr(expr)
-            }
+            ExprKind::Unary { expr, .. }
+            | ExprKind::MutArg(expr)
+            | ExprKind::Await(expr)
+            | ExprKind::RawDeref(expr) => self.resolve_expr(expr),
+            ExprKind::RawBorrow { place, .. } => self.resolve_expr(place),
+            ExprKind::Unsafe(block) => self.resolve_block(block),
             ExprKind::Binary { lhs, rhs, .. } => {
                 self.resolve_expr(lhs);
                 self.resolve_expr(rhs);

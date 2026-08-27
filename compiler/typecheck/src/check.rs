@@ -200,6 +200,12 @@ fn lower_type_expr_inner(
         TypeExpr::MutRef(inner, _) => Type::MutRef(Box::new(lower_type_expr_inner(
             inner, resolved, decls, diags, visiting,
         ))),
+        TypeExpr::RawConstPtr(inner, _) => Type::RawConstPtr(Box::new(lower_type_expr_inner(
+            inner, resolved, decls, diags, visiting,
+        ))),
+        TypeExpr::RawMutPtr(inner, _) => Type::RawMutPtr(Box::new(lower_type_expr_inner(
+            inner, resolved, decls, diags, visiting,
+        ))),
         TypeExpr::Function { params, ret, .. } => Type::Function(
             params
                 .iter()
@@ -600,6 +606,7 @@ fn build_fn_sig(
     resolved: &ResolvedNames,
     decls: &DeclIndex,
     diags: &mut Vec<Diagnostic>,
+    is_extern: bool,
 ) -> FnSig {
     let mut const_params: HashMap<Symbol, Type> = f
         .generics
@@ -634,7 +641,7 @@ fn build_fn_sig(
         generics.push((name.clone(), Vec::new()));
         const_params.insert(name, Type::Primitive(PrimitiveKind::Usize));
     }
-    let params = f
+    let params: Vec<crate::sig::ParamSig> = f
         .params
         .iter()
         .map(|p| crate::sig::ParamSig {
@@ -649,15 +656,76 @@ fn build_fn_sig(
         .as_ref()
         .map(|r| lower_type_expr(r, resolved, decls, diags))
         .unwrap_or_else(Type::unit);
+    if is_extern {
+        if !f.generics.is_empty() {
+            diags.push(
+                Diagnostic::error("an `extern` function cannot be generic")
+                    .with_label(f.span, "real C symbols can't be generic"),
+            );
+        }
+        for param in &params {
+            if !is_ffi_safe_type(&param.ty) {
+                diags.push(
+                    Diagnostic::error(format!(
+                        "`{}` is not a valid `extern \"C\"` parameter type",
+                        describe_type(&param.ty, resolved)
+                    ))
+                    .with_label(
+                        f.span,
+                        "extern parameters must be a numeric/bool primitive, a raw pointer, or `()`",
+                    ),
+                );
+            }
+        }
+        if !is_ffi_safe_type(&ret) && ret != Type::unit() {
+            diags.push(
+                Diagnostic::error(format!(
+                    "`{}` is not a valid `extern \"C\"` return type",
+                    describe_type(&ret, resolved)
+                ))
+                .with_label(
+                    f.span,
+                    "extern return types must be a numeric/bool primitive, a raw pointer, or `()`",
+                ),
+            );
+        }
+    }
     FnSig {
         visibility: f.visibility,
         file: f.span.file,
         self_param: f.self_param,
         is_async: f.is_async,
+        is_unsafe: f.is_unsafe,
+        is_extern,
         params,
         ret,
         generics,
         const_params,
         return_origins: Vec::new(),
+    }
+}
+
+/// An `extern "C"` signature's parameter/return types are restricted to
+/// what can genuinely cross a real C ABI boundary (language-spec §17,
+/// Stage 5's own scoping decision: an aggregate crosses only via an
+/// explicit raw pointer, never by value — Nether's own internal calling
+/// convention forces *every* stack aggregate across a function boundary
+/// as a bare pointer regardless of size, which is not real System V
+/// AMD64/AAPCS64 struct-register-classification, so aggregates are
+/// excluded outright rather than silently miscompiled). `char`/`String`
+/// are excluded too — neither is a real C type. Bare `:&T`/`:&mut T`
+/// references are excluded on purpose, to keep a clean line between
+/// Nether's borrow-checked reference system and the unchecked C-ABI
+/// boundary — an FFy caller uses `&raw const`/`&raw mut` to get a
+/// `*const T`/`*mut T` explicitly, the same as any other raw-pointer use.
+fn is_ffi_safe_type(ty: &Type) -> bool {
+    match ty {
+        Type::Primitive(p) => !matches!(p, PrimitiveKind::Char),
+        // Any pointee is fine — the ABI concern is only about the
+        // pointer's own representation (always a bare address), never
+        // what it points to.
+        Type::RawConstPtr(_) | Type::RawMutPtr(_) => true,
+        Type::Tuple(elems) => elems.is_empty(),
+        _ => false,
     }
 }

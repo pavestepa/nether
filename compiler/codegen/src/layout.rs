@@ -76,7 +76,8 @@ impl<'m, 'ctx> Layout<'m, 'ctx> {
             | Type::Weak(_)
             | Type::Any(_, _)
             | Type::Some(_, _)
-            | Type::Task(_) => self.m.ptr_type(),
+            | Type::Task(_)
+            | Type::Thread(_) => self.m.ptr_type(),
             Type::Struct(_, _) | Type::TupleStruct(_, _) => match alloc_kind(ty, self.defs) {
                 AllocKind::Heap => self.m.ptr_type(),
                 AllocKind::Stack => self.struct_layout(ty).ty.into(),
@@ -104,6 +105,7 @@ impl<'m, 'ctx> Layout<'m, 'ctx> {
             // signature's parameter type).
             Type::Unique(inner) => self.llvm_type(inner),
             Type::Ref(_) | Type::MutRef(_) => self.m.ptr_type(),
+            Type::RawConstPtr(_) | Type::RawMutPtr(_) => self.m.ptr_type(),
             Type::Never | Type::Error => self.m.int_type(1),
             Type::Trait(_) | Type::Generic(_) | Type::Associated(_, _) | Type::Const(_) => {
                 unreachable!("{ty:?} never appears as a value's type by the time monomorphized MIR reaches codegen")

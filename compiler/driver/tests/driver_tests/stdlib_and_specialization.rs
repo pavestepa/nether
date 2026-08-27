@@ -159,27 +159,28 @@ fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Known, unresolved, pre-existing memory-safety bug — `#[ignore]`d
-/// because it reliably `SIGSEGV`s (or `SIGBUS`es) the *whole* test
-/// process if run without isolation (all `#[test]` fns in this binary
-/// share one process), not because it's slow. Run in isolation with
-/// `cargo test -p nether-driver --test driver_tests -- --ignored
-/// string_concatenation_by_reassignment_inside_a_loop_over_an_array_parameter_corrupts_memory`
-/// to reproduce; do not remove `#[ignore]` until it's fixed.
-///
-/// Minimal repro: a function taking an `Array<String>` (or `...String`
-/// — variadics are not implicated; see `docs/generics.md`), iterated with
-/// `for x in items { result = \`${result}${x}\`; }`, reassigning a
-/// `String` local via template-string concatenation each turn. Called
-/// once from `main` with an already-concrete receiver it's fine; called
-/// from inside another function taking the array as its own parameter,
-/// it corrupts memory non-deterministically (sometimes wrong output,
-/// sometimes a crash, depending on unrelated heap state). Predates every
-/// change in this session — reproduces on plain arrays with no
-/// specialization, no `impl` blocks, and no variadics involved at all.
+/// Real, fixed memory-safety bug — a `for`/`match` arm bound by a bare
+/// catch-all `HirPattern::Binding` (every `for`-loop desugaring's own
+/// single arm, among other shapes) double-released its heap-typed
+/// scrutinee: `nether_mir::build::pattern::lower_match` tracks the
+/// scrutinee's one retained credit in *two* places — the match's own
+/// `match_scope` (so an arm that never names it, e.g. a literal-pattern
+/// arm, still eventually releases it) *and*, redundantly, the matching
+/// arm's own bindings scope, since `lower_pattern_bindings` hands a
+/// top-level `Binding` pattern the scrutinee's own local unchanged rather
+/// than a fresh copy. Both scopes' own release logic then fire for the
+/// *same* local, one retain paying for two releases — freeing a still-
+/// referenced string one call too early and corrupting whatever
+/// allocation reused that freed memory on a later call. Reproduces with a
+/// plain, non-generic, non-variadic `Array<String>` parameter whose loop
+/// body reassigns a `String` accumulator each iteration
+/// (`result = \`${result}${part}\`;`) — unrelated to generics,
+/// specialization, or variadics. Fixed by skipping the redundant
+/// arm-scope entry whenever a binding's own local is literally the
+/// scrutinee's (see `lower_match`'s own comment at the fix site).
 #[test]
-#[ignore]
-fn string_concatenation_by_reassignment_inside_a_loop_over_an_array_parameter_corrupts_memory() {
+fn string_concatenation_by_reassignment_inside_a_loop_over_an_array_parameter_no_longer_corrupts_memory(
+) {
     ensure_runtime_built();
     let dir = std::env::temp_dir().join(format!("nether_known_bug_test_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -192,12 +193,14 @@ fn joined(parts Array<String>) String {
     for part in parts {
         result = `${result}${part}`;
     }
-    result
+    return result;
 }
 
 fn main() {
     println(joined([]));
     println(joined(["a"]));
+    println(joined(["a", "b", "c"]));
+    println(joined(["a", "b", "c"]));
     println(joined(["a", "b", "c"]));
 }
 "#,
@@ -211,8 +214,13 @@ fn main() {
     let output = Command::new(result.executable_path.unwrap())
         .output()
         .unwrap();
-    // Expected once fixed. Today this either fails this assertion with
-    // garbled stdout or the whole process dies to a signal first.
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "\na\nabc\n");
+    assert!(output.status.success());
+    // Before the fix, the *second* repeated `["a", "b", "c"]` call already
+    // printed garbled bytes (a corrupted allocation reused from the
+    // previous call's prematurely freed string) or crashed outright.
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "\na\nabc\nabc\nabc\n"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

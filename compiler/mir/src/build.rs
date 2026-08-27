@@ -6,7 +6,7 @@ use nether_monomorphization::{
     MonoExpr, MonoExprKind, MonoFunction, MonoMatchArm, MonoModule, MonoStmtKind,
 };
 use nether_resolver::Definitions;
-use nether_typecheck::{alloc_kind, PrimitiveKind, Signatures, Type};
+use nether_typecheck::{alloc_kind, CaptureMode, PrimitiveKind, Signatures, Type};
 
 use crate::node::{
     BasicBlock, BlockId, CallTarget, Instr, Local, LocalDecl, MirFunction, Operand, Place,
@@ -100,13 +100,53 @@ impl<'a> FnBuilder<'a> {
     }
 
     fn build(mut self, f: &MonoFunction) -> MirFunction {
+        if f.is_extern {
+            // No Nether-side body exists to lower (`f.body` is a trivial
+            // placeholder, never read here) — only the signature's shape
+            // matters downstream, for `nether_codegen`'s declaration path.
+            let params = f
+                .params
+                .iter()
+                .map(|p| self.declare_local(p.ty.clone(), p.mutable))
+                .collect();
+            let entry = self.new_block();
+            self.blocks[entry.0 as usize].terminator = Some(Terminator::Unreachable);
+            let blocks = self
+                .blocks
+                .into_iter()
+                .enumerate()
+                .map(|(i, b)| BasicBlock {
+                    id: BlockId(i as u32),
+                    instrs: b.instrs,
+                    terminator: b.terminator.unwrap_or(Terminator::Unreachable),
+                })
+                .collect();
+            return MirFunction {
+                id: f.id,
+                name: f.name.clone(),
+                owner: f.owner,
+                is_closure: false,
+                is_async: false,
+                is_extern: true,
+                closure_captures: Vec::new(),
+                params,
+                ret: f.ret.clone(),
+                locals: self.locals,
+                blocks,
+                entry,
+            };
+        }
+
         let mut params = Vec::new();
         let mut param_scope = Vec::new();
         let mut closure_captures = Vec::new();
         for capture in &f.captures {
-            let local = self.declare_local(capture.ty.clone(), false);
+            let local = match capture.mode {
+                CaptureMode::ByValue => self.declare_local(capture.ty.clone(), false),
+                CaptureMode::ByRef => self.declare_local_aliased(capture.ty.clone()),
+            };
             self.bind_hir_local(capture.local, local);
-            closure_captures.push(local);
+            closure_captures.push((local, capture.mode));
         }
         if let Some(self_id) = f.self_local {
             let owner_ty = f.self_ty.clone().unwrap_or(Type::Error);
@@ -187,6 +227,7 @@ impl<'a> FnBuilder<'a> {
             owner: f.owner,
             is_closure: f.is_closure,
             is_async: f.is_async,
+            is_extern: false,
             closure_captures,
             params,
             ret: f.ret.clone(),
@@ -205,6 +246,29 @@ impl<'a> FnBuilder<'a> {
             mutable,
             alloc,
             needs_drop,
+        });
+        id
+    }
+
+    /// A `CaptureMode::ByRef` closure capture's own local (Stage 7,
+    /// `mut (...) => {...}`) — its storage aliases the *outer* local's
+    /// own memory (`nether_codegen::function::build_ordinary_prologue`
+    /// loads the outer local's address out of the environment field
+    /// instead of allocating fresh storage), so it never owns a fresh
+    /// reference to anything here, unlike an ordinary local of the same
+    /// `ty`. `needs_drop` is forced `false` regardless of `ty`'s own
+    /// managed-content-ness — `insert_arc` must never retain/release
+    /// this local, exactly as it already skips a `Type::Ref`/`MutRef`-
+    /// typed local, even though this local's own declared `ty` is the
+    /// plain element type, not a reference type, for the body's benefit.
+    fn declare_local_aliased(&mut self, ty: Type) -> Local {
+        let alloc = alloc_kind(&ty, self.defs);
+        let id = Local(self.locals.len() as u32);
+        self.locals.push(LocalDecl {
+            ty,
+            mutable: true,
+            alloc,
+            needs_drop: false,
         });
         id
     }

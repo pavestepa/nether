@@ -6,10 +6,14 @@ use nether_parser::parse_module;
 
 #[path = "parse_tests/async_syntax.rs"]
 mod async_syntax;
+#[path = "parse_tests/concurrency.rs"]
+mod concurrency;
 #[path = "parse_tests/expressions.rs"]
 mod expressions;
 #[path = "parse_tests/ownership.rs"]
 mod ownership;
+#[path = "parse_tests/unsafe_ffi.rs"]
+mod unsafe_ffi;
 
 /// Parses `source` and panics (printing every diagnostic) if parsing
 /// produced any — the common case for tests asserting a shape.

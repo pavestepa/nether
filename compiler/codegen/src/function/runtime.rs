@@ -1,57 +1,6 @@
 use super::*;
 
 impl<'ctx> FnCodegen<'_, 'ctx> {
-    pub(super) fn gen_completed_task(&self, output: Value<'ctx>, output_ty: &Type) -> Value<'ctx> {
-        let word = self.m.int_type(64);
-        let output_size = self.m.size_of(self.layout.llvm_type(output_ty));
-        let size = self
-            .m
-            .int_add(output_size, self.m.const_int(word, 16, false), "task_size");
-        let output_drop = self.func_ptr_or_null(self.shims.drop_shim(
-            self.m,
-            self.layout,
-            self.runtime,
-            output_ty,
-        ));
-        let task_drop = self
-            .runtime
-            .task_drop
-            .as_global_value()
-            .as_pointer_value()
-            .into();
-        let task = self
-            .m
-            .call(self.runtime.alloc, &[size, task_drop], "completed_task")
-            .expect("task allocation returns a payload pointer");
-        let poll = self
-            .runtime
-            .task_completed_poll
-            .as_global_value()
-            .as_pointer_value()
-            .into();
-        self.m.store(task, poll);
-        let drop_slot =
-            self.m
-                .gep_bytes(task, self.m.const_int(word, 8, false), "task_output_drop");
-        self.m.store(drop_slot, output_drop);
-        let output_slot = self
-            .m
-            .gep_bytes(task, self.m.const_int(word, 16, false), "task_output");
-        self.store_at(output_slot, output_ty, output);
-        task
-    }
-
-    pub(super) fn gen_await(&self, task: &Operand, output_ty: &Type) -> Value<'ctx> {
-        let task = self.gen_operand(task);
-        self.m.call(self.runtime.task_block_on, &[task], "");
-        let output = self.m.gep_bytes(
-            task,
-            self.m.const_int(self.m.int_type(64), 16, false),
-            "task_output",
-        );
-        self.load_value(output, output_ty)
-    }
-
     pub(super) fn gen_pack_existential(&self, methods: &[Operand]) -> Value<'ctx> {
         let word = self.m.int_type(64);
         let size = self
@@ -124,9 +73,7 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
             .indirect_call(fn_ty, code, &values, "witness_call")
             .unwrap_or_else(|| self.gen_unit());
         if is_aggregate(dest_ty, self.defs()) {
-            let spill = self
-                .m
-                .alloca(self.layout.llvm_type(dest_ty), "witness_result");
+            let spill = self.entry_alloca(self.layout.llvm_type(dest_ty), "witness_result");
             self.m.store(spill, result);
             spill
         } else {
@@ -178,6 +125,23 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
                 self.m
                     .call(self.runtime.task_spawn, &[task], "spawned_task")
                     .expect("task spawn returns a task")
+            }
+            "__thread_spawn" => {
+                // `args[0]` is a Nether closure's already-constructed,
+                // ARC-managed environment — its own field 0 is the code
+                // pointer (`build_closure_env`'s own layout, mirrors
+                // `CallTarget::Dynamic`'s identical technique for an
+                // ordinary dynamic closure call, `operation.rs`).
+                let env = self.gen_operand(&args[0]);
+                let code = self.m.load(self.m.ptr_type(), env, "thread_code");
+                self.m
+                    .call(self.runtime.thread_spawn, &[env, code], "spawned_thread")
+                    .expect("thread spawn returns a handle")
+            }
+            "__thread_join" => {
+                let handle = self.gen_operand(&args[0]);
+                self.m.call(self.runtime.thread_join, &[handle], "");
+                self.gen_unit()
             }
             "__timer_sleep" => {
                 let millis = self.gen_operand(&args[0]);
@@ -232,7 +196,7 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
             other => panic!("a weak read's result must be an Option, found {other:?}"),
         };
         let el = self.layout.enum_layout(option_ty);
-        let out_slot = self.m.alloca(self.m.ptr_type(), "upgraded_ptr");
+        let out_slot = self.entry_alloca(self.m.ptr_type(), "upgraded_ptr");
         // `nether_rt_arc_weak_upgrade` returns `i8` (0/1), not LLVM's
         // native `i1` — see `runtime.rs`'s module docs; `select` needs an
         // actual `i1` condition.
@@ -248,7 +212,7 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
             .m
             .int_cast(has_value_i8, self.m.bool_type(), false, "has_value");
 
-        let result_slot = self.m.alloca(el.ty.into(), "upgrade_result");
+        let result_slot = self.entry_alloca(el.ty.into(), "upgrade_result");
         let tag_ptr = self.m.struct_gep(el.ty, result_slot, 0, "tag_ptr");
         // `Option`'s builtin variant order is `Some = 0, None = 1` (see
         // `nether_resolver::def::builtin_definitions`).
@@ -288,7 +252,7 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
             "push" => {
                 let elem_ty = self.operand_ty(&args[0]);
                 let elem_val = self.gen_operand(&args[0]);
-                let elem_slot = self.m.alloca(self.layout.llvm_type(&elem_ty), "push_elem");
+                let elem_slot = self.entry_alloca(self.layout.llvm_type(&elem_ty), "push_elem");
                 self.store_at(elem_slot, &elem_ty, elem_val);
                 self.m
                     .call(self.runtime.array_push, &[recv, elem_slot], "")
@@ -310,7 +274,7 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
             other => panic!("Array::pop's result must be an Option, found {other:?}"),
         };
         let el = self.layout.enum_layout(option_ty);
-        let out_slot = self.m.alloca(self.layout.llvm_type(&elem_ty), "pop_elem");
+        let out_slot = self.entry_alloca(self.layout.llvm_type(&elem_ty), "pop_elem");
         // `nether_rt_array_pop` returns `i8` (0/1), not LLVM's `i1` — see
         // `runtime.rs`'s module docs on why `bool` crosses this ABI
         // boundary as a byte; `select` needs an actual `i1` condition.
@@ -322,7 +286,7 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
             .m
             .int_cast(has_value_i8, self.m.bool_type(), false, "has_value");
 
-        let result_slot = self.m.alloca(el.ty.into(), "pop_result");
+        let result_slot = self.entry_alloca(el.ty.into(), "pop_result");
         let tag_ptr = self.m.struct_gep(el.ty, result_slot, 0, "tag_ptr");
         // `Option`'s builtin variant order is `Some = 0, None = 1` (see
         // `nether_resolver::def::builtin_definitions`).

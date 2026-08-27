@@ -32,13 +32,17 @@ pub enum AllocKind {
 /// type's `alloc_kind` — in Stage 1, `:T` shares `T`'s ARC representation
 /// (language-spec §3.2). References (`Type::Ref`/`Type::MutRef`) are
 /// themselves always stack-representable pointers, the same treatment as
-/// `Weak` below.
+/// `Weak` below — and so are raw pointers (`Type::RawConstPtr`/
+/// `Type::RawMutPtr`, language-spec §17, Stage 5), for the same reason.
 pub fn alloc_kind(ty: &Type, defs: &Definitions) -> AllocKind {
     match ty {
         Type::Primitive(_) | Type::Const(_) | Type::FixedArray(_, _) => AllocKind::Stack,
-        Type::String | Type::Array(_) | Type::Any(_, _) | Type::Some(_, _) | Type::Task(_) => {
-            AllocKind::Heap
-        }
+        Type::String
+        | Type::Array(_)
+        | Type::Any(_, _)
+        | Type::Some(_, _)
+        | Type::Task(_)
+        | Type::Thread(_) => AllocKind::Heap,
         Type::Struct(id, _) | Type::TupleStruct(id, _) => {
             if is_pascal_case(defs.get(*id).name.as_str()) {
                 AllocKind::Heap
@@ -54,6 +58,9 @@ pub fn alloc_kind(ty: &Type, defs: &Definitions) -> AllocKind {
         // uniform.
         Type::Function(_, _) => AllocKind::Heap,
         Type::Weak(_) | Type::Ref(_) | Type::MutRef(_) => AllocKind::Stack,
+        // A raw pointer, like a reference, is a bare pointer value with no
+        // ARC participation at all (language-spec §17, Stage 5).
+        Type::RawConstPtr(_) | Type::RawMutPtr(_) => AllocKind::Stack,
         Type::Unique(inner) => alloc_kind(inner, defs),
         Type::Generic(_) | Type::Associated(_, _) => AllocKind::Stack, // meaningless before substitution; never queried before monomorphization in practice
         Type::Trait(_) | Type::Never | Type::Error => AllocKind::Stack,

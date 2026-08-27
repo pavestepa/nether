@@ -5,7 +5,7 @@ fn const_generic_sizes_a_fixed_array() {
     assert_ok(
         r#"
 fn consume<const N usize>(values {i32, N}) i32 { return 7; }
-fn main() { let result i32 = consume<3>([1, 2, 3]); }
+fn main() { let result i32 = consume<3>({1, 2, 3}); }
 "#,
     );
 }
@@ -25,7 +25,7 @@ fn fixed_array_length_mismatch_is_rejected() {
     assert_err(
         r#"
 fn consume<const N usize>(values {i32, N}) i32 { return 7; }
-fn main() { consume<3>([1, 2]); }
+fn main() { consume<3>({1, 2}); }
 "#,
         "fixed array expects 3 element(s), found 2",
     );

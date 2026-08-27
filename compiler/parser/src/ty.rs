@@ -35,6 +35,30 @@ impl Parser {
                     TypeExpr::Unique(Box::new(inner), span)
                 }
             }
+            Token::Punct(Punct::Star) => {
+                self.bump();
+                if self.eat_keyword(Keyword::Mut) {
+                    let inner = self.parse_type_expr();
+                    let span = start.to(inner.span());
+                    TypeExpr::RawMutPtr(Box::new(inner), span)
+                } else if self.eat_keyword(Keyword::Const) {
+                    let inner = self.parse_type_expr();
+                    let span = start.to(inner.span());
+                    TypeExpr::RawConstPtr(Box::new(inner), span)
+                } else {
+                    let span = self.peek_span();
+                    self.error(
+                        span,
+                        format!(
+                            "expected `mut` or `const` after `*` in a raw pointer type, found {:?}",
+                            self.peek()
+                        ),
+                    );
+                    let inner = self.parse_type_expr();
+                    let span = start.to(inner.span());
+                    TypeExpr::RawConstPtr(Box::new(inner), span)
+                }
+            }
             Token::Keyword(Keyword::Weak) => {
                 self.bump();
                 let inner = self.parse_type_expr();

@@ -38,8 +38,8 @@ system — not one or the other.
 | Memory management | **both** ARC (for `T`) and unique ownership + borrow checking (for `:T`) — the programmer chooses per type/binding, not the language globally. Stage 2 enforces moves, borrow exclusivity, returned-reference origins, callable summaries, and ordinary last-use shortening |
 | Polymorphism | traits, static dispatch by default; existential (`any Trait`) and opaque (`some Trait`) types for the rest |
 | Generics | monomorphized in release builds; dictionary-safe bodies use witness-table dispatch in development builds, with monomorphized fallback for layout-dependent bodies |
-| Concurrency | async/await over a Tokio-backed runtime, plus raw OS threads *(not yet implemented — Stage 4)* |
-| Unsafe code | explicit `unsafe`, raw pointers, C ABI FFI *(not yet implemented — Stage 5)* |
+| Concurrency | async/await over a Tokio-backed runtime **(Stage 4 — done)**, plus real parallel OS threads with compiler-derived `Send`/`Sync` and atomic ARC **(Stage 6 — done)** |
+| Unsafe code | explicit `unsafe`, raw pointers, C ABI FFI **(Stage 5 — done)** |
 | Lifetimes | no explicit lifetime syntax; inferred origins, callable summaries, and loop/local-closure-sensitive last-use shortening power borrow checking |
 
 Everything below assumes these are the only permanent design constraints:
@@ -61,15 +61,18 @@ explaining how to migrate (rename the file). The package manifest is
 `Nether.toml` — a TOML file, not a `.nr` source file *(package manifest
 itself: not yet implemented — Stage 6)*.
 
-### 2.2 Comments **[current behavior, unchanged by Stage 1]**
+### 2.2 Comments **[block comments: Stage 7]**
 
 ```
 // line comment
 /// doc comment (attaches to the following item)
+/* block comment, spans lines, does not nest */
 ```
 
-Block comments (`/* ... */`) remain a documented future extension, not yet
-part of the grammar.
+Block comments (`/* ... */`) are discarded entirely, exactly like a plain
+`//` comment — there is no block-comment equivalent of `///` doc comments.
+They do not nest: the first `*/` closes the comment regardless of any `/*`
+seen since. An unterminated block comment is a diagnostic.
 
 ### 2.3 Identifiers and casing **[Stage 1 changes the mechanism, not the convention]**
 
@@ -85,7 +88,7 @@ load-bearing, but its role has changed from the pre-rewrite MVP:
   **validated naming convention**, checked against a type's *resolved*
   representation category — see §8.
 
-### 2.4 Literals **[current behavior, unchanged by Stage 1]**
+### 2.4 Literals **[fixed-array literal syntax: Stage 7]**
 
 - Integers: `123`, `0`.
 - Floats: `1.0`, `0.5`.
@@ -95,15 +98,45 @@ load-bearing, but its role has changed from the pre-rewrite MVP:
 - Template string: `` `text ${expr} text` `` — interpolation via `${...}`,
   multiline supported, the `${...}` body is parsed as an ordinary Nether
   expression.
-- Arrays: `[]` (empty), `[1, 2, 3]` (literal elements). The expected type
-  selects the representation: `Array<T>` builds a growable runtime array,
-  while `{T, N}` builds an inline fixed array and checks the literal length.
+- Growable array: `[]` (empty), `[1, 2, 3]` (literal elements) — always
+  builds `Array<T>`, a growable runtime array.
+- Fixed array: `{1, 2, 3}` — always builds an inline `{T, N}` fixed array
+  and checks the literal length against the expected `N`. `[...]` and
+  `{...}` are two syntactically distinct literal forms with two distinct,
+  non-coercing types; a `{1, 2, 3}` value cannot be used where `[i32]` is
+  expected, and vice versa.
 
-### 2.5 Semicolons **[current behavior, unchanged by Stage 1]**
+### 2.5 Semicolons **[newline-aware optional semicolons: Stage 7]**
 
-Semicolons are still required statement terminators today; newline-aware
-optional semicolons are specified for the language but not yet implemented
-(unstaged — tracked in the roadmap's syntax-cleanup bucket).
+Most statement-terminating semicolons are optional and inferred from
+newlines: a Go-style automatic semicolon insertion (ASI) rule ports
+directly — if the last token before a newline is one that can plausibly
+end a statement (an identifier, a literal, `self`, `return`/`break`/
+`continue`, or a closing `)`/`]` that didn't just close a `#[...]`
+attribute), the lexer synthesizes a real `;` token in its place. Every
+later compiler stage sees this exactly like a semicolon the programmer
+typed; nothing past the lexer knows it was implicit.
+
+Two consequences carry over directly from Go's own version of this rule:
+
+- A method chain continued on the next line must not start that line
+  with a leading `.` — `foo\n    .bar()` becomes two statements (the
+  second one, starting with `.`, is a parse error). Keep `.bar()` on the
+  same line as `foo`, or terminate the first line explicitly.
+- Unlike Go, a closing `}` is deliberately **not** a trigger — Nether's
+  grammar has nowhere that tolerates a stray/empty statement, and
+  inserting a semicolon after every block-closing `}` would also risk
+  silently changing a block's own tail-expression value. The practical
+  gap this leaves: a `let` binding (or other statement requiring an
+  explicit terminator) whose value is a struct literal or fixed-array
+  literal ending in `}`, on its own line, still needs an explicit `;` —
+  e.g. `let p = Point { x = 1, y = 2 };`. Bare block-like expressions
+  used as whole statements (`if`/`match`/`while`/`for`/`loop`) never
+  needed a trailing `;` in the first place (§2.6) and are unaffected.
+- A `[` immediately preceded by `#` (i.e. opening a `#[...]` attribute)
+  has its own closing `]` excluded from the trigger set too, so an
+  attribute is never separated from the item it decorates by a
+  synthesized semicolon even when they're on different lines.
 
 ### 2.6 No arbitrary block expressions **[Stage 1]**
 
@@ -131,7 +164,7 @@ orthogonal:
 
 | | Ordinary | Uniquely owned |
 |---|---|---|
-| **Heap/reference category** (`T`, e.g. `User`) | `T` — ARC reference. Assignment copies the reference (aliasing); mutation needs `mut` permission but not exclusivity. Atomic refcounts are deferred to Stage 6. | `:T` — uniquely owned, unrefcounted heap value. Stage 2 enforces moves, live-borrow exclusivity, returned-reference origins, callable summaries, and last-use shortening. |
+| **Heap/reference category** (`T`, e.g. `User`) | `T` — ARC reference. Assignment copies the reference (aliasing); mutation needs `mut` permission but not exclusivity. Refcounts are atomic (Stage 6, §18) — safe to touch from two threads at once. | `:T` — uniquely owned, unrefcounted heap value. Stage 2 enforces moves, live-borrow exclusivity, returned-reference origins, callable summaries, and last-use shortening. |
 | **Inline/value category** (`t`, e.g. `i32`, `color`) | `t` — ordinary inline value. Implicitly copyable, normal value semantics. | `:t` — uniquely owned inline value. Same machine representation as `t`; move-only *semantically* — use-after-move is a compile error *(enforced — Stage 2's move checker, as above)*. |
 
 The representation category comes from **how the type is defined**:
@@ -697,7 +730,7 @@ enum Color {
 
 ---
 
-## 15. Modules **[current behavior, unchanged by Stage 1 except file extension]**
+## 15. Modules **[Stage 6 — package manifest done]**
 
 ```
 mod user;
@@ -707,13 +740,35 @@ use self.user.User;
 For `mod user;`, the driver looks for `user.nr` or `user/mod.nr` relative to
 the declaring file (§2.1 — `.nt` is rejected). `self`, `super`, `crate` are
 the relative roots. `stdlib.*`/`std.*` resolve from the bundled prelude
-root without a `mod stdlib;` declaration. The package manifest
-(`Nether.toml`) and a real package graph are **not yet implemented — Stage
-6**; today there is only a single entry file and its local module tree.
+root without a `mod stdlib;` declaration.
+
+### `Nether.toml` package manifest
+
+```toml
+[package]
+name = "app"
+
+[dependencies]
+mathlib = { path = "../mathlib" }
+```
+
+An optional `Nether.toml`, found by walking up from the entry file's own
+directory (the same "search ancestors" convention Cargo itself uses),
+declares local-path dependencies — no version resolution, no registry,
+no lockfile, purely local paths. Each `[dependencies]` entry becomes an
+**external root**: usable via `use name.Thing;` with no `mod name;`
+declaration needed, or mounted explicitly with `mod name;`, exactly like
+the bundled `stdlib`/`std` roots always were — a dependency gets its own
+independent `self`/`crate`/`super` namespace, rooted at its own
+`<path>/mod.nr`. A manifest-less compile keeps working exactly as it
+always has; `Nether.toml` is opt-in, never required. A declared
+dependency whose path doesn't resolve to a real `mod.nr` produces an
+ordinary "cannot find module" diagnostic, anchored at the `use`/`mod`
+site that referenced it.
 
 ---
 
-## 16. Closures **[Stage 2 capture semantics]**
+## 16. Closures **[Stage 2 capture semantics; mutable captures: Stage 7]**
 
 ```
 let add = (a i32, b i32) => {
@@ -727,23 +782,336 @@ closure is rejected with a diagnostic requiring `move`. Reference captures
 remain borrows; for a locally bound closure their origin stays live through
 that closure's last use.
 
+`mut (...) => { ... }` captures every `mut`-declared outer local the body
+touches by mutable reference instead of by value, so mutating it inside the
+closure body writes back to the outer binding once the closure returns:
+
+```
+let mut count = 0;
+let mut increment = mut () => {
+    count = count + 1;
+};
+increment();
+increment();
+println(`${count}`);   // 2
+```
+
+Without `mut`, capturing a `mut` local is unchanged from before this stage:
+the closure gets its own private copy, and mutating it never affects the
+outer binding. `move` and `mut` occupy the same keyword slot before a
+closure's parameter list and cannot combine on one closure.
+
+A `mut`-capturing closure holds the raw address of each by-reference
+capture's own storage for as long as the closure value is alive — sound only
+while the closure never outlives the stack frame that storage lives in.
+Returning such a closure directly (`return mut () => { ... };`) is rejected
+with a diagnostic, mirroring the existing returned-reference-origin check for
+`:&T`/`:&mut T` (§3.1), except unconditionally: unlike a reference parameter
+(safe to return because it already points further up the call stack), a
+captured *plain* local's own address is tied to this function's frame
+regardless of whether it arrived as a parameter or was declared with a
+`let`.
+
+Two v1 scope limits, both documented rather than silently unsound:
+
+- Only a closure literal written directly in the `return` expression is
+  checked. Storing one in a `let` and returning that binding instead, or
+  smuggling it out through a struct field, an array, or a plain function
+  argument, is not tracked.
+- A `mut` capture of a heap-category local (a `struct`, `String`,
+  `Array<T>`, ...) silently stays by-value rather than being promoted —
+  not an error, since a by-value capture already lets the closure mutate
+  the shared object's fields or call mutating methods on it, `mut` or not.
+  Only *reassigning the captured binding itself* from inside the closure
+  fails to write back: forming "the address of a heap-typed variable's own
+  storage slot" (as opposed to "the address of the object a reference
+  already points to," which the existing `&raw`/stored-`:&mut T` machinery
+  already computes) needs a distinct primitive this stage doesn't build.
+
 ---
 
-## 17. Unsafe, raw pointers, FFI **[not yet implemented — Stage 5]**
+## 17. Unsafe, raw pointers, FFI **[Stage 5 — done]**
 
-`unsafe { ... }` blocks, `unsafe fn`, `*mut T`/`*const T` raw pointers (and
-their owned forms `:*mut T`/`:*const T`), and `extern "C"` FFI declarations
-are specified for the full language but do not exist in the compiler yet.
+```
+extern "C" {
+    fn abs(n i32) i32;
+}
+
+#[link(name = "m")]
+extern "C" {
+    fn sqrt(x f64) f64;
+}
+
+unsafe fn danger(p *mut i32) i32 {
+    return *p;
+}
+
+fn main() {
+    let mut x = 4;
+    let p = &raw mut x;
+    unsafe { *p = 9; }
+    println(`${unsafe { danger(p) }}`);
+    println(`${unsafe { abs(-3) }}`);
+    println(`${unsafe { sqrt(16.0) }}`);
+}
+```
+
+`*const T` and `*mut T` are raw pointer types with no ownership and no
+borrow-checked aliasing guarantee — unlike `:&T`/`:&mut T`, nothing tracks
+whether the pointee is still alive or exclusively held. Their owned forms
+`:*const T`/`:*mut T` parse and behave like any other `:`-prefixed type
+(free, since a raw pointer is already a bare address — no distinct
+unique-inline layout is needed). A `*mut T` value coerces to `*const T`
+implicitly (a mutable pointer is always usable where an immutable one is
+expected); the reverse never coerces.
+
+`&raw const expr` / `&raw mut expr` computes the address of a *place*
+(a local, or a field/element/dereference chain rooted in one) as
+`*const T`/`*mut T`, bypassing the borrow checker entirely — forming a raw
+pointer carries no aliasing guarantee to violate, so it is never itself
+unsafe. Only *using* one is: prefix `*expr` dereferences a raw pointer,
+both as a read and as an assignment target (`*p = value;`, which requires
+specifically `*mut T` — writing through a `*const T` is rejected
+regardless of unsafe context), and always requires an enclosing `unsafe`
+block or an `unsafe fn`'s own body. This split mirrors why address-of and
+dereference are treated differently everywhere else in the design: the
+pointer's mere existence is safe, only reading or writing through it can
+violate memory safety.
+
+`unsafe fn`/`unsafe method(...)` marks a function whose entire body is an
+implicit unsafe context. `unsafe { ... }` is a block expression enabling
+the same context locally; it has no runtime effect of its own — purely a
+compile-time permission gate that is erased entirely once checking
+completes. Three operations require an unsafe context: dereferencing a
+raw pointer, calling an `unsafe fn`, and calling an `extern "C" fn` (every
+FFI boundary crossing is inherently unsafe, since the compiler cannot
+verify the C side honors Nether's own invariants). Forming a raw pointer
+does not.
+
+`extern "C" { fn name(params) ret; ... }` declares one or more C-ABI
+functions with no Nether-side body — calling one always requires an
+unsafe context. An optional `#[link(name = "libname")]` immediately
+before the block requests `-llibname` at link time; omit it when the
+symbol is already provided by libc (linked automatically). `extern "C"
+fn`s can never be generic (a real C symbol can't be). Their parameter and
+return types are restricted to what can genuinely cross a C ABI boundary:
+a numeric/`bool` primitive (`char`/`String` are excluded — neither is a
+real C type), a raw pointer of any pointee type, or `()` (return position
+only, mapped to `void`). Aggregates (structs, tuples, arrays, enums),
+closures, `Weak`, `Task`, `Any`/`Some`, and bare `:&T`/`:&mut T`
+references are all rejected — an aggregate crosses the boundary only via
+an explicit raw pointer to it, never by value. This is a deliberate
+scoping decision, not an oversight: Nether's own internal calling
+convention already forces every stack aggregate across a function
+boundary as a pointer regardless of size, which is not real System V
+AMD64/AAPCS64 struct-register-classification; excluding aggregates from
+FFI signatures entirely sidesteps that gap rather than risking a silent
+miscompile. Implementing genuine by-value aggregate C-ABI passing remains
+future work. `bool` crosses the boundary as a real C `_Bool`-width byte,
+not the compiler's own internal single-bit representation, matching every
+other C-ABI boundary in this codebase.
 
 ---
 
-## 18. Async/await, threads **[not yet implemented — Stage 4]**
+## 18. Async/await, threads, and concurrency safety **[Stage 4/6 — done]**
 
-`async fn`, prefix `await expr`, `task.spawn(...)` (Tokio-backed) and
-`thread.spawn(...)` (raw OS threads) are specified for the full language
-but do not exist in the compiler yet. `Send`/`Sync` compiler-understood
-thread-safety traits and atomic ARC are bundled with this stage in the
-roadmap (Stage 6) since a safe async/thread story depends on both.
+```
+async fn fetch() String {
+    await timer.sleep(1);
+    return "ready";
+}
+async fn main() {
+    let pending = task.spawn(fetch());
+    let value String = await pending;
+    println(value);
+}
+```
+
+`async fn` (a free function, or a method inside `impl`/`trait` — `async
+run(self) { ... }`, no `fn` keyword on the method form) declares a
+function whose call expression produces a `Task<T>` rather than running
+its body immediately, where `T` is the function's own declared return
+type (`()` if none is written). Calling an `async fn` — with or without
+`task.spawn` — always constructs this `Task<T>`; nothing about the call
+itself blocks or runs the body.
+
+Prefix `await expr` requires `expr` to have type `Task<T>` and evaluates
+to `T`, driving the task to completion (see "Suspension and polling"
+below) as a side effect. `await` is a compile-time error outside an
+`async fn` body — there is no implicit top-level executor a plain `fn`
+could block on.
+
+`task.spawn(expr)` requires `expr` to have type `Task<T>`, schedules that
+task for independent progress, and itself evaluates to the same
+`Task<T>` — spawning does not consume or replace the value; `await`ing
+either the original expression's own binding or a separately spawned
+handle observes the same eventual output. Like `await`, `task.spawn` is
+only valid inside an `async fn` body: its real scheduling needs an
+already-active runtime (see below), which only exists once some `async
+fn` — ultimately `async fn main`, the compiler's own driver of the
+program's root task — is on the call stack.
+
+`timer.sleep(millis)` (called either as `timer.sleep(...)` or
+`await timer.sleep(...)`) returns a `Task<()>` that becomes ready once at
+least `millis` milliseconds have elapsed. It is a native, runtime-backed
+task, not compiler-generated, but shares the exact same `Task<T>` type
+and polling contract as any `async fn`'s own task — `task.spawn`/`await`
+treat it identically to a compiler-generated one.
+
+**Suspension and polling.** A `Task<T>` is a real suspended computation,
+not a wrapper around an already-computed value: an `async fn`'s body only
+actually starts running the first time its task is polled, and each
+`await` inside it is a genuine suspension point — if the awaited
+sub-task isn't ready yet, the whole task returns "not ready" up to
+*its* own poller rather than blocking a thread, and resumes exactly
+where it left off (with every local variable's value intact) the next
+time it's polled. `await`, `task.spawn`, and the program's own root task
+(`async fn main`) are the only three things that ever poll a task:
+`await` polls once and, if not ready, suspends its own enclosing task in
+turn (propagating "not ready" up the call chain); `task.spawn` hands the
+task to the runtime for independent background polling; `main`'s own
+task is driven to completion by the compiler-generated entry point once
+the program starts. A task that has already completed is safe to poll
+again (by whichever of these three reaches it last) — doing so simply
+observes completion again, never re-runs the task's body.
+
+**Scheduling model.** Every task, spawned or not, makes progress
+*concurrently* — interleaved with other tasks in a single-threaded,
+cooperative fashion — never in true parallel across OS threads. This
+means two `task.spawn`ed tasks can genuinely finish out of program order
+(a task that sleeps for less time can complete before one spawned
+earlier that sleeps longer), but Nether values captured by two different
+tasks are never *simultaneously* accessed from two different threads. A
+real `thread.spawn`ed OS thread, below, is a genuinely different,
+parallel execution model — the two never interact: a `Task<T>` can never
+cross a `thread.spawn` boundary (see `Send`, below).
+
+**Dropping a task.** A `Task<T>` that's discarded without ever being
+`await`ed to completion — never polled at all, or polled and found not
+ready one or more times before being dropped — is released like any
+other heap value; nothing further of its body runs. Locals the task's
+body had already computed and stored (bare heap-kind values held across
+an `await`) are released along with it. One documented limitation: a
+value nested inside a stack-kind aggregate local (a `Tuple`, `enum`, or
+non-`Pascal`-cased `struct`) held across an `await` is not guaranteed to
+be released correctly if the frame is dropped while suspended — full
+support needs per-suspension-point liveness tracking this stage does not
+yet build; this does not affect any directly heap-kind local (a
+`String`, `Array<T>`, `Pascal`-cased `struct`, or `Task<T>` itself),
+which is always handled correctly.
+
+### Atomic ARC
+
+`runtime/arc`'s strong/weak reference counts are atomic — a heap value
+can safely have its refcount touched from two different OS threads at
+once (`thread.spawn`, below, or a `weak T` read racing a concurrent
+final release). Retaining is a relaxed increment; the count-reaching-
+zero release path uses release/acquire ordering before actually running
+a drop callback or freeing memory, and the dealloc decision (strong
+count vs. weak count both reaching zero) is funneled through a single
+counter's fetch-subtract — the same design `std::sync::Arc`/`Weak` use,
+for the same reason: two independent counters each reading the other and
+racing to decide would double-free under real concurrency. `:T` (unique
+values) participate in none of this — single ownership by construction,
+never a race target.
+
+### `thread.spawn` — real OS threads
+
+```
+struct Counter { value i32 }
+unsafe impl Counter Send { }
+
+fn main() {
+    let counter = Counter { value = 7 };
+    let handle = thread.spawn(move () => {
+        println(`from a real OS thread: ${counter.value}`);
+    });
+    handle.join();
+    println("joined");
+}
+```
+
+`thread.spawn(move () => { ... })` requires syntactically a zero-
+parameter `move` closure literal, and spawns it on a genuine, parallel
+OS thread (`std::thread::spawn` underneath) — usable from *any* function,
+sync or async, since it has no dependency on the `async`/`task.spawn`
+runtime at all. It returns a `Thread<T>` handle; `.join(self) T` blocks
+the calling thread until the spawned one finishes and returns its
+result. **v1 scope decision:** the closure must return `()` — an
+arbitrary `T` would need a per-call-site result-boxing wrapper in
+codegen (mirroring `Task<T>`'s own frame machinery), out of this stage's
+scope; `.join()` is written generically for forward compatibility, but
+only `Thread<()>` is ever actually constructed today.
+
+Every value the closure captures must be `Send` (below) — checked at the
+`thread.spawn` call site, not deferred to whatever `std::thread::spawn`
+itself would (or wouldn't) catch. `Task<T>` is never `Send`: it stays
+tied to the single, cooperative runtime it was polled on.
+
+### `Send`/`Sync` — compiler-derived, auto-trait semantics
+
+Unlike `Eq`/`Hash`/`Clone` (explicit opt-in — an `impl TypeName Eq { }`
+you write to request compiler-derived behavior), `Send`/`Sync` are
+**auto-derived**: computed structurally, true by default, false only
+where a field makes it unsafe. The only way to *declare* either at all
+is `unsafe impl TypeName Send { }` / `unsafe impl TypeName Sync { }` — a
+pure marker, no body — asserting an override the compiler could not
+otherwise prove; a plain (non-`unsafe`) `impl TypeName Send { }` is
+rejected outright, since asserting either is inherently an unverifiable
+promise.
+
+`Send` — "may this value be moved to another thread and used there,
+with no further access to *this* handle from the original thread" — for
+an ARC-domain (`T`) type requires every field be both `Send` **and**
+`Sync` (mirrors `Arc<T>: Send` needing `T: Send + Sync`: other live
+handles to the same object may remain on the origin thread even after
+one moves); a unique (`:T`) type needs only `Send` fields (mirrors
+`Box<T>: Send` needing only `T: Send` — single ownership, no aliasing
+hazard). Primitives, `String`, tuples/fixed-arrays of `Send` elements,
+and `Thread<T>` (if `T: Send`) are `Send` by default; raw pointers, bare
+`:&T`/`:&mut T` references, closures, `Task<T>`, and existentials
+(`any`/`some`) never are.
+
+`Sync` — "may a shared handle to this value be used concurrently from
+two threads at once" — is far stricter, and is where the two traits
+genuinely diverge from a naive Rust-mirroring reading: an ordinary `T`
+can have any number of live ARC handles, and *any one* of them can
+mutate a field in place (`mut self` methods, `d.field = value` on a
+`mut` binding) with no cross-alias exclusivity the language enforces —
+unlike `std::sync::Arc<T>`, which only ever exposes `&T` and needs
+explicit interior mutability to write through it at all. Proving a given
+nominal type is never mutated anywhere in the program would need real
+whole-program analysis, which this design deliberately avoids. So every
+nominal type (`struct`/`enum`, and the built-in `Array<T>`) is `Sync`
+**only** via `unsafe impl` — never auto-derived, regardless of its
+fields. Purely structural composites (tuples, fixed-size arrays) have no
+identity of their own to alias, so they recurse structurally instead;
+`String` is a base case despite being heap-represented, since its entire
+runtime API only ever produces a *new* allocation, never mutates an
+existing one.
+
+### Spawned-borrow diagnostics
+
+```
+struct Dog { name String }
+fn main() {
+    let dog: Dog = :Dog { name = "Rex" };
+    let r: &Dog = dog;
+    thread.spawn(move () => {
+        println(r.name); // error: borrow of a local owned by this function
+    });
+}
+```
+
+Both `task.spawn` and `thread.spawn` reject capturing a reference whose
+origin is a local owned *by the spawning function itself* — a detached
+task/thread's lifetime is independent of that function's own stack
+frame, so such a borrow could outlive what it points at. A reference
+received as a parameter from further up the call stack remains allowed,
+by the same reasoning that already makes returning it sound. No `'static`
+lifetime syntax is involved anywhere — this reuses the same origin
+tracking (§2's use-counted, lifetime-syntax-free borrow model) that
+already governs returned references, just applied at a new trigger point.
 
 ---
 
@@ -767,9 +1135,9 @@ Available without `use`: `println`, `print`, `Option`/`Some`/`None`,
 - `:T` uses an unrefcounted unique allocation; moves do not retain, final
   destruction frees the sole allocation, and `:T -> T` promotes into ARC.
 - `weak T` never affects its referent's retain count.
-- Atomic ARC (thread-safe refcounting) is specified for the full language
-  but not yet implemented — the runtime remains single-threaded until
-  Stage 6.
+- Atomic ARC (thread-safe refcounting, Stage 6): retain/release/weak
+  counts are safe to touch from two different OS threads at once —
+  needed the moment a value can cross a `thread.spawn` boundary (§18).
 
 Full retain/release insertion rules live in
 [`../architecture/arc-model.md`](../architecture/arc-model.md).
@@ -800,10 +1168,11 @@ Full retain/release insertion rules live in
 | `default impl` with concrete instance-method specialization | **Stage 3 — done** |
 | Associated types/constants, const generics, `any`/`some` | **Stage 3 — done** |
 | Development-mode witness-table generics dispatch | **Stage 3 — done** |
-| async/await, Tokio runtime bridge | Stage 4 |
-| unsafe, raw pointers, C ABI FFI | Stage 5 |
-| Atomic ARC, `Send`/`Sync`, `Nether.toml` package manifest, CLI `run`/`test`/`--release`/`--emit-*` | Stage 6 |
-| Optional/newline-aware semicolons, block comments, inline-array vs. vector literal distinction, variadics-as-fixed-array, mutable closure captures | unstaged syntax cleanup — see roadmap |
+| `async fn`/`await`, real compiler-generated state machines (§18) | **Stage 4 — done** |
+| `task.spawn(...)`, real concurrent Tokio-backed scheduling (§18) | **Stage 4 — done** |
+| `unsafe`, raw pointers (`&raw const`/`&raw mut`, `*expr`), `extern "C"`/`#[link]` FFI (§17) | **Stage 5 — done** |
+| Atomic ARC, `Send`/`Sync` (§18), raw OS threads (`thread.spawn`, §18), spawned-borrow diagnostics (§18), `Nether.toml` package manifest (§15), CLI `run`/`test`/`--release`/`--emit-*` | **Stage 6 — done** |
+| Newline-aware optional semicolons (§2.5), block comments (§2.2), fixed-array vs. growable-array literal distinction (§2.4), variadics-as-fixed-array (§8.7), mutable closure captures (§16) | **Stage 7 — done** |
 
 See [`../architecture/roadmap.md`](../architecture/roadmap.md) for the full
 staged plan and the keep/refactor/rewrite/delete classification of existing

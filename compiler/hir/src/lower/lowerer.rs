@@ -13,6 +13,15 @@ pub(super) struct Lowerer<'a> {
     pub(super) methods: &'a HashMap<(DefId, Symbol, ReceiverDomain), MethodFnSet>,
     pub(super) locals_map: HashMap<ResolverLocalId, HirLocalId>,
     pub(super) next_local: u32,
+    /// Every `HirLocalId` lowered so far, in this function, whose binding
+    /// grants mutation permission — a `let mut` local, a `mut`/`: &mut`
+    /// parameter, or a `mut self`/`: &mut self` receiver. Accumulates as
+    /// `lower_block`/`lower_fn` walk the body top-down, so by the time a
+    /// nested `mut (...) => {}` closure (Stage 7) is lowered, every
+    /// enclosing local it could possibly capture — the only ones already
+    /// in scope — has already been recorded. Cleared per function, like
+    /// `locals_map`, since `HirLocalId`s are re-minted from 0 per function.
+    pub(super) mutable_locals: HashSet<HirLocalId>,
     pub(super) generics: HashMap<Symbol, Vec<GenericBound>>,
     pub(super) type_subst: HashMap<Symbol, Type>,
     pub(super) self_override: Option<(ResolverLocalId, Type)>,
@@ -128,6 +137,7 @@ impl Lowerer<'_> {
     pub(super) fn lower_fn(&mut self, p: &PendingFn, id: HirFnId) -> HirFunction {
         self.locals_map.clear();
         self.next_local = 0;
+        self.mutable_locals.clear();
         self.type_subst.clone_from(&p.type_subst);
         self.self_override = self
             .resolved
@@ -178,6 +188,9 @@ impl Lowerer<'_> {
                     _ => self.runtime_ty(&param_sig.ty),
                 }
             };
+            if param_sig.mutable {
+                self.mutable_locals.insert(local);
+            }
             params.push(HirParam {
                 local,
                 name: param_sig.name.clone(),
@@ -193,16 +206,43 @@ impl Lowerer<'_> {
             .locals
             .get(&p.decl.id)
             .map(|orig| self.local_for(*orig));
+        if let Some(local) = self_local {
+            // Mirrors `nether_mir::build::FnBuilder::build`'s own
+            // `SelfParam::ByMutRef | SelfParam::OwnedMutRef` mutability
+            // test — a plain `mut self` (ARC, mutation permission) is
+            // exactly as capturable-by-reference as any other `mut`
+            // local; `: &mut self` is already reference-typed, so
+            // `lower_closure`'s own type guard skips promoting it (an
+            // existing reference needs no further indirection).
+            if matches!(
+                p.decl.self_param,
+                Some(SelfParam::ByMutRef | SelfParam::OwnedMutRef)
+            ) {
+                self.mutable_locals.insert(local);
+            }
+        }
 
-        let body = p.decl.body.as_ref().expect(
-            "standalone fns, impl methods, and inherited trait defaults always have a body",
-        );
-        let body_hir = self.lower_fn_body(body);
+        // An `extern "C" { ... }` member carries no Nether-side body to
+        // lower (`nether_ast::FnDecl::body` is `None`) — this placeholder
+        // is never actually read: `nether_mir::build_mir` special-cases
+        // `is_extern` and skips normal body-lowering entirely.
+        let body_hir = if p.sig.is_extern {
+            HirExpr {
+                kind: HirExprKind::Block(Vec::new(), None),
+                ty: Type::unit(),
+            }
+        } else {
+            let body = p.decl.body.as_ref().expect(
+                "standalone fns, impl methods, and inherited trait defaults always have a body",
+            );
+            self.lower_fn_body(body)
+        };
 
         HirFunction {
             id,
             name: p.name.clone(),
             is_async: p.sig.is_async,
+            is_extern: p.sig.is_extern,
             owner: p.owner,
             self_param: p.decl.self_param,
             // A concrete specialization's `self` is already fully
@@ -293,6 +333,9 @@ impl Lowerer<'_> {
                             kind: HirExprKind::Borrow(Box::new(value)),
                             ty: ty.clone(),
                         };
+                    }
+                    if let_stmt.mutable {
+                        self.mutable_locals.insert(local);
                     }
                     stmts.push(HirStmt {
                         kind: HirStmtKind::Let { local, ty, value },

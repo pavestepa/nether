@@ -26,10 +26,29 @@ pub enum Instr {
     Clear(Local),
     Retain(Local),
     Release(Local),
+    TransientRelease(Local),
     WeakRetain(Local),
     WeakRelease(Local),
 }
 ```
+
+`Release` and `TransientRelease` both emit the same runtime release call
+— the distinction is purely about what it means for the *local*
+afterward, and exists for `nether_codegen`'s own async-frame bookkeeping
+(§7) to consume, not for any difference in the release itself. `Release`
+means the local's ownership genuinely ends here — nothing later in this
+function still expects a live value in that slot (scope exit, an
+overwritten place's old value, a purpose-built temporary's single use).
+`TransientRelease` is exclusively §3.3's call-argument retain/release
+pair around a `CallBuiltin`/`CallArrayMethod` call: a purely transactional
+bump for the call's own duration that leaves the argument's own ownership
+completely unaffected — `println(x); println(x);` retains and releases
+`x` around *each* call without ending its life either time. Conflating
+the two was a real bug, not just a naming nicety: `nether_codegen`'s
+async-frame codegen nulls a local's frame field immediately after a
+`Release` (§7), and before this split it did so after *every* release,
+including the transactional kind — nulling a still-live local's field the
+moment its first `println` call returned, corrupting the second one.
 
 Ownership insertion is split inside MIR. CFG construction emits
 path-sensitive scope, mutation, weak, and temporary cleanup while source
@@ -109,7 +128,9 @@ another Nether function) are different and keep the *original*
 retain-before/release-after shape unconditionally: a native callee has no
 MIR body of its own to guarantee a scope-exit release, so the pair here is
 the argument's *entire* transaction for the call, nets to zero, and grants
-the native callee nothing lasting. Where a native callee genuinely needs
+the native callee nothing lasting. The release half of this pair is
+emitted as `TransientRelease`, not `Release` — see §2's own note on why
+that distinction exists and matters. Where a native callee genuinely needs
 to keep what it was handed (`runtime/array`'s `push`, storing an element
 into the array's own long-lived buffer), it performs that retain itself,
 internally — see `crates.md`'s `runtime/array` section.
@@ -153,10 +174,21 @@ preventing a double-release, so it was removed along with that release.
 
 Reading through a `weak T` (to get a usable, strong `T` for the duration of
 some use) requires the runtime (`runtime/arc`) to perform a check-and
--retain-if-alive operation atomically with respect to the *single-threaded*
-execution model (no actual concurrency to race against, but the referent
-could have been released earlier in the same function via an explicit
-scope exit) — this produces an `Option<T>`-shaped result at the MIR/codegen
+-retain-if-alive operation atomically — a real `compare_exchange` CAS loop
+as of Stage 6 (`runtime/arc`'s strong/weak counts are `AtomicI64`, mirroring
+`std::sync::Arc`/`Weak`'s own dealloc design exactly: the weak count starts
+at 1, an implicit weak reference held collectively by the strong count and
+released by whichever `release` call drops it to zero, funneling the
+dealloc decision through a single counter's fetch-sub instead of two
+independent counters racing each other). Before Stage 6 this needed no
+atomics at all (no actual concurrency to race against — the referent could
+only have been released earlier in the same function via an explicit scope
+exit); now a `weak T` observer can genuinely be read from one
+`thread.spawn`ed thread while another thread concurrently drops the last
+strong reference, and the runtime's atomics are what make that race safe
+rather than a plain check-then-retain being merely a convenient
+description of ordinary sequential control flow. This still produces an
+`Option<T>`-shaped result at the MIR/codegen
 level (a `weak` access desugars, in `hir`, to a call that returns
 `Option<T>`; by the time this pass sees it, it is already ordinary
 `Option`/enum handling plus, if the `Some` case is taken, an ordinary
@@ -278,3 +310,93 @@ a fast substitute for the common case, not a replacement for it.
   immediately followed by a release of the same local with no intervening
   use) is a straightforward peephole pass over this pass's own output and
   is a natural first MIR-level optimization to add post-MVP.
+
+## 7. Async frames: ARC on heap-allocated, persistent locals
+
+Stage 4's real state-machine transform (`nether_codegen`'s `frame`/
+`function::async_fn` modules — see `roadmap.md`'s Stage 4 entry) turns an
+`is_async` function's locals from per-call `alloca`s into fields of one
+heap-allocated frame that outlives any single `poll()` invocation. This
+section documents where that broke assumptions §1–§6 above take for
+granted in an ordinary function, and how each was fixed — every fix here
+was found by actually running compiled async programs, not by inspecting
+MIR/IR shape (the same lesson §5 already draws from §3.3's own history,
+now repeated twice more).
+
+**Why an ordinary function's ARC bookkeeping doesn't automatically work
+for a suspended frame.** Several of this document's own rules rely,
+implicitly, on a local's storage disappearing the moment its owning
+function returns: RVO (§3.4) deliberately leaves a moved-from source
+local un-cleared, because nothing ever reads it again before the stack
+frame is discarded. The same is true whenever a "constructing rvalue"
+(`Construct`/`ConstructVariant`/`Tuple`/a closure's captures) or a plain
+reassignment absorbs an already-owned value from an existing local
+without a retain (`nether_mir::build`'s own `prepare_new_binding` doc
+comment: "already carries exactly the right credit... needs no further
+action") — the *source* local is left holding a stale, duplicate
+reference to a value someone else now owns, harmless only because that
+source local's storage is about to vanish. A persistent async frame's
+fields don't vanish that way, so a later, generic "release whatever's
+still in every local" walk over the frame would release that same
+reference a second time, on top of its new owner's own eventual release.
+
+`nether_mir::build::expr::clear_moved_into_container` is the fix: at
+every one of these "absorbed without a retain" sites — a `Construct`
+field, a `Tuple`/`ConstructVariant` element, a closure capture, or a
+reassignment's incoming value — the source local (if it names one at
+all, i.e. it wasn't already a trivial alias that got its own real
+retain) is `Instr::Clear`ed immediately after the absorbing instruction.
+This generalizes `Instr::Clear`'s pre-existing role (nulling a
+moved-from *unique* local, §2) to ordinary ARC values whenever they're
+folded into a new container this way. It's a pure MIR-level fix, with no
+`is_async` conditional anywhere: the extra `Clear` is free/dead-store
+overhead in an ordinary function (whose `alloca` is discarded on return
+regardless) and load-bearing for an async frame. The escaping-return case
+(`return`'s own operand) is handled the same way but at the codegen
+level instead, in `FnCodegen::gen_async_return` — see that function's own
+doc comment.
+
+**The frame's own drop-while-pending invariant.** A `Task<T>` frame can
+be released while its `poll()` has never reached `Return` — dropped
+after being polled zero or more times and found not-ready each time. The
+frame's `nether_rt_arc_alloc` drop callback (`frame::frame_drop_shim`,
+generated once per `is_async` function) walks every *directly* heap-kind,
+non-alias-parameter local and unconditionally releases whatever pointer
+its field currently holds — `nether_rt_arc_release`/`nether_rt_unique_free`
+are themselves null-safe (§2's `Clear` reasoning again), so this is safe
+as long as a field that's *not* still owning a live reference is
+reliably null. `FnCodegen::null_frame_field_after_release` maintains that
+invariant going forward from any point in a frame's lifetime: it nulls a
+local's own frame field immediately after a genuine `Release` of it
+(never after a `TransientRelease` — see §2's own note on why that
+distinction is exactly what makes this safe), and the frame's *start*
+function zero-initializes every eligible field up front, so a local never
+yet assigned by the time an early suspend drops the frame reads back as
+"nothing to release" rather than whatever bytes the allocator happened to
+return.
+
+**Documented v1 gap.** The null-after-release invariant above only
+covers *directly* heap-kind locals (a bare pointer slot). A stack-kind
+aggregate local (`Tuple`/`enum`/non-`Pascal`-cased `struct`) with a
+nested heap-kind field is not covered: if that inner field was already
+released in-scope (via the aggregate's own generated shim, `crate::shims`
+in `nether_codegen`) before a later suspend point, `frame_drop_shim`'s
+walk has no nested walk of its own to skip it safely, and could
+double-release it. Closing this needs extending the null invariant to
+nested fields, which needs real per-field liveness this stage
+deliberately doesn't build (the roadmap's own "flat frame, no liveness
+analysis" scoping decision for Stage 4). Accepted for v1; revisit if a
+real program hits it.
+
+**Idempotent completion.** Real concurrent scheduling (`task.spawn`'s
+background polling and an explicit `await` of the same task can race to
+poll it) means a `poll()` can legitimately be called again after it
+already returned "ready" once. `frame::FrameLayout::completed_state`
+reserves one discriminant value no real suspension point ever uses;
+`Terminator::Return`'s codegen stores it right before returning, and the
+poll function's own dispatch checks for it first, ahead of every real
+per-state branch, returning "ready" immediately without touching
+anything else. Without this, a second poll would re-dispatch to whatever
+await-check block the frame was last suspended at and re-run everything
+from there — a real bug, caught by an actual double-`println` from a
+concurrently-scheduled task, not a hypothetical.

@@ -1,7 +1,7 @@
 use nether_ast::{BinaryOp, Literal, SelfParam, Symbol, UnaryOp};
 use nether_hir::{HirLocalId, HirPattern};
 use nether_resolver::DefId;
-use nether_typecheck::Type;
+use nether_typecheck::{CaptureMode, Type};
 
 /// Identifies one function in a [`MonoModule`] — a fresh id space,
 /// separate from `nether_hir::HirFnId`. One generic `HirFunction` can
@@ -41,6 +41,9 @@ pub struct MonoFunction {
     pub id: MonoFnId,
     pub name: Symbol,
     pub is_async: bool,
+    /// Carried over unchanged from `nether_hir::HirFunction::is_extern` —
+    /// see that field's docs.
+    pub is_extern: bool,
     pub owner: Option<DefId>,
     pub is_closure: bool,
     pub self_param: Option<SelfParam>,
@@ -59,7 +62,11 @@ pub struct MonoFunction {
 #[derive(Debug, Clone)]
 pub struct MonoCapture {
     pub local: HirLocalId,
+    /// The captured local's own type, as seen by *this* function's body
+    /// — always the plain element type, even for `CaptureMode::ByRef`
+    /// (whose storage is aliased, not its type; see that variant's docs).
     pub ty: Type,
+    pub mode: CaptureMode,
 }
 
 #[derive(Debug, Clone)]

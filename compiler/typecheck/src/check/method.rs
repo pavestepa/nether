@@ -187,6 +187,7 @@ impl Checker<'_> {
             Some(args) => {
                 let subst =
                     self.check_call_args(&sig, args, span, None, None, generic_args, call_id);
+                self.check_unsafe_call_permission(&sig, span);
                 call_result_type(&sig, substitute_generic(&sig.ret, &subst))
             }
             None => Type::Function(
@@ -246,6 +247,25 @@ impl Checker<'_> {
                 return Type::Error;
             }
         }
+        // `Thread<T>.join()` (language-spec §19, Stage 6) — consuming,
+        // blocking join, mirrors `Array`'s own builtin-method treatment
+        // just above: `Thread` carries no real `DefId` a source-level
+        // `impl` could ever target, so its one operation is recognized
+        // directly by receiver-type shape instead.
+        if let Type::Thread(output) = base_ty {
+            if method.name.as_str() == "join" {
+                if !generic_args.is_empty() {
+                    self.err(method.span, "`Thread.join` is not generic");
+                }
+                if !args.is_empty() {
+                    self.err(
+                        method.span,
+                        format!("`Thread.join` expects 0 arguments, found {}", args.len()),
+                    );
+                }
+                return (**output).clone();
+            }
+        }
         if let Type::Any(trait_id, trait_args) | Type::Some(trait_id, trait_args) = base_ty {
             let Some(signature) = self
                 .sigs
@@ -279,6 +299,7 @@ impl Checker<'_> {
                 .collect::<HashMap<_, _>>();
             let signature = specialize_fn_sig(&signature, &trait_subst);
             self.check_call_args(&signature, args, span, None, None, generic_args, call_id);
+            self.check_unsafe_call_permission(&signature, span);
             let output = self.sigs.normalize_associated(&signature.ret);
             return call_result_type(&signature, output);
         }
@@ -431,6 +452,7 @@ impl Checker<'_> {
             generic_args,
             call_id,
         );
+        self.check_unsafe_call_permission(&sig, span);
         call_result_type(&sig, substitute_generic(&sig.ret, &subst))
     }
 
@@ -502,6 +524,7 @@ impl Checker<'_> {
                 let sig = specialize_fn_sig(&raw_sig, &trait_subst);
                 let subst =
                     self.check_call_args(&sig, args, span, None, None, generic_args, call_id);
+                self.check_unsafe_call_permission(&sig, span);
                 return call_result_type(&sig, substitute_generic(&sig.ret, &subst));
             }
         }

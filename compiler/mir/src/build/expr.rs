@@ -79,6 +79,45 @@ impl FnBuilder<'_> {
         }
     }
 
+    /// The other half of a value routed through [`Self::prepare_new_binding`]
+    /// and then folded into a *new* container (`Construct`/`ConstructVariant`/
+    /// `Tuple`/a plain reassignment's incoming value) — every one of these
+    /// copies `operand`'s bits into the container's own storage without a
+    /// retain (the "already carries exactly the right credit... needs no
+    /// further action" case `prepare_new_binding`'s own docs describe), so
+    /// once that copy has happened, `expr`'s own materialized local (if it
+    /// has one — a fresh call/construction, not a trivial alias, which
+    /// already keeps its own independent credit via a real retain) is left
+    /// holding a now-*stale*, duplicate reference to the same value: not an
+    /// independent credit that still needs releasing (there never was a
+    /// second one), just a leftover copy of a pointer someone else now
+    /// owns. Harmless in an ordinary function — that local's `alloca` is
+    /// simply discarded when the function returns — but a heap-allocated
+    /// async frame's fields persist past that point, so
+    /// `frame::frame_drop_shim`'s later walk would find it non-null and
+    /// release it a second time on top of the container's own eventual
+    /// release. Clearing it (never releasing — there is no credit to
+    /// release here) closes that gap, generalizing the same treatment
+    /// [`Instr::Clear`] already gives a moved-from unique local to this
+    /// ordinary-ARC "moved into a new container" shape.
+    pub(super) fn clear_moved_into_container(&mut self, expr: &MonoExpr, operand: &Operand) {
+        if is_trivial_local_alias(expr) || !self.sigs.has_managed_content(&expr.ty, self.defs) {
+            return;
+        }
+        if let Operand::Local(local) = operand {
+            self.push_instr(Instr::Clear(*local));
+        }
+    }
+
+    /// [`Self::clear_moved_into_container`] applied pairwise, for the
+    /// common case (`Tuple`/`ConstructVariant`/`Closure` captures) where
+    /// several source expressions all fold into one new container at once.
+    pub(super) fn clear_moved_into_container_all(&mut self, exprs: &[MonoExpr], ops: &[Operand]) {
+        for (expr, op) in exprs.iter().zip(ops) {
+            self.clear_moved_into_container(expr, op);
+        }
+    }
+
     /// Like [`Self::lower_exprs`], but for operands that become a *stored*
     /// field inside a freshly constructed container (`Construct`,
     /// `ConstructVariant`, `Tuple`, `Array`) — each one goes through
@@ -204,12 +243,19 @@ impl FnBuilder<'_> {
             MonoExprKind::Unit => Operand::Unit,
             MonoExprKind::Tuple(items) => {
                 let ops = self.lower_stored_exprs(items);
-                Operand::Local(self.materialize(Rvalue::Tuple(ops), expr.ty.clone()))
+                let result =
+                    Operand::Local(self.materialize(Rvalue::Tuple(ops.clone()), expr.ty.clone()));
+                self.clear_moved_into_container_all(items, &ops);
+                result
             }
             MonoExprKind::Array(items) => {
                 if matches!(expr.ty, Type::FixedArray(_, _)) {
                     let ops = self.lower_stored_exprs(items);
-                    return Operand::Local(self.materialize(Rvalue::Tuple(ops), expr.ty.clone()));
+                    let result = Operand::Local(
+                        self.materialize(Rvalue::Tuple(ops.clone()), expr.ty.clone()),
+                    );
+                    self.clear_moved_into_container_all(items, &ops);
+                    return result;
                 }
                 // `runtime/array_push` retains each stored element via
                 // the element shim, so array literals borrow their input
@@ -405,13 +451,15 @@ impl FnBuilder<'_> {
             }
             MonoExprKind::Construct { ty, fields } => {
                 let ops = self.lower_construct_fields(&expr.ty, fields);
-                Operand::Local(self.materialize(
+                let result = Operand::Local(self.materialize(
                     Rvalue::Construct {
                         ty: *ty,
-                        fields: ops,
+                        fields: ops.clone(),
                     },
                     expr.ty.clone(),
-                ))
+                ));
+                self.clear_moved_into_container_all(fields, &ops);
+                result
             }
             MonoExprKind::ConstructVariant {
                 enum_id,
@@ -419,14 +467,16 @@ impl FnBuilder<'_> {
                 payload,
             } => {
                 let ops = self.lower_stored_exprs(payload);
-                Operand::Local(self.materialize(
+                let result = Operand::Local(self.materialize(
                     Rvalue::ConstructVariant {
                         enum_id: *enum_id,
                         variant: *variant,
-                        payload: ops,
+                        payload: ops.clone(),
                     },
                     expr.ty.clone(),
-                ))
+                ));
+                self.clear_moved_into_container_all(payload, &ops);
+                result
             }
             MonoExprKind::If {
                 cond,
@@ -472,15 +522,20 @@ impl FnBuilder<'_> {
                 self.terminate_current(Terminator::Return(op));
                 Operand::Unit
             }
-            MonoExprKind::Closure { function, captures } => {
-                let captures = self.lower_stored_exprs(captures);
-                Operand::Local(self.materialize(
+            MonoExprKind::Closure {
+                function,
+                captures: capture_exprs,
+            } => {
+                let ops = self.lower_stored_exprs(capture_exprs);
+                let result = Operand::Local(self.materialize(
                     Rvalue::Closure {
                         function: *function,
-                        captures,
+                        captures: ops.clone(),
                     },
                     expr.ty.clone(),
-                ))
+                ));
+                self.clear_moved_into_container_all(capture_exprs, &ops);
+                result
             }
         }
     }
@@ -517,7 +572,8 @@ impl FnBuilder<'_> {
             None
         };
         let val_op = self.prepare_new_binding(value);
-        self.push_instr(Instr::Assign(place, Rvalue::Use(val_op)));
+        self.push_instr(Instr::Assign(place, Rvalue::Use(val_op.clone())));
+        self.clear_moved_into_container(value, &val_op);
         if let Some(Operand::Local(old_local)) = old {
             self.push_instr(Instr::Release(old_local));
             if has_projection {

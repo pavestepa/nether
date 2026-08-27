@@ -44,6 +44,7 @@ fn compile_options_control_output_optimization_and_linking() {
         opt_level: 2,
         output_path: Some(output),
         link: false,
+        ..CompileOptions::default()
     };
     let result = nether_driver::compile(&entry, &options).unwrap();
     assert!(result

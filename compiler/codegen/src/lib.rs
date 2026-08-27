@@ -60,6 +60,7 @@
 //! Runtime calls target the implemented C ABI in `runtime/*`; dynamic
 //! closure calls use an explicit code-pointer/environment ABI.
 
+mod frame;
 mod function;
 mod layout;
 mod runtime;
@@ -97,6 +98,17 @@ pub fn generate<'ctx>(
         .map(|f| f.id)
         .zip(llvm_fns.iter().copied())
         .collect();
+    // A second LLVM function per `is_async` `MirFunction` — see
+    // `function::async_fn`'s module docs: `funcs`'s entry stays the
+    // "start" function (same symbol/param convention every caller already
+    // uses, only its return type changes), while `poll_funcs` holds the
+    // `PollFn`-shaped function that actually carries the translated MIR
+    // body.
+    let poll_funcs: HashMap<MonoFnId, Func<'ctx>> = functions
+        .iter()
+        .filter(|f| f.is_async)
+        .map(|f| (f.id, declare_poll(&m, f)))
+        .collect();
     let mir_functions: HashMap<MonoFnId, &MirFunction> =
         functions.iter().map(|f| (f.id, f)).collect();
     let function_env = function::FunctionEnv {
@@ -105,14 +117,22 @@ pub fn generate<'ctx>(
         runtime: &runtime,
         shims: &shims,
         funcs: &funcs,
+        poll_funcs: &poll_funcs,
         mir_functions: &mir_functions,
     };
 
     for (f, &llvm_fn) in functions.iter().zip(&llvm_fns) {
+        // An `extern "C"` declaration is declared (above, via `declare`'s
+        // own `is_extern` branch), never defined — there is no Nether-side
+        // body to build (`crates.md`'s own invariant, mirrors how
+        // `runtime.rs`'s own C-ABI symbols are declared-only).
+        if f.is_extern {
+            continue;
+        }
         function::build_function(&function_env, f, llvm_fn);
     }
 
-    emit_entry_point(&m, functions, &funcs);
+    emit_entry_point(&m, &runtime, functions, &funcs);
 
     m
 }
@@ -127,8 +147,17 @@ pub fn generate<'ctx>(
 /// (see its own module docs), so this is really just "always," but the
 /// check is cheap insurance against ever calling `generate` on a
 /// `main`-less module in the future.
+///
+/// An `is_async` `main` needs one more step than an ordinary call: its
+/// `nether_main` symbol is now the *start* function (see `declare`'s own
+/// `is_async` branch) — calling it only constructs the root frame, it
+/// doesn't run anything yet, so this wrapper also has to drive that frame
+/// to completion (`nether_rt_task_block_on`, the same runtime entry point
+/// an ordinary `await` polls through) and release it once it's done —
+/// `main`'s frame has no Nether-level owner of its own to do that for it.
 fn emit_entry_point<'ctx>(
     m: &ModuleCx<'ctx>,
+    runtime: &Runtime<'ctx>,
     functions: &[MirFunction],
     funcs: &HashMap<MonoFnId, Func<'ctx>>,
 ) {
@@ -143,11 +172,22 @@ fn emit_entry_point<'ctx>(
     let entry = m.declare_function("main", m.fn_type(&[], Some(i32_ty)));
     let block = m.append_block(entry, "entry");
     m.position_at_end(block);
-    m.call(nether_main, &[], "");
+    if main_fn.is_async {
+        let frame = m
+            .call(nether_main, &[], "main_frame")
+            .expect("an async start function always returns the frame pointer");
+        m.call(runtime.task_block_on, &[frame], "");
+        m.call(runtime.release, &[frame], "");
+    } else {
+        m.call(nether_main, &[], "");
+    }
     m.ret(Some(m.const_int(i32_ty, 0, false)));
 }
 
 fn declare<'ctx>(m: &ModuleCx<'ctx>, layout: &Layout<'_, 'ctx>, f: &MirFunction) -> Func<'ctx> {
+    if f.is_extern {
+        return declare_extern(m, layout, f);
+    }
     // A stack aggregate (`Tuple`/camelCase `struct`/`enum`) and every
     // mutable parameter are passed by pointer. See
     // `function::FnCodegen::build`'s matching entry-block handling and
@@ -167,13 +207,66 @@ fn declare<'ctx>(m: &ModuleCx<'ctx>, layout: &Layout<'_, 'ctx>, f: &MirFunction)
             layout.llvm_type(&decl.ty)
         }
     }));
-    let ret_ty = if is_unit(&f.ret) {
+    // An `is_async` function's own LLVM symbol becomes its "start"
+    // function (see `function::async_fn`) — it only ever constructs and
+    // returns a `Task<T>` frame pointer, so its LLVM return type is
+    // always `ptr`, regardless of `f.ret` (the *unwrapped* output type,
+    // which becomes the frame's own output field instead — see
+    // `frame::compute_frame_layout`).
+    let ret_ty = if f.is_async {
+        Some(m.ptr_type())
+    } else if is_unit(&f.ret) {
         None
     } else {
         Some(layout.llvm_type(&f.ret))
     };
     let fn_ty = m.fn_type(&param_tys, ret_ty);
     m.declare_function(&mangled_name(f), fn_ty)
+}
+
+/// Declares an `extern "C" { ... }` member under its own real name (the
+/// actual C symbol — never mangled, unlike an ordinary Nether function;
+/// `extern "C" fn`s are always free functions, so there is no `(owner,
+/// name)` ambiguity `mangled_name` exists to resolve) using a direct
+/// scalar/pointer C-ABI type mapping, never Nether's own internal
+/// "mutable/aggregate parameters pass by pointer" convention — FFI-safety
+/// checking (`nether_typecheck::check::is_ffi_safe_type`) already excludes
+/// every type that convention would otherwise apply to.
+fn declare_extern<'ctx>(m: &ModuleCx<'ctx>, layout: &Layout<'_, 'ctx>, f: &MirFunction) -> Func<'ctx> {
+    let param_tys: Vec<_> = f
+        .params
+        .iter()
+        .map(|&p| ffi_type(m, layout, &f.local_decl(p).ty))
+        .collect();
+    let ret_ty = if is_unit(&f.ret) {
+        None
+    } else {
+        Some(ffi_type(m, layout, &f.ret))
+    };
+    let fn_ty = m.fn_type(&param_tys, ret_ty);
+    m.declare_function(f.name.as_str(), fn_ty)
+}
+
+/// `layout.llvm_type`, except `bool` maps to `i8` — the real C ABI width
+/// (`runtime.rs`'s own module docs explain why LLVM's native `i1` isn't
+/// safe to use across a C-ABI boundary). FFI-safety checking guarantees
+/// `ty` is always a primitive or raw pointer here, never an aggregate.
+fn ffi_type<'ctx>(m: &ModuleCx<'ctx>, layout: &Layout<'_, 'ctx>, ty: &Type) -> nether_llvm::Ty<'ctx> {
+    match ty {
+        Type::Primitive(nether_typecheck::PrimitiveKind::Bool) => m.int_type(8),
+        _ => layout.llvm_type(ty),
+    }
+}
+
+/// The second LLVM function an `is_async` `MirFunction` needs — matches
+/// `runtime/task`'s `PollFn` ABI (`fn(*mut u8) -> bool`, `bool` crossing
+/// as `i8` — see `runtime.rs`'s own module docs) exactly, so it's usable
+/// directly as the frame's own `poll` field once its address is stored
+/// there (`function::async_fn::build_async_start`).
+fn declare_poll<'ctx>(m: &ModuleCx<'ctx>, f: &MirFunction) -> Func<'ctx> {
+    let i8_ty = m.int_type(8);
+    let fn_ty = m.fn_type(&[m.ptr_type()], Some(i8_ty));
+    m.declare_function(&poll_mangled_name(f), fn_ty)
 }
 
 fn is_unit(ty: &nether_typecheck::Type) -> bool {
@@ -202,4 +295,8 @@ fn mangled_name(f: &MirFunction) -> String {
 
 fn owner_tag(id: DefId) -> String {
     format!("{id:?}").replace(['(', ')'], "_")
+}
+
+fn poll_mangled_name(f: &MirFunction) -> String {
+    format!("{}_poll", mangled_name(f))
 }

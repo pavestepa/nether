@@ -5,9 +5,10 @@
 //!
 //! Responsibilities: recognize every token kind from language-spec §2
 //! (identifiers/keywords, numeric/char/string/template-string literals,
-//! punctuation, `//`/`///` comments), track byte offsets for [`Span`]
-//! construction, and report lexical errors through `nether_diagnostics`.
-//! This crate owns no AST types — see `nether_ast` for those.
+//! punctuation, `//`/`///`/`/* */` comments), track byte offsets for
+//! [`Span`] construction, and report lexical errors through
+//! `nether_diagnostics`. This crate owns no AST types — see `nether_ast`
+//! for those.
 //!
 //! Input: raw source text plus a [`FileId`] from a
 //! [`nether_diagnostics::SourceMap`].
@@ -25,9 +26,6 @@
 //! segment is handed onward as unparsed source text
 //! ([`TemplatePartTok::Expr`]) for the parser to re-tokenize and parse with
 //! its normal expression entry point.
-//!
-//! Future extension points: block comments (`/* */`, out of MVP scope per
-//! language-spec §14) would be a lexer-only addition.
 
 mod lexer;
 #[cfg(test)]

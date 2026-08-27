@@ -9,25 +9,44 @@ through LLVM to a native executable. See
 design and [`docs/architecture/roadmap.md`](docs/architecture/roadmap.md)
 for what's implemented today versus staged for later.
 
-The compiler implements:
+Every stage in the roadmap is implemented today. The compiler provides:
 
 - lexer, parser, diagnostics, name resolution, and type checking;
 - the four-value-form ownership model (`T`/`:T`/`t`/`:t` — ARC reference,
   uniquely owned heap value, inline value, uniquely owned inline value);
 - traits with static dispatch, multiple inheritance, defaults, and
-  generic monomorphization;
+  generic monomorphization (plus witness-table dispatch for dictionary-safe
+  generics in development builds);
 - multiple generic bounds with canonical `<T TraitA + TraitB>` syntax;
 - equivalent `where T TraitA + TraitB` clauses on generic declarations;
 - explicit `default impl` fallbacks with concrete instance-method specialization;
+- associated types/constants, const generics, and existential/opaque
+  `any Trait`/`some Trait` types;
 - HIR, closure conversion, CFG-based MIR, and ARC insertion;
-- structs, tuples, enums/match, arrays, weak references, and closures;
-- local multi-file modules through `use`;
+- structs, tuples, enums/match, arrays, weak references, and closures,
+  including `mut (...) => { ... }` closures that capture a `mut`-declared
+  inline local by reference (writes inside the body are visible to the
+  outer binding once the closure returns);
+- newline-aware optional semicolons (Go-style ASI), `/* ... */` block
+  comments, and a syntactic split between growable-array literals (`[...]`,
+  always `Array<T>`) and fixed-size array literals (`{...}`, always
+  `{T, N}`);
+- local multi-file modules through `use`, plus a `Nether.toml` package
+  manifest for local-path dependencies across separate package directories;
 - default-private declarations with explicit `pub` APIs and re-exports;
 - the narrow `#[allow_pascal_case]` escape hatch for exceptional type aliases;
 - structural `Clone` conversion into an independent unique outer object;
 - user-defined `clone(: &self): T` overrides for custom clone behavior;
 - derived structural `Eq` for ARC and unique structs with comparable fields;
 - deterministic derived structural `Hash` through `hash(value) u64`;
+- `async fn`/`await` compiled to real state machines, backed by a
+  Tokio-driven runtime, with `task.spawn`/`timer.sleep`;
+- `unsafe fn`/`unsafe { ... }`, raw pointers (`*const T`/`*mut T`,
+  `&raw const`/`&raw mut`, `*expr`), and `extern "C"`/`#[link(name = "...")]`
+  FFI declarations;
+- atomic ARC, compiler-derived `Send`/`Sync` (with an `unsafe impl`
+  escape hatch), real parallel OS threads via `thread.spawn`/`.join()`,
+  and spawned-borrow diagnostics for both `task.spawn` and `thread.spawn`;
 - LLVM object emission, optimization levels, and native linking;
 - a small Nether-source Option/Result/Array standard library.
 
@@ -42,6 +61,10 @@ origins. Local origins and multiple possible parameter origins are rejected.
 Loop uses keep a borrow live through the loop expression, and a locally bound
 closure keeps captured borrows live through that closure's last use. Escaping
 or otherwise non-local closure values use a conservative lexical fallback.
+A closure that captures a local by mutable reference is rejected if
+returned directly, for the same reason; spawning a `task`/`thread` that
+captures a borrow of a local owned by the spawning function is rejected
+the same way a returned reference would be.
 
 ## Requirements
 
@@ -73,23 +96,31 @@ cargo build --release \
   -p nether-rt-arc \
   -p nether-rt-string \
   -p nether-rt-array \
-  -p nether-rt-io
+  -p nether-rt-io \
+  -p nether-rt-task \
+  -p nether-rt-thread
 ```
 
-Compile a program:
+Compile and run a program:
 
 ```sh
-cargo run -p nether-cli -- build examples/hello_world/main.nr
-./examples/hello_world/main
+cargo run -p nether-cli -- run examples/hello_world/main.nr
 ```
+
+Subcommands: `check` (diagnostics only), `build` (same as `check`), `ast`
+(also pretty-prints the parsed AST), `run` (also executes the linked
+binary, passing stdout/stderr/exit code straight through), `test` (like
+`run`, framed as `test <path> ... ok`/`FAILED` by the process's own exit
+code).
 
 Useful options:
 
 ```text
 --target <llvm-triple>
--O0 | -O1 | -O2 | -O3
+-O0 | -O1 | -O2 | -O3 | --release  (sugar for -O3)
 -o <output-path>
 --emit-object
+--emit-ast | --emit-hir | --emit-mir | --emit-llvm
 ```
 
 For example, emit an optimized object without linking:
@@ -212,15 +243,3 @@ library" above), a flattened/non-union enum layout, and native linking
 only for the host target. Cross-target object emission is supported.
 Variadic parameters (`fn f(args ...String)`) are supported as sugar over a
 hidden const-generic fixed array — see `docs/spec/language-spec.md` §8.7.
-
-**Known bug, not yet fixed:** a function that loops over an `Array`
-*parameter* reassigning a `String` local via template-string
-concatenation each iteration (`result = \`${result}${x}\`;`) corrupts
-memory when that function is called more than once with differently
-sized arrays — sometimes wrong output, sometimes a crash, depending on
-unrelated heap state. Reproduces with a plain, non-generic, non-variadic
-`Array<String>` parameter; unrelated to generics/specialization/variadics.
-See `string_concatenation_by_reassignment_inside_a_loop_over_an_array_parameter_corrupts_memory`
-in `compiler/driver/tests/driver_tests.rs` (`#[ignore]`d — reproduce with
-`cargo test -p nether-driver --test driver_tests -- --ignored <name>` in
-isolation; it can crash the whole test process).

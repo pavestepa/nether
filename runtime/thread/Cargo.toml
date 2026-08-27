@@ -1,0 +1,11 @@
+[package]
+name = "nether-rt-thread"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+nether-rt-arc = { path = "../arc" }

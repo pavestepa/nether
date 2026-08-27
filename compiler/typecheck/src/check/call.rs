@@ -383,6 +383,7 @@ impl Checker<'_> {
                         generic_args,
                         call_id,
                     );
+                    self.check_unsafe_call_permission(&sig, span);
                     call_result_type(&sig, substitute_generic(&sig.ret, &subst))
                 }
                 None if sig.generics.is_empty() => Type::Function(

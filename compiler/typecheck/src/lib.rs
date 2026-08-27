@@ -50,16 +50,18 @@
 
 mod alloc;
 mod check;
+mod send_sync;
 mod sig;
 mod ty;
 
 pub use alloc::{alloc_kind, AllocKind};
 pub use check::{check, TypedTables};
+pub use send_sync::{is_send, is_sync};
 pub use sig::{
     variadic_len_param, EnumSig, FnSig, GenericBound, ParamSig, ReceiverDomain, ReturnOrigin,
     Signatures, TypeShape,
 };
-pub use ty::{PrimitiveKind, Type};
+pub use ty::{CaptureMode, PrimitiveKind, Type};
 
 // Re-exported so `sig::Signatures`'s public methods can be used without
 // requiring a direct `nether_resolver` dependency for the common case.

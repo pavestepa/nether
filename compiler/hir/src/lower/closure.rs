@@ -1,4 +1,5 @@
 use super::*;
+use nether_typecheck::{alloc_kind, AllocKind};
 
 impl Lowerer<'_> {
     /// Desugars `for pattern in iter { body }` into an index-based loop.
@@ -156,6 +157,7 @@ impl Lowerer<'_> {
         params: &[Param],
         body: &Expr,
         result_ty: Type,
+        mut_capture: bool,
     ) -> HirExpr {
         let mut hir_params = Vec::new();
         for p in params {
@@ -163,6 +165,9 @@ impl Lowerer<'_> {
                 Some(orig) => (self.local_for(*orig), self.local_ty(*orig)),
                 None => (self.fresh_local(), Type::Error),
             };
+            if p.mutable {
+                self.mutable_locals.insert(local);
+            }
             hir_params.push(HirParam {
                 local,
                 name: p.name.name.clone(),
@@ -171,7 +176,32 @@ impl Lowerer<'_> {
             });
         }
         let body_hir = self.lower_expr(body);
-        let captures = closure_captures(&body_hir, &hir_params);
+        let mut captures = closure_captures(&body_hir, &hir_params);
+        if mut_capture {
+            // `mut (...) => { ... }` (language-spec §16, Stage 7): every
+            // captured local declared `mut` becomes a by-reference
+            // capture instead of a by-value copy — see `CaptureMode`'s
+            // own docs. A capture that's already reference-typed
+            // (`Type::Ref`/`Type::MutRef`) is left `ByValue`: copying an
+            // existing reference into the environment already lets the
+            // closure write through it, exactly as it does today, so a
+            // second layer of indirection would add nothing. A
+            // heap-category capture is also left `ByValue` — typecheck's
+            // `check_closure` already diagnosed it as unsupported (see
+            // that function's own docs for why), so this is unreachable
+            // for an accepted program, but leaving it `ByValue` here too
+            // keeps a rejected program's HIR from claiming a promotion
+            // `nether_codegen`'s heap-`address_of_place` special case
+            // can't actually honor.
+            for capture in &mut captures {
+                if self.mutable_locals.contains(&capture.local)
+                    && !matches!(capture.ty, Type::Ref(_) | Type::MutRef(_))
+                    && alloc_kind(&capture.ty, &self.resolved.definitions) == AllocKind::Stack
+                {
+                    capture.mode = CaptureMode::ByRef;
+                }
+            }
+        }
         HirExpr {
             kind: HirExprKind::Closure {
                 params: hir_params,

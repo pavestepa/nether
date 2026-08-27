@@ -38,7 +38,7 @@ mod module_loader;
 
 use std::path::{Path, PathBuf};
 
-use nether_ast::{Module, Symbol};
+use nether_ast::{Item, Module, Symbol};
 use nether_diagnostics::{Diagnostic, SourceMap};
 use nether_hir::HirModule;
 use nether_mir::MirFunction;
@@ -64,7 +64,11 @@ pub struct CheckResult {
     /// `None` under the same conditions as `mono` — built from it in
     /// lockstep, with ARC already inserted (`nether_mir::insert_arc`
     /// always runs immediately after `nether_mir::build_mir`, per that
-    /// crate's own invariant that `codegen` never sees MIR without it).
+    /// crate's own invariant that `codegen` never sees MIR without it),
+    /// followed by `nether_mir::split_await_points` (must run after
+    /// `insert_arc` so it relocates already-inserted retain/release
+    /// instructions rather than needing to re-derive their placement —
+    /// see that function's own docs).
     pub mir: Option<Vec<MirFunction>>,
     /// The emitted object file's path, under the same conditions as
     /// `mir` — the LLVM module itself isn't kept around (its `inkwell`
@@ -89,6 +93,16 @@ pub struct CompileOptions {
     /// `<source>.o` / `<source-without-extension>` defaults.
     pub output_path: Option<PathBuf>,
     pub link: bool,
+    /// `--emit-llvm` (Stage 6) — when set, `compile` writes the
+    /// generated LLVM module's text form here right after it verifies,
+    /// before the module (and the `inkwell` `Context` it borrows from)
+    /// drops. The one `--emit-*` flag needing a driver-level field at
+    /// all: `CheckResult` deliberately never keeps the LLVM module
+    /// itself around (this struct's own docs), unlike
+    /// `module`/`hir`/`mir`, which `--emit-ast`/`--emit-hir`/`--emit-mir`
+    /// dump straight from `CheckResult`'s own public fields with no
+    /// driver involvement.
+    pub emit_llvm_path: Option<PathBuf>,
 }
 
 impl Default for CompileOptions {
@@ -98,6 +112,7 @@ impl Default for CompileOptions {
             opt_level: 0,
             output_path: None,
             link: true,
+            emit_llvm_path: None,
         }
     }
 }
@@ -121,6 +136,26 @@ impl Default for CompileOptions {
 /// bug, never a user-facing diagnostic.
 pub fn check(path: &Path) -> Result<CheckResult, std::io::Error> {
     compile(path, &CompileOptions::default())
+}
+
+/// Every distinct `#[link(name = "...")]` library requested by an
+/// `extern "C" { ... }` block anywhere in the module graph, in first-seen
+/// order — `module.items` is already the whole graph's items flattened
+/// into one list (`module_loader::ModuleLoader::finish`), so no separate
+/// recursive walk is needed. Purely a linker-invocation concern
+/// (`link::link`'s own docs), independent of HIR/MIR.
+fn collect_link_libs(module: &Module) -> Vec<String> {
+    let mut libs = Vec::new();
+    for item in &module.items {
+        if let Item::Extern(block) = item {
+            if let Some(name) = &block.link {
+                if !libs.contains(name) {
+                    libs.push(name.clone());
+                }
+            }
+        }
+    }
+    libs
 }
 
 /// Compiles a source module graph using explicit target/output options.
@@ -162,6 +197,7 @@ pub fn compile(path: &Path, options: &CompileOptions) -> Result<CheckResult, std
                     let mut functions =
                         nether_mir::build_mir(&m, &r.definitions, &lowered.signatures);
                     nether_mir::insert_arc(&mut functions);
+                    nether_mir::split_await_points(&mut functions);
 
                     let cg = nether_llvm::Codegen::with_target(
                         &options.target_triple,
@@ -187,6 +223,9 @@ pub fn compile(path: &Path, options: &CompileOptions) -> Result<CheckResult, std
                             llvm_module.print_to_string()
                         )
                     });
+                    if let Some(emit_llvm_path) = &options.emit_llvm_path {
+                        std::fs::write(emit_llvm_path, llvm_module.print_to_string())?;
+                    }
                     let out = options
                         .output_path
                         .as_ref()
@@ -199,7 +238,8 @@ pub fn compile(path: &Path, options: &CompileOptions) -> Result<CheckResult, std
                         .unwrap_or_else(|| path.with_extension(""));
                     if options.link && options.target_triple == nether_llvm::Codegen::host_triple()
                     {
-                        executable_path = link::link(&out, &executable)?;
+                        let link_libs = collect_link_libs(&module);
+                        executable_path = link::link(&out, &executable, &link_libs)?;
                     }
                     object_path = Some(out);
 

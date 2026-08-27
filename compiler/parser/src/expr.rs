@@ -187,6 +187,74 @@ impl Parser {
                     span,
                 }
             }
+            Token::Keyword(Keyword::Unsafe) => {
+                self.bump();
+                let block = self.parse_block();
+                let span = start.to(block.span);
+                Expr {
+                    id: self.next_id(),
+                    kind: ExprKind::Unsafe(block),
+                    span,
+                }
+            }
+            // Prefix `*expr` — raw-pointer dereference (language-spec §17,
+            // Stage 5). Disambiguated from `Punct::Star`'s other use as
+            // infix multiplication purely by parse position, the same
+            // technique already used for `Punct::Minus` (prefix `Neg` vs.
+            // infix `Sub`) just above.
+            Token::Punct(Punct::Star) => {
+                self.bump();
+                let expr = self.parse_unary();
+                let span = start.to(expr.span);
+                Expr {
+                    id: self.next_id(),
+                    kind: ExprKind::RawDeref(Box::new(expr)),
+                    span,
+                }
+            }
+            // `&raw const expr` / `&raw mut expr` — address-of an
+            // arbitrary place as a raw pointer (language-spec §17, Stage
+            // 5). `raw` is a contextual word, recognized only immediately
+            // after `&`, not a reserved keyword — there is no bare
+            // `&expr` operator for this token to collide with.
+            Token::Punct(Punct::Amp) => {
+                self.bump();
+                if matches!(self.peek(), Token::Ident(name) if name.as_str() == "raw") {
+                    self.bump();
+                } else {
+                    self.error(
+                        self.peek_span(),
+                        format!(
+                            "expected `raw` after `&` — there is no bare `&expr` operator, found {:?}",
+                            self.peek()
+                        ),
+                    );
+                }
+                let mutable = if self.eat_keyword(Keyword::Mut) {
+                    true
+                } else if self.eat_keyword(Keyword::Const) {
+                    false
+                } else {
+                    self.error(
+                        self.peek_span(),
+                        format!(
+                            "expected `const` or `mut` after `&raw`, found {:?}",
+                            self.peek()
+                        ),
+                    );
+                    false
+                };
+                let place = self.parse_unary();
+                let span = start.to(place.span);
+                Expr {
+                    id: self.next_id(),
+                    kind: ExprKind::RawBorrow {
+                        mutable,
+                        place: Box::new(place),
+                    },
+                    span,
+                }
+            }
             _ => {
                 let primary = self.parse_primary();
                 self.parse_postfix(primary)

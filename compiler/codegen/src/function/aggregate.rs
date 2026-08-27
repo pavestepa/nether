@@ -88,7 +88,7 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
                 .call(alloc, &[size, drop_fn], "obj")
                 .expect("nether_rt_arc_alloc returns a value")
         } else {
-            self.m.alloca(sl.ty.into(), "agg")
+            self.entry_alloca(sl.ty.into(), "agg")
         };
         for (i, val) in field_vals.into_iter().enumerate() {
             let field_ptr = self.m.struct_gep(sl.ty, addr, i as u32, "field");
@@ -115,7 +115,7 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
         let payload_vals: Vec<Value<'ctx>> = payload.iter().map(|p| self.gen_operand(p)).collect();
 
         let _ = dest_ty;
-        let slot = self.m.alloca(el.ty.into(), "variant");
+        let slot = self.entry_alloca(el.ty.into(), "variant");
         let tag_ptr = self.m.struct_gep(el.ty, slot, 0, "tag_ptr");
         self.m.store(
             tag_ptr,
@@ -146,7 +146,7 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
             other => panic!("Rvalue::Tuple with non-tuple destination type {other:?}"),
         };
         let llvm_ty = self.layout.llvm_type(dest_ty);
-        let slot = self.m.alloca(llvm_ty, "tuple");
+        let slot = self.entry_alloca(llvm_ty, "tuple");
         let struct_ty = match llvm_ty {
             nether_llvm::Ty::StructType(t) => t,
             _ => unreachable!("Tuple always lowers to a struct type"),
@@ -190,7 +190,7 @@ impl<'ctx> FnCodegen<'_, 'ctx> {
                 "arr",
             )
             .expect("nether_rt_array_new returns a value");
-        let elem_slot = self.m.alloca(elem_llvm_ty, "elem");
+        let elem_slot = self.entry_alloca(elem_llvm_ty, "elem");
         for item in items {
             let val = self.gen_operand(item);
             self.store_at(elem_slot, &elem_ty, val);

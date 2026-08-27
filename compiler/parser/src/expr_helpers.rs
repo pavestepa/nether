@@ -10,6 +10,7 @@ pub(super) fn is_block_like(kind: &ExprKind) -> bool {
             | ExprKind::ForIn { .. }
             | ExprKind::Loop { .. }
             | ExprKind::Block(_)
+            | ExprKind::Unsafe(_)
     )
 }
 
