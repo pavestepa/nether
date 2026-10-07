@@ -1,242 +1,230 @@
-//! `nether` — the compiler's command-line entry point
-//! (`docs/architecture/crates.md` § `cli`).
-//!
-//! Every subcommand runs the full pipeline
-//! (`docs/architecture/overview.md` §8): parse, resolve, typecheck, lower
-//! to HIR, monomorphize, build MIR + insert ARC, generate + emit an LLVM
-//! object file, and link it against `runtime/*` into a native executable
-//! (gracefully skipped if those static libraries haven't been built
-//! locally yet — see `nether_driver::link`'s own module docs).
-//!
-//! - `check <file>` reports success/diagnostics only.
-//! - `build <file>` is identical to `check` (kept as its own command for
-//!   the more conventional name).
-//! - `ast <file>` additionally pretty-prints the parsed AST to stdout,
-//!   the original bootstrap smoke test.
-//! - `run <file>` (Stage 6) additionally executes the linked binary,
-//!   passing its stdout/stderr/exit code straight through — `cargo run`'s
-//!   own convention.
-//! - `test <file>` (Stage 6) compiles and runs like `run`, framing the
-//!   result as `test <path> ... ok`/`FAILED` by the process's own exit
-//!   code. No in-source `#[test]` discovery — deliberately out of this
-//!   stage's scope (see `docs/architecture/roadmap.md`'s Stage 6 entry).
-//!
-//! `--release` is sugar for `-O3`. `--emit-ast`/`--emit-hir`/`--emit-mir`/
-//! `--emit-llvm` each write a debug dump to a sibling file (`<output or
-//! source>.ast`/`.hir`/`.mir`/`.ll`, mirroring `--emit-object`'s own
-//! sibling-naming convention) — available data only: `--emit-hir`/
-//! `--emit-mir` are silent no-ops if an earlier stage never ran.
-
-use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
-
-use nether_driver::CheckResult;
+use nether_frontend::{
+    modules::load,
+    parser::parse,
+    source::{Diagnostic, Source, SourceId},
+};
+use nether_semantics::OverflowChecks;
+use std::{
+    env, fs,
+    io::Write,
+    path::{Path, PathBuf},
+    process::{Command, ExitCode, Stdio},
+};
 
 fn main() -> ExitCode {
-    let mut args = std::env::args().skip(1);
-    let Some(command) = args.next() else {
-        print_usage();
-        return ExitCode::FAILURE;
-    };
-    if !matches!(command.as_str(), "check" | "build" | "ast" | "run" | "test") {
-        eprintln!("error: unknown command `{command}`");
-        print_usage();
-        return ExitCode::FAILURE;
-    }
-    let Some(path_arg) = args.next() else {
-        print_usage();
-        return ExitCode::FAILURE;
-    };
-    let path = PathBuf::from(path_arg);
-
-    let mut options = nether_driver::CompileOptions::default();
-    let mut emit_ast = false;
-    let mut emit_hir = false;
-    let mut emit_mir = false;
-    let mut emit_llvm = false;
-    let remaining: Vec<String> = args.collect();
-    let mut index = 0;
-    while index < remaining.len() {
-        match remaining[index].as_str() {
-            "--target" if index + 1 < remaining.len() => {
-                options.target_triple = remaining[index + 1].clone();
-                index += 2;
-            }
-            "-o" if index + 1 < remaining.len() => {
-                options.output_path = Some(PathBuf::from(&remaining[index + 1]));
-                index += 2;
-            }
-            "--emit-object" => {
-                options.link = false;
-                index += 1;
-            }
-            "--release" => {
-                options.opt_level = 3;
-                index += 1;
-            }
-            "--emit-ast" => {
-                emit_ast = true;
-                index += 1;
-            }
-            "--emit-hir" => {
-                emit_hir = true;
-                index += 1;
-            }
-            "--emit-mir" => {
-                emit_mir = true;
-                index += 1;
-            }
-            "--emit-llvm" => {
-                emit_llvm = true;
-                index += 1;
-            }
-            flag if flag.len() == 3 && flag.starts_with("-O") => {
-                options.opt_level = match flag[2..].parse::<u8>() {
-                    Ok(level @ 0..=3) => level,
-                    _ => {
-                        eprintln!("error: optimization level must be -O0, -O1, -O2, or -O3");
-                        return ExitCode::FAILURE;
-                    }
-                };
-                index += 1;
-            }
-            other => {
-                eprintln!("error: unknown or incomplete option `{other}`");
-                print_usage();
-                return ExitCode::FAILURE;
-            }
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => {
+            eprintln!("{message}");
+            ExitCode::FAILURE
         }
     }
-
-    // Every `--emit-*` sibling file is named off this same base, mirroring
-    // `nether_driver::compile`'s own `<output-or-source>.o` convention.
-    let emit_base = options.output_path.clone().unwrap_or_else(|| path.clone());
-    if emit_llvm {
-        options.emit_llvm_path = Some(emit_base.with_extension("ll"));
+}
+fn render(sources: &[Source], errors: &[Diagnostic]) -> String {
+    errors
+        .iter()
+        .map(|d| {
+            sources
+                .get(d.span.source.0)
+                .map_or_else(|| format!("{}: {}", d.code, d.message), |s| s.render(d))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+fn run() -> Result<(), String> {
+    let args: Vec<_> = env::args().skip(1).collect();
+    if args.is_empty() || args == ["--help"] {
+        println!("Nether 0.1 development\nUsage: nether <syntax|check|eval|emit-llvm|build> <file.nr> [options]\nOptions: --release --overflow-checks=on|off --package-name=app\nBuild: --emit=object -o <output>\nsyntax checks grammar only; eval is bounded reference execution.\nTarget: x86_64-unknown-linux-gnu; set NETHER_CLANG / NETHER_LINKER for toolchain paths.");
+        return Ok(());
     }
-
-    let result = match nether_driver::compile(&path, &options) {
-        Ok(result) => result,
-        Err(e) => {
-            eprintln!("error: {e} ({})", path.display());
-            return ExitCode::FAILURE;
-        }
-    };
-
-    let has_error = result.diagnostics.iter().any(|d| d.is_error());
-    for diag in &result.diagnostics {
-        eprint!("{}", nether_diagnostics::render(diag, &result.source_map));
+    if args == ["--version"] {
+        println!("nether 0.1.0 (development)");
+        return Ok(());
     }
-
-    if emit_ast
-        && write_emit_dump(
-            &emit_base.with_extension("ast"),
-            format!("{:#?}", result.module),
-        )
-        .is_err()
+    if args.len() < 2
+        || !["syntax", "check", "eval", "emit-llvm", "build"].contains(&args[0].as_str())
     {
-        return ExitCode::FAILURE;
+        return Err("invalid command; use --help".into());
     }
-    if emit_hir {
-        // `HirModule::signatures` (`nether_typecheck::Signatures`) has no
-        // `Debug` impl (and adding one would cascade across most of that
-        // crate's own types) — dump the function bodies alone, the part
-        // someone reaching for `--emit-hir` actually wants to read.
-        if let Some(hir) = &result.hir {
-            if write_emit_dump(&emit_base.with_extension("hir"), format!("{:#?}", hir.fns)).is_err() {
-                return ExitCode::FAILURE;
+    let mut release = false;
+    let mut override_checks = None;
+    let mut object = false;
+    let mut output = None;
+    let mut package = "app".to_owned();
+    let mut index = 2;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--release" => release = true,
+            "--overflow-checks=on" => override_checks = Some(OverflowChecks::Checked),
+            "--overflow-checks=off" => override_checks = Some(OverflowChecks::Wrapping),
+            "--emit=object" if args[0] == "build" => object = true,
+            "-o" if args[0] == "build" => {
+                index += 1;
+                output = Some(PathBuf::from(args.get(index).ok_or("-o requires a path")?));
             }
-        }
-    }
-    if emit_mir {
-        if let Some(mir) = &result.mir {
-            if write_emit_dump(&emit_base.with_extension("mir"), format!("{mir:#?}")).is_err() {
-                return ExitCode::FAILURE;
+            option if option.starts_with("--package-name=") => {
+                package = option[15..].into();
+                if package.is_empty() {
+                    return Err("package name cannot be empty".into());
+                }
             }
+            option => return Err(format!("unknown option '{option}'")),
         }
+        index += 1;
     }
-
-    if has_error {
-        return ExitCode::FAILURE;
-    }
-
-    match command.as_str() {
-        "ast" => {
-            println!("{:#?}", result.module);
-            ExitCode::SUCCESS
-        }
-        "run" | "test" => run_or_test(command == "test", &path, &result),
-        _ => {
-            println!("{}: {}", status_line(&result), path.display());
-            ExitCode::SUCCESS
-        }
-    }
-}
-
-fn write_emit_dump(path: &Path, contents: String) -> std::io::Result<()> {
-    std::fs::write(path, contents).map_err(|e| {
-        eprintln!("error: failed to write `{}`: {e}", path.display());
-        e
-    })
-}
-
-fn status_line(result: &CheckResult) -> String {
-    if let Some(exe) = &result.executable_path {
-        format!(
-            "ok (parsed, resolved, type-checked, lowered, monomorphized, mir-built, linked: {})",
-            exe.display()
-        )
-    } else if let Some(obj) = &result.object_path {
-        format!(
-            "ok (parsed, resolved, type-checked, lowered, monomorphized, mir-built, object emitted: {} — not linked, build runtime/* first)",
-            obj.display()
-        )
-    } else if result.hir.is_some() {
-        "ok (parsed, resolved, type-checked, lowered)".to_string()
-    } else if result.resolved.is_some() {
-        "ok (parsed, resolved)".to_string()
+    let checks = override_checks.unwrap_or(if release {
+        OverflowChecks::Wrapping
     } else {
-        "ok (parsed)".to_string()
-    }
-}
-
-/// `run`/`test` (Stage 6) — executes the linked binary, stdout/stderr
-/// inherited (passed straight through, `Command::status`'s own default).
-/// `is_test` additionally frames the result as `test <path> ... ok`/
-/// `FAILED` after the child finishes, but always propagates the child's
-/// own exit code either way — a CI script gating on `nether test`'s exit
-/// status doesn't need to parse this framing at all.
-fn run_or_test(is_test: bool, path: &Path, result: &CheckResult) -> ExitCode {
-    let Some(exe) = &result.executable_path else {
-        eprintln!(
-            "error: nothing to run — no executable was produced (is `runtime/*` built locally?)"
-        );
-        return ExitCode::FAILURE;
-    };
-    let status = match Command::new(exe).status() {
-        Ok(status) => status,
-        Err(e) => {
-            eprintln!("error: failed to run {}: {e}", exe.display());
-            return ExitCode::FAILURE;
+        OverflowChecks::Checked
+    });
+    if args[0] == "syntax" {
+        let text = fs::read_to_string(&args[1]).map_err(|e| format!("{}: {e}", args[1]))?;
+        let source = Source::new(&args[1], text);
+        let parsed = parse(SourceId(0), &source.text);
+        if !parsed.diagnostics.is_empty() {
+            return Err(render(&[source], &parsed.diagnostics));
         }
-    };
-    if is_test {
-        if status.success() {
-            println!("test {} ... ok", path.display());
+        println!("syntax passed (not a type or ownership check)");
+        return Ok(());
+    }
+    let loaded = load(Path::new(&args[1]), &package);
+    if !loaded.diagnostics.is_empty() {
+        return Err(render(&loaded.sources, &loaded.diagnostics));
+    }
+    let program = nether_core::check::check(&loaded.module.unwrap())
+        .map_err(|d| render(&loaded.sources, &d))?;
+    match args[0].as_str() {
+        "check" => println!("type check passed (implemented value subset)"),
+        "eval" => {
+            let main = program.main.ok_or("no main function")?;
+            let value =
+                nether_core::interpret::execute(&program, main, Vec::new(), checks, 1_000_000)
+                    .map_err(|t| {
+                        render(
+                            &loaded.sources,
+                            &[Diagnostic::new(
+                                "R0001",
+                                format!("reference execution failed: {:?}", t.kind),
+                                t.span,
+                            )],
+                        )
+                    })?;
+            println!("{value:?}");
+        }
+        command => {
+            let ir = nether_core::llvm::emit_with_sources(&program, checks, &loaded.sources)
+                .map_err(|d| render(&loaded.sources, &[d]))?;
+            if command == "emit-llvm" {
+                print!("{ir}");
+            } else {
+                if !object && program.main.is_none() {
+                    return Err("executable requires main".into());
+                }
+                if !object && !cfg!(target_os = "linux") && env::var_os("NETHER_LINKER").is_none() {
+                    return Err("Linux linker/sysroot required on this host; use --emit=object or configure NETHER_LINKER".into());
+                }
+                let input = Path::new(&args[1]);
+                let output =
+                    output.unwrap_or_else(|| input.with_extension(if object { "o" } else { "" }));
+                let canonical_output = output.canonicalize().ok();
+                if output == input
+                    || loaded.sources.iter().any(|source| {
+                        canonical_output
+                            .as_ref()
+                            .is_some_and(|path| *path == PathBuf::from(&source.name))
+                    })
+                {
+                    return Err("output would overwrite source".into());
+                }
+                build(&ir, &output, object, release)?;
+                println!("built {}", output.display());
+            }
+        }
+    }
+    Ok(())
+}
+fn build(ir: &str, output: &Path, object: bool, release: bool) -> Result<(), String> {
+    let parent = output
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let temporary = parent.join(format!(".nether-{}.o", std::process::id()));
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|e| e.to_string())?;
+    let mut executable = None;
+    let result = (|| {
+        let compiler = env::var_os("NETHER_CLANG").unwrap_or_else(|| "clang".into());
+        let mut process = Command::new(compiler)
+            .args([
+                "--target=x86_64-unknown-linux-gnu",
+                "-x",
+                "ir",
+                "-c",
+                if release { "-O2" } else { "-O0" },
+                "-",
+                "-o",
+            ])
+            .arg(&temporary)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("cannot start LLVM compiler: {e}"))?;
+        let write = process.stdin.take().unwrap().write_all(ir.as_bytes());
+        let result = process.wait_with_output().map_err(|e| e.to_string())?;
+        if !result.status.success() {
+            return Err(format!(
+                "LLVM compilation failed: {}",
+                String::from_utf8_lossy(&result.stderr)
+            ));
+        }
+        write.map_err(|e| e.to_string())?;
+        if object {
+            fs::rename(&temporary, output).map_err(|e| e.to_string())?;
         } else {
-            println!("test {} ... FAILED", path.display());
+            let linker = env::var_os("NETHER_LINKER").unwrap_or_else(|| "cc".into());
+            let staged = parent.join(format!(".nether-{}.exe", std::process::id()));
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&staged)
+                .map_err(|e| e.to_string())?;
+            executable = Some(staged.clone());
+            let mut process = Command::new(linker)
+                .arg(&temporary)
+                .args(["-std=c11", "-x", "c", "-", "-lm", "-o"])
+                .arg(&staged)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("cannot start Linux linker: {e}"))?;
+            let write = process
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(include_bytes!("../../runtime/src/runtime.c"));
+            let result = process.wait_with_output().map_err(|e| e.to_string())?;
+            if !result.status.success() {
+                return Err(format!(
+                    "link failed: {}",
+                    String::from_utf8_lossy(&result.stderr)
+                ));
+            }
+            write.map_err(|e| e.to_string())?;
+            fs::rename(&staged, output).map_err(|e| e.to_string())?;
+            executable = None;
         }
+        Ok(())
+    })();
+    if let Some(staged) = executable {
+        let _ = fs::remove_file(staged);
     }
-    match status.code() {
-        Some(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
-        None => ExitCode::FAILURE,
+    if temporary.exists() {
+        let _ = fs::remove_file(temporary);
     }
-}
-
-fn print_usage() {
-    eprintln!(
-        "usage: nether <check|build|ast|run|test> <file.nr> \
-         [--target <triple>] [-O0|-O1|-O2|-O3] [--release] [-o <path>] \
-         [--emit-object] [--emit-ast] [--emit-hir] [--emit-mir] [--emit-llvm]"
-    );
+    result
 }

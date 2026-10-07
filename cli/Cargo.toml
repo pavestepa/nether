@@ -1,13 +1,14 @@
 [package]
-name = "nether-cli"
-edition.workspace = true
+name = "nether"
 version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 publish.workspace = true
 
-[[bin]]
-name = "nether"
-path = "src/main.rs"
-
 [dependencies]
-nether-diagnostics = { path = "../compiler/diagnostics" }
-nether-driver = { path = "../compiler/driver" }
+nether-frontend = { path = "../compiler/frontend" }
+nether-core = { path = "../compiler/core" }
+nether-semantics = { path = "../compiler/semantics" }
+
+[lints]
+workspace = true

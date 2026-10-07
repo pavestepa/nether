@@ -2,6 +2,9 @@
 
 Статус: план реализации. Этапы ниже являются требованиями к результату, а не утверждением о готовности существующего компилятора.
 
+Текущий прогресс и ограничения: [состояние реализации](status.md).
+Синтаксические и числовые контракты этапа 0: [профиль 0.1](profile.md).
+
 Основа языка — [основная спецификация](../main.md), прежде всего §21–24, §34, §69, §81, §88–89, §91–95 и §99. Этот документ задаёт сокращённый объём версии 0.1 и порядок его реализации. Исключённые возможности остаются направлениями будущего развития; их присутствие в `main.md` не делает их обязательными для этого релиза.
 
 ## 1. Цель и основной приоритет
@@ -144,7 +147,7 @@ Raw allocation не создаёт инициализированный `T`. Н�
 
 Для 0.1 достаточно allocation → move элементов → deallocation старого буфера; оптимизированный `realloc` не нужен. Обычный memcpy не подменяет семантический `Copy`, особенно для class с отдельной identity.
 
-**Контракт библиотечного хранилища — обязательная часть модели.** Generic `push` должен статически требовать допустимый owned аргумент, `pop` возвращать owned значение, `get` возвращать view с зависимостью от receiver, а `get_mut` — уникальный mutable view. Lifetime вложенных borrowed компонентов `T` должен сохраняться при помещении в контейнер.
+**Контракт библиотечного хранилища — обязательная часть модели.** По [утверждённому решению](decisions/container-ownership.md) compiler выводит статический owned либо readonly-view режим элементов. В owned specialization `push` требует допустимый owned аргумент, `pop` возвращает owned значение, `get` возвращает view с зависимостью от receiver, а `get_mut` — уникальный mutable view. В readonly-view specialization `push` сохраняет view, `pop` возвращает view с lifetime внешней цели, cleanup не уничтожает цель; `get_mut` не предоставляет mutable-доступ к ней. Смешивание режимов запрещено. Lifetime вложенных borrowed компонентов `T` сохраняется в обоих вариантах.
 
 Checker не может восстановить эти факты из произвольных pointer casts. Нужны compiler-known intrinsics с проверяемыми параметрами ownership/provenance и экспортируемые эффекты wrapper. Точная связь задаётся в IR/metadata; пользовательские `owns` и lifetime-аннотации не добавляются. Авторы unsafe wrapper отвечают за соответствие raw storage объявленному контракту. Wrapper не должен иметь возможности незаметно объявить raw pointer источником бессрочного safe view.
 
@@ -172,20 +175,20 @@ Backend предоставляет unsafe target intrinsic с номером в�
 
 ### Этап 0. Зафиксировать исполнимый профиль и проверяемые контракты
 
-- [ ] Составить короткую grammar/type table всего включённого subset; исключённые формы получают диагностику.
-- [ ] Сохранить `{T; N}` для fixed array, `{...}` для array literal в expression context и blocks в позициях control flow; явный `return`, опциональный `;` — по `main.md`.
-- [ ] Закрепить таблицу operators, casts, overflow/division/shift rules. Не допускать host UB вместо ошибки Nether; отдельно описать `MIN / -1`, `MIN % -1`, float-to-int и invalid shift.
-- [ ] Зафиксировать `*T`/`*var T`, pointer provenance, правила адреса и `unsafe`, точные сигнатуры storage intrinsics.
-- [ ] Определить contracts safe views из unsafe storage, dynamic indexing и invalidation effects пользовательского контейнера.
-- [ ] Зафиксировать layout/ABI начального target, entry point, link protocol и минимальный panic/runtime ABI.
-- [ ] Описать формат ownership/lifetime metadata и правила вывода contracts для рекурсивных функций и взаимных вызовов.
-- [ ] Подготовить positive/negative примеры для каждого memory invariant, включая логические группы и weak.
+- [x] Составить короткую grammar/type table всего включённого subset; закрепить диагностику исключённых форм ([профиль §1–2, §6](profile.md); выдача диагностик реализуется во frontend этапа 1).
+- [x] Сохранить `{T; N}` для fixed array, `{...}` для array literal в expression context и blocks в позициях control flow; явный `return`, опциональный `;` — по `main.md` ([профиль §3](profile.md), [ожидаемые примеры](syntax-cases.md)).
+- [x] Закрепить таблицу operators, casts, overflow/division/shift rules. Не допускать host UB вместо ошибки Nether; отдельно описать `MIN / -1`, `MIN % -1`, float-to-int и invalid shift ([профиль §4–5](profile.md), integer oracle `compiler/semantics`; числовой LLVM lowering реализован на этапе 1).
+- [x] Зафиксировать `*T`/`*var T`, pointer provenance, правила адреса и `unsafe`, точные сигнатуры storage intrinsics ([контракт](storage-contracts.md)).
+- [x] Определить contracts safe views из unsafe storage, dynamic indexing и invalidation effects пользовательского контейнера ([контракт](storage-contracts.md)).
+- [x] Зафиксировать layout/ABI начального target, entry point, link protocol и минимальный panic/runtime ABI ([layout](layout.md), [ABI](abi.md)).
+- [x] Описать формат ownership/lifetime metadata и правила вывода contracts для рекурсивных функций и взаимных вызовов ([metadata](metadata.md)).
+- [x] Подготовить positive/negative примеры для каждого memory invariant, включая логические группы и weak ([acceptance contracts](memory-cases.md); это ожидаемые результаты, не пройденные compiler tests).
 
 **Критерий готовности:** для каждого примера можно заранее указать owned/view режим, допустимые mutations, владельца результата и точный cleanup. Неясность в этих свойствах блокирует соответствующее lowering, а не закрывается runtime refcount.
 
 ### Этап 1. Frontend, простые значения и исполняемые программы
 
-- [ ] Lexer/parser со spans; AST для обязательного синтаксиса.
+- [x] Lexer/parser со spans; AST для обязательного синтаксиса.
 - [ ] Resolver модулей, signatures, generic parameters и members; циклические ссылки declarations внутри пакета без runtime module initialization.
 - [ ] HIR с определёнными типами и ссылками на declarations.
 - [ ] Primitive arithmetic/comparison/bitwise operations, явные numeric casts, const evaluation с диагностикой циклов и overflow.
@@ -197,7 +200,7 @@ Backend предоставляет unsafe target intrinsic с номером в�
 
 ### Этап 2. MIR, владение и безопасные заимствования
 
-- [ ] CFG-based MIR с places: local, field, variant payload, element и projection path.
+- [x] CFG-based MIR с places: local, field, variant payload, element и projection path (LLVM получает код через MIR; подключены local inline views, resource ownership inference ещё не готов).
 - [ ] Раздельные признаки initialization, ownership, access mode, provenance и lifetime; type `T` не подменяет эти сведения.
 - [ ] Явные IR operations для Copy, Move, Borrow, Reborrow, Initialize, Replace и Drop.
 - [ ] Liveness/future-use analysis по всему CFG: branches, early exits, back edges, repeated iterations, reinitialization.

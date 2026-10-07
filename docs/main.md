@@ -478,6 +478,8 @@ Vec<i32>
 
 Тип `Vec<T>` не требует пользовательского `owns`/`view` параметра. Compiler выводит соответствующий контракт контейнера и проверяет его операции. Удаление borrowed элемента убирает только view и не уничтожает внешнюю цель.
 
+Уточнение для профиля 0.1 (утверждено 2026-10-06): один storage имеет статически выведенный режим owned либо readonly-view элементов; смешивание режимов запрещено. Пустой storage получает режим из ограничений всех использований, при отсутствии ограничений — owned. Owned inline элементы хранятся inline, borrowed inline элементы — через view descriptors. `pop` передаёт owned значение только в owned specialization; в borrowed specialization он возвращает view с lifetime внешней цели. Mutable-доступ к buffer не повышает права на borrowed цели. Подробности — [решение профиля 0.1](0.1/decisions/container-ownership.md).
+
 `let values` предоставляет readonly-доступ к container и его элементам. Изменение состава, capacity или owned element storage требует `var values` и mutable receiver соответствующей операции. Это не повышает права ранее сохранённых readonly views: capability каждого элемента сохраняется в контракте. Ссылочный layout `Vec` не отменяет правила §23–24.
 
 ---
@@ -819,6 +821,8 @@ editable = new User()  // замена owned значения с cleanup пре�
 Copy создаёт самостоятельные owned данные. `var copy = readonly_copy_value` не изменяет исходные owned данные; копирование descriptor readonly view не создаёт mutable доступ к его цели. Instance receiver не копируется автоматически ради вызова mutable метода (§34).
 
 Переприсваивание borrowed `var` binding меняет только его локальную привязку. Запись в поле через mutable view изменяет исходный объект. При замене view старая цель не уничтожается; замена owned значения выполняет cleanup по §93.
+
+Для safe view выражение `*view` обозначает целевое место с сохранением provenance и access capability. `*view = value` и `*view += value` изменяют цель mutable view; через readonly view запись запрещена. Это безопасные операции для inline targets. Class view предоставляет доступ к существующей identity: её поля и методы доступны по capability, но `*class_view = new C()` запрещено. Class целиком заменяется через owning binding/field или явную операцию контейнера `replace`; `get_mut` class не предоставляет право замены owning slot. Простое `view = other` по-прежнему перепривязывает borrowed binding, а raw pointer dereference требует `unsafe`.
 
 Owned результат функции можно принять как `let` или `var`, независимо от readonly bindings/параметров, через которые он был передан, при проверке оставшихся aliases и ограничений компонентов. Borrowed результат сохраняет readonly/mutable capability и lifetime источника. Возвращаемый тип `T` не стирает ownership и эти зависимости; смешанные ветви не получают owned или mutable contract, если его нельзя доказать для всех соответствующих путей.
 
@@ -1962,7 +1966,7 @@ Destructor является специальным lifecycle body с implicit ex
 
 Порядок cleanup:
 
-- owned roots одного scope уничтожаются в обратном порядке успешной инициализации;
+- owned roots одного scope уничтожаются в обратном порядке успешной инициализации текущих owned значений. Успешная замена root или повторная инициализация после move переносит его в конец порядка инициализации своего owning scope; при cleanup он уничтожается раньше ранее инициализированных roots. Запись отдельного поля не переставляет aggregate root. Неуспешное вычисление RHS не меняет позицию destination;
 - для объекта сначала выполняется body его пользовательского destructor, затем owned поля в порядке объявления; borrowed/weak поля не уничтожают цели;
 - для class сначала завершается cleanup производной части, затем base части с её destructor и owned полями;
 - array/tuple elements уничтожаются в порядке индексов, enum — owned payload активного variant; контейнер фиксирует порядок в своём API, для `Vec` это текущий порядок элементов;
@@ -2760,7 +2764,7 @@ Identifier pattern имеет форму `[ref] [var] name`:
 | `ref name` | Явный readonly view на payload |
 | `ref var name` | Явный unique mutable view на payload |
 
-`var` в pattern имеет ту же access semantics, что и в declaration. Consuming pattern может перенести owned payload из readonly binding в mutable binding при проверках §24. Readonly borrowed payload нельзя повысить до mutable или превратить во владельца. `ref var` не выполняет move: ему необходимы mutable-доступное место и доказанная уникальность; для readonly owned источника сначала требуется отдельная передача в `var`. Scope bindings ограничен конструкцией/ветвью; consuming/mutable bindings начинают действовать после принятия guard.
+`var` в pattern имеет ту же access semantics, что и в declaration. Consuming pattern может перенести owned payload из readonly binding в mutable binding при проверках §24. Readonly borrowed payload нельзя повысить до mutable или превратить во владельца. Запись в сам payload через mutable view задаётся `*name = value` или compound assignment; обычное `name = other` перепривязывает binding по §24. `ref var` не выполняет move: ему необходимы mutable-доступное место и доказанная уникальность; для readonly owned источника сначала требуется отдельная передача в `var`. Scope bindings ограничен конструкцией/ветвью; consuming/mutable bindings начинают действовать после принятия guard.
 
 ```nether
 var point = (1, 2)

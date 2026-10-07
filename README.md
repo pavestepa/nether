@@ -1,245 +1,62 @@
 # Nether
 
-Nether is an experimental statically typed native language. It combines
-Rust-like static typing and traits with Swift-like ARC reference semantics
-*and* Rust-like unique ownership in one coherent type system — the
-programmer chooses per binding, not the language globally — and compiles
-through LLVM to a native executable. See
-[`docs/spec/language-spec.md`](docs/spec/language-spec.md) for the full
-design and [`docs/architecture/roadmap.md`](docs/architecture/roadmap.md)
-for what's implemented today versus staged for later.
+Новая реализация версии 0.1 по [roadmap](docs/0.1/roadmap.md).
+Работает первый компилятор значений: frontend, проверка типов, эталонный
+интерпретатор и LLVM backend для `x86_64-unknown-linux-gnu`.
+Локальные inline views поддерживают readonly/mutable доступ, reborrow и проверки lifetime.
+Работают non-Copy inline aggregates, owned/borrowed варианты вызовов и instance
+методы structs. Runtime содержит allocator и обработку panic.
+Полная модель владения, runtime ресурсов и стандартная библиотека ещё не готовы;
+зависимые от них формы отклоняются. Полный статус — [здесь](docs/0.1/status.md).
 
-Every stage in the roadmap is implemented today. The compiler provides:
+## Документация
 
-- lexer, parser, diagnostics, name resolution, and type checking;
-- the four-value-form ownership model (`T`/`:T`/`t`/`:t` — ARC reference,
-  uniquely owned heap value, inline value, uniquely owned inline value);
-- traits with static dispatch, multiple inheritance, defaults, and
-  generic monomorphization (plus witness-table dispatch for dictionary-safe
-  generics in development builds);
-- multiple generic bounds with canonical `<T TraitA + TraitB>` syntax;
-- equivalent `where T TraitA + TraitB` clauses on generic declarations;
-- explicit `default impl` fallbacks with concrete instance-method specialization;
-- associated types/constants, const generics, and existential/opaque
-  `any Trait`/`some Trait` types;
-- HIR, closure conversion, CFG-based MIR, and ARC insertion;
-- structs, tuples, enums/match, arrays, weak references, and closures,
-  including `mut (...) => { ... }` closures that capture a `mut`-declared
-  inline local by reference (writes inside the body are visible to the
-  outer binding once the closure returns);
-- newline-aware optional semicolons (Go-style ASI), `/* ... */` block
-  comments, and a syntactic split between growable-array literals (`[...]`,
-  always `Array<T>`) and fixed-size array literals (`{...}`, always
-  `{T, N}`);
-- local multi-file modules through `use`, plus a `Nether.toml` package
-  manifest for local-path dependencies across separate package directories;
-- default-private declarations with explicit `pub` APIs and re-exports;
-- the narrow `#[allow_pascal_case]` escape hatch for exceptional type aliases;
-- structural `Clone` conversion into an independent unique outer object;
-- user-defined `clone(: &self): T` overrides for custom clone behavior;
-- derived structural `Eq` for ARC and unique structs with comparable fields;
-- deterministic derived structural `Hash` through `hash(value) u64`;
-- `async fn`/`await` compiled to real state machines, backed by a
-  Tokio-driven runtime, with `task.spawn`/`timer.sleep`;
-- `unsafe fn`/`unsafe { ... }`, raw pointers (`*const T`/`*mut T`,
-  `&raw const`/`&raw mut`, `*expr`), and `extern "C"`/`#[link(name = "...")]`
-  FFI declarations;
-- atomic ARC, compiler-derived `Send`/`Sync` (with an `unsafe impl`
-  escape hatch), real parallel OS threads via `thread.spawn`/`.join()`,
-  and spawned-borrow diagnostics for both `task.spawn` and `thread.spawn`;
-- LLVM object emission, optimization levels, and native linking;
-- a small Nether-source Option/Result/Array standard library.
+- [Спецификация языка](docs/main.md).
+- [Roadmap 0.1](docs/0.1/roadmap.md).
+- [Профиль синтаксиса и числовой семантики](docs/0.1/profile.md).
+- [Состояние реализации и ограничения](docs/0.1/status.md).
+- [Layout](docs/0.1/layout.md), [ABI](docs/0.1/abi.md), [storage contracts](docs/0.1/storage-contracts.md).
 
-Flow-sensitive move checking for uniquely owned locals is implemented.
-Borrowing is enforced for call-scoped `:&T`/`:&mut T` parameters and
-receivers and for heap references stored in explicitly typed `let`
-bindings. Returned-reference origins are propagated through named-function
-call chains, so a safely returned reference can be stored in `let`; the
-resulting borrow is shortened after its last use. The same summaries cover
-instance/static methods (`self` included) and closures, including captured
-origins. Local origins and multiple possible parameter origins are rejected.
-Loop uses keep a borrow live through the loop expression, and a locally bound
-closure keeps captured borrows live through that closure's last use. Escaping
-or otherwise non-local closure values use a conservative lexical fallback.
-A closure that captures a local by mutable reference is rejected if
-returned directly, for the same reason; spawning a `task`/`thread` that
-captures a borrow of a local owned by the spawning function is rejected
-the same way a returned reference would be.
+## Запуск
 
-## Requirements
-
-- Rust stable;
-- LLVM 18;
-- a C linker available as `cc`.
-
-The checked-in `.cargo/config.toml` points at Homebrew's ARM macOS LLVM 18:
+Нужен Rust 1.86+. Для object emission и LLVM tests нужен LLVM/Clang 18.
+`NETHER_CLANG` задаёт путь к clang; сторонних Rust dependencies нет.
 
 ```sh
-brew install llvm@18
+cargo run -p nether -- check examples/arithmetic/main.nr
+cargo run -p nether -- eval examples/arithmetic/main.nr
+NETHER_CLANG=clang-18 cargo run -p nether -- build examples/arithmetic/main.nr --emit=object -o /tmp/arithmetic.o
 ```
 
-On another platform, set `LLVM_SYS_180_PREFIX` to that platform's LLVM 18
-installation and adjust/remove the macOS-specific linker search path in
-`.cargo/config.toml`.
+На Linux сборка executable выполняется без `--emit=object`. `NETHER_LINKER`
+задаёт C compiler driver (по умолчанию `cc`), который связывает объект,
+встроенный C runtime и libm.
+На других host нужен настроенный Linux linker/sysroot; emitted object остаётся
+Linux x86-64, независимо от host. `--release` включает `-O2` и wrapping arithmetic;
+`--overflow-checks=on|off` явно переопределяет арифметический режим.
+`eval` — ограниченное эталонное выполнение, не запуск backend-программы.
 
-## Build and test
+## Проверка
 
 ```sh
-cargo build -p nether-cli
-cargo test --workspace
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked --offline -- -D warnings
+NETHER_CLANG=clang-18 cargo test --workspace --locked --offline
+NETHER_CLANG=clang-18 cargo test --workspace --release --locked --offline
+NETHER_CLANG=clang-18 cargo test -p nether-core --test native --locked --offline -- --ignored --nocapture
 ```
 
-Build the runtime libraries once before producing linked executables:
+Последняя команда требует Linux x86-64. На другом host тест поддерживает
+`NETHER_LINUX_DOCKER=1` и образ `gcc:14-bookworm` через Docker. CI явно запускает
+native suite: пропуск этого теста в переносимой suite не считается его прохождением.
 
-```sh
-cargo build --release \
-  -p nether-rt-arc \
-  -p nether-rt-string \
-  -p nether-rt-array \
-  -p nether-rt-io \
-  -p nether-rt-task \
-  -p nether-rt-thread
-```
+## Структура
 
-Compile and run a program:
-
-```sh
-cargo run -p nether-cli -- run examples/hello_world/main.nr
-```
-
-Subcommands: `check` (diagnostics only), `build` (same as `check`), `ast`
-(also pretty-prints the parsed AST), `run` (also executes the linked
-binary, passing stdout/stderr/exit code straight through), `test` (like
-`run`, framed as `test <path> ... ok`/`FAILED` by the process's own exit
-code).
-
-Useful options:
-
-```text
---target <llvm-triple>
--O0 | -O1 | -O2 | -O3 | --release  (sugar for -O3)
--o <output-path>
---emit-object
---emit-ast | --emit-hir | --emit-mir | --emit-llvm
-```
-
-For example, emit an optimized object without linking:
-
-```sh
-cargo run -p nether-cli -- build examples/hello_world/main.nr -O2 --emit-object
-```
-
-## Examples
-
-`examples/hello_world/main.nr` is the checked-in compilable showcase: a
-PascalCase heap (`struct`) type, a lowercase inline `struct`, all four
-`let`-binding value forms, an owned struct literal consumed by an owned
-parameter, and methods. The driver integration suite compiles, links and
-executes it, so it is kept in sync with the language. See
-[`docs/spec/language-spec.md`](docs/spec/language-spec.md) §23 for a
-similarly-shaped, fully annotated reference example (that one also covers
-`Into<String>` and traits, which the checked-in example does not).
-
-Earlier multi-file showcases (`shelter`, `metrics`, `adventure`) used
-pre-rewrite MVP syntax and were removed rather than migrated; see
-[`docs/architecture/roadmap.md`](docs/architecture/roadmap.md) for the
-rewrite's staging.
-
-## Modules and standard library
-
-A file is a module. Declare a child similarly to Rust:
-
-```nether
-mod lang;
-use self.lang.Lang;
-
-fn main() {
-    let value = Lang.new("Nether");
-}
-```
-
-`mod lang;` looks for `lang.nr` or `lang/mod.nr` (the legacy `.nt`
-extension is rejected with a migration diagnostic — language-spec §2.1). A
-non-root `foo.nr` may declare nested children below `foo/`. Import roots
-have their Rust meanings: `self` is the current
-module, `super` is its parent, and `crate` is the entry module. Nether uses
-`.` everywhere instead of Rust's `::`.
-
-All declarations are private by default. A declaration that must cross a
-module boundary is marked `pub`; this applies independently to modules,
-functions, imports, structs/enums/type aliases, named struct fields, and both
-instance and static methods. A plain `use` is local to its file, while
-`pub use` re-exports the imported name.
-
-Each file has its own top-level namespace, while an `impl` in a child can
-extend a parent type after `use super.Type;`. Import aliases, globs, and
-inline `mod name { ... }` blocks are not implemented. Bundled
-standard-library modules are available without a `mod
-stdlib;` declaration:
-
-```nether
-use stdlib.result.Result;
-
-fn main() {
-    let ok Result<i32, String> = Result.Ok(4);
-    println(`${ok.map((x i32) => { x + 1 }).unwrap_or(0)}`);
-}
-```
-
-`stdlib/mod.nr` is additionally always loaded as a program-wide prelude,
-independent of whether anything `use`s it: every top-level `pub use` written
-in that one file is re-exported to every other file with no `use`/`mod`
-of its own (a local declaration of the same name is a legal shadow, not
-a conflict). `Option`/`Result`/`Array` themselves are ordinary generic
-`enum`/`struct` declarations this way (`stdlib/option.nr`/
-`stdlib/result.nr`/`stdlib/array.nr`), not compiler builtins — their
-hand-written methods use the explicit `impl<T> Option<T> { ... }` form, see
-[`docs/generics.md`](docs/generics.md) § "Methods on generic types" — and
-the whole thing is available with zero ceremony, no `use` at all:
-
-```nether
-fn main() {
-    let value Option<i32> = Option.Some(4);
-    println(`${value.unwrap_or(0)}`);
-}
-```
-
-`stdlib/` is also reachable under the name `std`, either explicitly
-(`mod std;`, mounting the same tree `mod stdlib;` would if it existed) or
-directly in a `use` path (`use std.result.Result;`, equivalent to
-`use stdlib.result.Result;`) — no `mod std;` declaration required.
-
-## Architecture
-
-```text
-source → lexer → parser → resolver → typecheck
-       → HIR → monomorphization → MIR + ARC
-       → LLVM IR → object → linker → executable
-```
-
-The language reference is in
-[`docs/spec/language-spec.md`](docs/spec/language-spec.md). Compiler-stage
-boundaries and memory-management rules are described under
-[`docs/architecture`](docs/architecture).
-
-For working examples of generic functions, types, enums, methods,
-traits, bounds, inheritance and current limitations, see
-[`docs/generics.md`](docs/generics.md).
-
-Nether has no garbage collector, macros, or reflection. Its current borrow
-checker infers origins and shortens ordinary borrows after their last use,
-with loop- and local-closure-sensitive shortening plus a safe lexical fallback
-for closure values whose final local use cannot be established.
-Async, threads, and unsafe code are not implemented. Dynamic dispatch is
-available through `any Trait`/`some Trait`; see
-[`docs/architecture/roadmap.md`](docs/architecture/roadmap.md) for which
-stage adds each of those.
-
-Current deliberate limits include local generic inference (associated types
-must be selected through a known owner; concrete specialization is scoped to instance methods only, see
-`docs/generics.md`), no general import aliases/globs/re-exports (bundled
-`stdlib/mod.nr` is a special-cased exception, see "Modules and standard
-library" above), a flattened/non-union enum layout, and native linking
-only for the host target. Cross-target object emission is supported.
-Variadic parameters (`fn f(args ...String)`) are supported as sugar over a
-hidden const-generic fixed array — see `docs/spec/language-spec.md` §8.7.
+- `compiler/semantics/` — integer/layout oracle и solver режимов storage.
+- `compiler/frontend/` — исходники, диагностика, lexer, parser и модули.
+- `compiler/core/` — типизированный HIR, CFG MIR, generics, checker, интерпретаторы и LLVM lowering.
+- `cli/` — команды `syntax`, `check`, `eval`, `emit-llvm`, `build`.
+- `runtime/` — allocation, panic reporting и диагностический allocation log.
+- `stdlib/` — место для стандартной библиотеки следующих этапов.
+- `examples/` — исполняемые примеры.
+- `docs/` — спецификация, контракты и план.

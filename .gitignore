@@ -2,6 +2,3 @@
 /.claude/
 .DS_Store
 *.o
-
-# Native binaries emitted next to the bundled examples.
-/examples/hello_world/main

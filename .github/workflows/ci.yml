@@ -1,20 +1,34 @@
-name: CI
+name: Semantic contracts
 
 on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
-  test:
-    runs-on: macos-14
+  semantics:
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - name: Install LLVM 18
-        run: brew install llvm@18
-      - name: Check workspace
-        run: cargo check --workspace
-      - name: Test workspace
-        run: cargo test --workspace --no-fail-fast
+      - name: Install Rust
+        run: rustup toolchain install 1.86.0 --profile minimal --component rustfmt --component clippy
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y clang-18
+      - name: Check formatting
+        run: cargo +1.86.0 fmt --all -- --check
+      - name: Check lints
+        run: cargo +1.86.0 clippy --workspace --all-targets --locked --offline -- -D warnings
+      - name: Test debug contracts
+        env:
+          NETHER_CLANG: clang-18
+        run: cargo +1.86.0 test --workspace --locked --offline
+      - name: Test release contracts
+        env:
+          NETHER_CLANG: clang-18
+        run: cargo +1.86.0 test --workspace --release --locked --offline
+      - name: Compare native Linux programs with reference execution
+        env:
+          NETHER_CLANG: clang-18
+        run: cargo +1.86.0 test -p nether-core --test native --locked --offline -- --ignored --nocapture

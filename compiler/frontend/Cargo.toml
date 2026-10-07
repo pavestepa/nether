@@ -1,0 +1,12 @@
+[package]
+name = "nether-frontend"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+nether-semantics = { path = "../semantics" }
+
+[lints]
+workspace = true
