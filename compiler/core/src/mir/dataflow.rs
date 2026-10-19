@@ -8,14 +8,18 @@ pub struct Liveness {
     pub live_out: Vec<Locals>,
 }
 pub fn liveness(function: &Function) -> Liveness {
+    let flow = reachability::analyze(function);
     let mut input = vec![Locals::new(); function.blocks.len()];
     let mut output = input.clone();
     loop {
         let mut changed = false;
         for (id, block) in function.blocks.iter().enumerate().rev() {
+            if !flow.reachable[id] {
+                continue;
+            }
             let mut live = Locals::new();
-            for next in block.terminator.successors() {
-                live.extend(&input[next]);
+            for next in &flow.successors[id] {
+                live.extend(&input[*next]);
             }
             output[id] = live.clone();
             if let Terminator::Evaluate {
@@ -37,6 +41,18 @@ pub fn liveness(function: &Function) -> Liveness {
                 }
             }
             live.extend(uses(&block.terminator));
+            match &block.terminator {
+                Terminator::EndStorage { locals, .. } => {
+                    live.extend(locals.iter().filter(|l| function.drop_reads.contains(l)))
+                }
+                Terminator::Evaluate { destination, .. }
+                    if destination.projections.is_empty()
+                        && function.drop_reads.contains(&destination.local) =>
+                {
+                    live.insert(destination.local);
+                }
+                _ => {}
+            }
             if input[id] != live {
                 input[id] = live;
                 changed = true;
@@ -62,12 +78,20 @@ pub fn uses(terminator: &Terminator) -> Locals {
                 place_uses(destination, &mut result);
             }
             match operation {
+                Operation::Identity(a, b) => {
+                    place_uses(a, &mut result);
+                    place_uses(b, &mut result);
+                }
                 Operation::TagPlace(place)
                 | Operation::Borrow(place)
                 | Operation::CapturePlace(place)
+                | Operation::LoadView(place)
+                | Operation::StoreView(place)
                 | Operation::Copy(place)
                 | Operation::Move(place) => place_uses(place, &mut result),
-                Operation::Use(value)
+                Operation::AllocateClass(_) => {}
+                Operation::CompleteClass(value)
+                | Operation::Use(value)
                 | Operation::Unary(_, value)
                 | Operation::Cast(value, _)
                 | Operation::Tag(value) => operand_uses(value, &mut result),
@@ -75,9 +99,21 @@ pub fn uses(terminator: &Terminator) -> Locals {
                     operand_uses(a, &mut result);
                     operand_uses(b, &mut result);
                 }
+                Operation::CallIndirect(callee, values, _) => {
+                    operand_uses(callee, &mut result);
+                    for value in values {
+                        operand_uses(value, &mut result);
+                    }
+                }
                 Operation::Aggregate(values)
                 | Operation::Enum(_, values)
-                | Operation::Call(_, values) => {
+                | Operation::Call(_, values)
+                | Operation::CallStorage {
+                    arguments: values, ..
+                }
+                | Operation::CallView {
+                    arguments: values, ..
+                } => {
                     for value in values {
                         operand_uses(value, &mut result);
                     }
@@ -120,12 +156,20 @@ pub fn required_initialized(terminator: &Terminator) -> Vec<Place> {
     };
     match terminator {
         Terminator::Evaluate { operation, .. } => match operation {
+            Operation::Identity(a, b) => {
+                places.push(a.clone());
+                places.push(b.clone());
+            }
             Operation::TagPlace(place)
             | Operation::Borrow(place)
             | Operation::CapturePlace(place)
+            | Operation::LoadView(place)
+            | Operation::StoreView(place)
             | Operation::Copy(place)
             | Operation::Move(place) => places.push(place.clone()),
-            Operation::Use(value)
+            Operation::AllocateClass(_) => {}
+            Operation::CompleteClass(value)
+            | Operation::Use(value)
             | Operation::Unary(_, value)
             | Operation::Cast(value, _)
             | Operation::Tag(value) => add_operand(value),
@@ -133,9 +177,21 @@ pub fn required_initialized(terminator: &Terminator) -> Vec<Place> {
                 add_operand(left);
                 add_operand(right);
             }
+            Operation::CallIndirect(callee, values, _) => {
+                add_operand(callee);
+                for value in values {
+                    add_operand(value);
+                }
+            }
             Operation::Aggregate(values)
             | Operation::Enum(_, values)
-            | Operation::Call(_, values) => {
+            | Operation::Call(_, values)
+            | Operation::CallStorage {
+                arguments: values, ..
+            }
+            | Operation::CallView {
+                arguments: values, ..
+            } => {
                 for value in values {
                     add_operand(value);
                 }
@@ -169,6 +225,7 @@ pub fn required_initialized(terminator: &Terminator) -> Vec<Place> {
 }
 
 pub fn place_initialization_errors(function: &Function) -> Vec<(BlockId, Place)> {
+    let flow = reachability::analyze(function);
     use super::initialization::{State, Status};
     let mut universe: std::collections::BTreeSet<Place> =
         (0..function.locals.len()).map(Place::local).collect();
@@ -195,7 +252,8 @@ pub fn place_initialization_errors(function: &Function) -> Vec<(BlockId, Place)>
     let mut queue = std::collections::VecDeque::from([function.entry]);
     while let Some(id) = queue.pop_front() {
         let state = incoming[id].as_ref().unwrap().clone();
-        for next in function.blocks[id].terminator.successors() {
+        for next in &flow.successors[id] {
+            let next = *next;
             let mut output = state.clone();
             if let Terminator::EndStorage { locals, .. } = &function.blocks[id].terminator {
                 for local in locals {
@@ -209,7 +267,15 @@ pub fn place_initialization_errors(function: &Function) -> Vec<(BlockId, Place)>
                 ..
             } = &function.blocks[id].terminator
             {
-                if *success == next || matches!(operation, Operation::Call(..)) {
+                if *success == next
+                    || matches!(
+                        operation,
+                        Operation::Call(..)
+                            | Operation::CallIndirect(..)
+                            | Operation::CallView { .. }
+                            | Operation::CallStorage { .. }
+                    )
+                {
                     for source in consumed(function, operation) {
                         output.set(source, Status::Uninitialized);
                     }
@@ -257,17 +323,24 @@ pub fn consumed(function: &Function, operation: &Operation) -> Vec<Place> {
     let mut places = Vec::new();
     let mut operand = |value: &Operand| {
         if let Operand::Local(local) = value {
-            if !function.locals[*local].ty.copyable() {
+            if function.locals[*local].view.is_none() && function.locals[*local].ty.owns_storage() {
                 places.push(Place::local(*local));
             }
         }
     };
     match operation {
         Operation::Move(source) => places.push(source.clone()),
-        Operation::Use(value) => operand(value),
-        Operation::Aggregate(values) | Operation::Enum(_, values) | Operation::Call(_, values) => {
-            values.iter().for_each(operand)
+        Operation::Use(value) | Operation::CompleteClass(value) => operand(value),
+        Operation::Aggregate(values)
+        | Operation::Enum(_, values)
+        | Operation::Call(_, values)
+        | Operation::CallIndirect(_, values, _)
+        | Operation::CallStorage {
+            arguments: values, ..
         }
+        | Operation::CallView {
+            arguments: values, ..
+        } => values.iter().for_each(operand),
         _ => (),
     }
     places

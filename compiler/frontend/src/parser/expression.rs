@@ -69,7 +69,13 @@ impl Parser {
             {
                 let (saved, last, edits) = (self.pos, self.last, self.edits.len());
                 if let Ok(arguments) = self.type_arguments() {
-                    if self.at("(") || self.at(".") || (!before_body && self.at("{")) {
+                    if self.at("(")
+                        || self.at(".")
+                        || (!before_body && self.at("{"))
+                        || self.at_eof()
+                        || self.newline()
+                        || [")", "]", "}", ",", ";"].iter().any(|token| self.at(token))
+                    {
                         let span = left.span.join(self.last);
                         left = Expr {
                             kind: ExprKind::Specialize {

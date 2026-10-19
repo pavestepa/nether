@@ -161,3 +161,66 @@ bool __nether_v1_cleanup_scope(NetherPanic *panic, NetherCleanupScope *scope) {
     }
     return success;
 }
+
+bool __nether_v1_cleanup_selected(NetherPanic *panic, NetherCleanupScope *scope,
+                                  NetherCleanupRoot *const *roots, uint64_t count) {
+    bool success = true;
+    NetherCleanupRoot *root = scope->last;
+    while (root) {
+        NetherCleanupRoot *previous = root->previous;
+        for (uint64_t i = 0; i < count; ++i) {
+            if (roots[i] == root) {
+                if (!__nether_v1_cleanup_root(panic, root)) success = false;
+                break;
+            }
+        }
+        root = previous;
+    }
+    return success;
+}
+
+/* A mutable inline view can carry this compiler-owned initialization capability
+ * across a call. A field has no root record; replacing it must not reorder the
+ * enclosing aggregate. A root keeps its lexical owner even while uninitialized. */
+typedef struct {
+    void *value;
+    NetherDrop drop;
+    NetherCleanupRoot *root;
+    NetherCleanupScope *owner;
+    /* 0 = uninitialized, 1 = live, 2 = finalizing. */
+    uint8_t initialized;
+} NetherSlot;
+_Static_assert(offsetof(NetherSlot, initialized) == 32, "slot ABI mismatch");
+_Static_assert(sizeof(NetherSlot) == 40, "slot ABI mismatch");
+
+void __nether_v1_slot_forget(NetherSlot *slot) {
+    if (slot->initialized > 1) abort();
+    slot->initialized = 0;
+    if (slot->root) __nether_v1_cleanup_forget(slot->root);
+}
+
+bool __nether_v1_slot_drop(NetherPanic *panic, void *opaque) {
+    NetherSlot *slot = opaque;
+    if (!slot->initialized) return true;
+    __nether_v1_slot_forget(slot);
+    slot->initialized = 2;
+    bool unwinding = panic->active != 0;
+    bool success = slot->drop(panic, slot->value);
+    slot->initialized = 0;
+    if (!success) {
+        if (unwinding) __nether_v1_abort_double_panic(panic);
+        if (!panic->active) abort();
+    }
+    return success;
+}
+
+void __nether_v1_slot_initialize(NetherSlot *slot) {
+    if (slot->initialized || !slot->drop) abort();
+    slot->initialized = 1;
+    if (slot->root) {
+        if (!slot->owner) abort();
+        slot->root->drop = __nether_v1_slot_drop;
+        slot->root->value = slot;
+        __nether_v1_cleanup_push(slot->owner, slot->root);
+    }
+}

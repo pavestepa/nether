@@ -1,62 +1,69 @@
 # Nether
 
-Новая реализация версии 0.1 по [roadmap](docs/0.1/roadmap.md).
-Работает первый компилятор значений: frontend, проверка типов, эталонный
-интерпретатор и LLVM backend для `x86_64-unknown-linux-gnu`.
-Локальные inline views поддерживают readonly/mutable доступ, reborrow и проверки lifetime.
-Работают non-Copy inline aggregates, owned/borrowed варианты вызовов и instance
-методы structs. Runtime содержит allocator и обработку panic.
-Полная модель владения, runtime ресурсов и стандартная библиотека ещё не готовы;
-зависимые от них формы отклоняются. Полный статус — [здесь](docs/0.1/status.md).
+Nether компилируется в Rust. Собственные frontend, type/ownership checker и MIR
+сохраняют модель памяти языка; Rust backend генерирует source, который собирает
+обычный `rustc`. Прямого LLVM backend и зависимости от Clang больше нет.
 
-## Документация
+[Новая концепция](docs/0.1/rust-backend.md) · [Спецификация](docs/main.md) ·
+[План MVP](docs/0.1/mvp_plan.md) · [Roadmap](docs/0.1/roadmap.md) · [Состояние реализации](docs/0.1/status.md).
 
-- [Спецификация языка](docs/main.md).
-- [Roadmap 0.1](docs/0.1/roadmap.md).
-- [Профиль синтаксиса и числовой семантики](docs/0.1/profile.md).
-- [Состояние реализации и ограничения](docs/0.1/status.md).
-- [Layout](docs/0.1/layout.md), [ABI](docs/0.1/abi.md), [storage contracts](docs/0.1/storage-contracts.md).
+Работают значения, generics, inline aggregates, local views, owned/borrowed entries,
+struct methods, function values с owned/borrowed-сигнатурами (включая non-Copy) и source destructors с
+детерминированным cleanup, включая panic и частичное создание aggregates.
+Работают class/new/constructors, рекурсивные классы, методы и class views:
+move сохраняет identity, Copy создаёт отдельный объект, Rust хранит payload в Box.
+Возврат views сохраняет lifetime и права доступа через calls, generics и рекурсию.
+Structs, tuples, arrays и enum payload хранят readonly views; их зависимости
+сохраняются при передаче и возврате через функции, generics и imports. Mutable
+borrowed-параметры могут переназначать эти поля со статической проверкой времени
+жизни новых targets, включая panic paths. Проверки и Rust backend исключают
+доказанно недостижимые ветви локальных enum. Режимы локального storage учитывают
+поздние присваивания, aliases и требования параметров/результатов; массивы согласуют
+mode всех элементов. Borrowed class fields, destructors таких оболочек и borrowed
+function pointers реализованы. Статические interfaces поддерживают явные реализации,
+conjunction constraints и проверку generic bodies по объявленным ограничениям.
+Пример — [interfaces](examples/interfaces/main.nr). Private members доступны только
+внутри объявляющего class/struct; generic method pointers поддерживают явные
+type arguments ([пример](examples/private_members/main.nr)). Проверяются hierarchy и
+override declarations; root-class virtual methods используют static calls
+([пример](examples/virtual_methods/main.nr)). Далее — embedded base/super и inherited methods,
+static upcast и dyn dispatch. Производительность на уровне эквивалентного Rust — цель проверки,
+а не уже доказанное свойство всего языка.
 
-## Запуск
+## Использование
 
-Нужен Rust 1.86+. Для object emission и LLVM tests нужен LLVM/Clang 18.
-`NETHER_CLANG` задаёт путь к clang; сторонних Rust dependencies нет.
+Нужен Rust 1.86+ и системный linker, используемый rustc. Сторонних crates нет.
+`NETHER_RUSTC` задаёт путь к compiler executable.
 
 ```sh
 cargo run -p nether -- check examples/arithmetic/main.nr
 cargo run -p nether -- eval examples/arithmetic/main.nr
-NETHER_CLANG=clang-18 cargo run -p nether -- build examples/arithmetic/main.nr --emit=object -o /tmp/arithmetic.o
+cargo run -p nether -- emit-rust examples/arithmetic/main.nr > /tmp/arithmetic.rs
+cargo run -p nether -- build examples/arithmetic/main.nr -o /tmp/arithmetic
+cargo run -p nether -- build examples/arithmetic/main.nr --release --emit=object -o /tmp/arithmetic.o
 ```
 
-На Linux сборка executable выполняется без `--emit=object`. `NETHER_LINKER`
-задаёт C compiler driver (по умолчанию `cc`), который связывает объект,
-встроенный C runtime и libm.
-На других host нужен настроенный Linux linker/sysroot; emitted object остаётся
-Linux x86-64, независимо от host. `--release` включает `-O2` и wrapping arithmetic;
-`--overflow-checks=on|off` явно переопределяет арифметический режим.
-`eval` — ограниченное эталонное выполнение, не запуск backend-программы.
+Сборка выполняется для 64-bit host. `--release` включает Rust optimization level 3
+и wrapping arithmetic; `--overflow-checks=on|off` переопределяет арифметику Nether.
+`eval` остаётся ограниченным эталонным интерпретатором.
 
-## Проверка
+## Проверки
 
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked --offline -- -D warnings
-NETHER_CLANG=clang-18 cargo test --workspace --locked --offline
-NETHER_CLANG=clang-18 cargo test --workspace --release --locked --offline
-NETHER_CLANG=clang-18 cargo test -p nether-core --test native --locked --offline -- --ignored --nocapture
+cargo test --workspace --locked --offline
+cargo test --workspace --release --locked --offline
 ```
 
-Последняя команда требует Linux x86-64. На другом host тест поддерживает
-`NETHER_LINUX_DOCKER=1` и образ `gcc:14-bookworm` через Docker. CI явно запускает
-native suite: пропуск этого теста в переносимой suite не считается его прохождением.
+Native suite собирает и запускает Rust-программы на host при O0/O3 и сравнивает
+их с HIR/MIR interpreters. Docker и отдельный LLVM toolchain не нужны.
 
 ## Структура
 
-- `compiler/semantics/` — integer/layout oracle и solver режимов storage.
-- `compiler/frontend/` — исходники, диагностика, lexer, parser и модули.
-- `compiler/core/` — типизированный HIR, CFG MIR, generics, checker, интерпретаторы и LLVM lowering.
-- `cli/` — команды `syntax`, `check`, `eval`, `emit-llvm`, `build`.
-- `runtime/` — allocation, panic reporting и диагностический allocation log.
-- `stdlib/` — место для стандартной библиотеки следующих этапов.
-- `examples/` — исполняемые примеры.
-- `docs/` — спецификация, контракты и план.
+- `compiler/semantics/` — числовые, layout и storage contracts.
+- `compiler/frontend/` — lexer, parser, diagnostics и modules.
+- `compiler/core/` — HIR, MIR, ownership checker, interpreters и Rust source backend.
+- `cli/` — `syntax`, `check`, `eval`, `emit-rust`, `build`.
+- `runtime/` — инфраструктура allocation и deterministic cleanup.
+- `stdlib/`, `examples/`, `docs/` — библиотека, примеры и контракты языка.

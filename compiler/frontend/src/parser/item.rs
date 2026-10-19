@@ -217,16 +217,27 @@ impl Parser {
         self.separators();
         let mut members = Vec::new();
         while !self.at("}") {
-            self.unsupported()?;
             let start = self.current().span;
             let private = self.eat_word("private");
             if !private {
                 self.eat_word("public");
             }
+            let dispatch = if self.eat_word("virtual") {
+                MethodDispatch::Virtual
+            } else if self.eat_word("override") {
+                MethodDispatch::Override
+            } else {
+                MethodDispatch::Ordinary
+            };
+            if dispatch != MethodDispatch::Ordinary && !self.word("fn") {
+                return Err(self.error("virtual/override must precede a method declaration"));
+            }
+            self.unsupported()?;
             let member = if self.word("fn") {
                 Member::Method {
                     function: self.function(true, false, false)?,
                     private,
+                    dispatch,
                 }
             } else if self.eat_word("constructor") {
                 if !class {

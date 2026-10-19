@@ -1,11 +1,24 @@
 # Nether 0.1 — roadmap первой жизнеспособной версии
 
-Статус: план реализации. Этапы ниже являются требованиями к результату, а не утверждением о готовности существующего компилятора.
+Статус: план реализации Rust-target версии (концепция обновлена 2026-10-13). Этапы ниже являются требованиями к результату, а не утверждением о готовности существующего компилятора.
+
+Основной трек с чекпоинтами: [план MVP](mvp_plan.md).
 
 Текущий прогресс и ограничения: [состояние реализации](status.md).
 Синтаксические и числовые контракты этапа 0: [профиль 0.1](profile.md).
 
+Backend-контракт — [генерация Rust](rust-backend.md): прямого LLVM backend нет; модель памяти сохраняется. Class inheritance входит в 0.1 через struct + trait + Box; статические специализации дополняются dyn trait при runtime polymorphism.
+
 Основа языка — [основная спецификация](../main.md), прежде всего §21–24, §34, §69, §81, §88–89, §91–95 и §99. Этот документ задаёт сокращённый объём версии 0.1 и порядок его реализации. Исключённые возможности остаются направлениями будущего развития; их присутствие в `main.md` не делает их обязательными для этого релиза.
+
+C0–C3 реализованы: borrowed result/component provenance, class payloads,
+пользовательские destructors borrowed оболочек, storage mode inference через
+параметры/aliases/results и owned/borrowed function pointers. Типы и effects
+достигают fixed point перед окончательной lifetime-проверкой. Enum refinement и
+may-write dependencies остаются консервативными. C4.1 (статические interfaces) реализован. В C4.2 готовы private access,
+declaration hierarchy и override matching; root virtual methods выполняются
+статически. Далее — embedded base/super, inherited body lowering, upcast и dyn dispatch.
+Детальная приёмка отмечена в [плане MVP](mvp_plan.md).
 
 ## 1. Цель и основной приоритет
 
@@ -47,7 +60,7 @@
 - Региональные оптимизации размещения: arenas, bump allocation, reset региона, объединение allocations, escape-based stack promotion.
 - Variadic packs, `...T`, C varargs и variadic forwarding.
 - Capturing closures, сложные type-level вычисления, associated types/GAT и пользовательские lifetime-параметры.
-- Наследование class/struct, `dyn` и runtime vtables. В 0.1 interfaces обеспечивают статические generic constraints; композиция и enum заменяют эти дополнительные механизмы.
+- Concrete inheritance для struct и множественное class inheritance. Single class inheritance, static trait implementations и необходимый dyn polymorphism входят в 0.1.
 - `for` и общий iterator protocol, interpolation/форматирование, синтаксический сахар динамических массивов. Для первой библиотеки достаточно `while`, методов и явных вызовов.
 
 Перечисленные возможности не должны молча приниматься с неполной семантикой. До реализации компилятор выдаёт понятную диагностику о неподдерживаемой возможности. Расширение scope требует отдельного решения, а не становится условием завершения текущего этапа.
@@ -163,9 +176,9 @@ Panic не пересекает C boundary. Для первой версии д�
 
 **Прямые системные вызовы входят в обязательный release scope.** Вызов libc-функции `syscall` через FFI не закрывает это требование.
 
-Первый эталонный target плана — `x86_64-unknown-linux-gnu`; запуск на другом host выполняется через Linux CI/VM. Это ограничение первого порта, а не языка. macOS и другие targets получают собственные platform adapters позднее. Если первый target меняется, меняется весь согласованный ABI/test profile до начала backend-этапа.
+Portable Rust subset собирается и запускается на 64-bit host через rustc. Первый adapter прямых syscalls — Linux x86-64; macOS и другие platform adapters добавляются отдельно. Target layout и FFI проверяются для выбранного Rust target.
 
-Backend предоставляет unsafe target intrinsic с номером вызова и фиксированными шестью machine-word аргументами, например контракт `syscall(number: usize, args: {usize; 6}): isize`. Это фиксированный API, не variadic pack. Неиспользуемые slots задаются явно. Lowering выполняет системную инструкцию target с корректными registers, clobbers и memory effects.
+Backend предоставляет unsafe target intrinsic с номером вызова и фиксированными шестью machine-word аргументами, например контракт `syscall(number: usize, args: {usize; 6}): isize`. Это фиксированный API, не variadic pack. Неиспользуемые slots задаются явно. Rust lowering использует target-specific asm adapter и выполняет системную инструкцию target с корректными registers, clobbers и memory effects.
 
 Номера вызовов, codes/errors и layout системных структур относятся к platform-модулю. Safe обёртки `read`, `write`, `close` и операции памяти проверяют buffers, lengths, partial results и ресурсные lifetime. Сам syscall не обещает автоматически вернуть `Result` или сохранить raw buffer после завершения его владельца.
 
@@ -177,7 +190,7 @@ Backend предоставляет unsafe target intrinsic с номером в�
 
 - [x] Составить короткую grammar/type table всего включённого subset; закрепить диагностику исключённых форм ([профиль §1–2, §6](profile.md); выдача диагностик реализуется во frontend этапа 1).
 - [x] Сохранить `{T; N}` для fixed array, `{...}` для array literal в expression context и blocks в позициях control flow; явный `return`, опциональный `;` — по `main.md` ([профиль §3](profile.md), [ожидаемые примеры](syntax-cases.md)).
-- [x] Закрепить таблицу operators, casts, overflow/division/shift rules. Не допускать host UB вместо ошибки Nether; отдельно описать `MIN / -1`, `MIN % -1`, float-to-int и invalid shift ([профиль §4–5](profile.md), integer oracle `compiler/semantics`; числовой LLVM lowering реализован на этапе 1).
+- [x] Закрепить таблицу operators, casts, overflow/division/shift rules. Не допускать host UB вместо ошибки Nether; отдельно описать `MIN / -1`, `MIN % -1`, float-to-int и invalid shift ([профиль §4–5](profile.md), integer oracle `compiler/semantics`; числовой lowering переносится в Rust backend этапа 1).
 - [x] Зафиксировать `*T`/`*var T`, pointer provenance, правила адреса и `unsafe`, точные сигнатуры storage intrinsics ([контракт](storage-contracts.md)).
 - [x] Определить contracts safe views из unsafe storage, dynamic indexing и invalidation effects пользовательского контейнера ([контракт](storage-contracts.md)).
 - [x] Зафиксировать layout/ABI начального target, entry point, link protocol и минимальный panic/runtime ABI ([layout](layout.md), [ABI](abi.md)).
@@ -194,27 +207,31 @@ Backend предоставляет unsafe target intrinsic с номером в�
 - [ ] Primitive arithmetic/comparison/bitwise operations, явные numeric casts, const evaluation с диагностикой циклов и overflow.
 - [ ] `let`/`var`, scopes, `fn`, recursion, `if`/`else`, `while`, `break`/`continue`, `return`.
 - [ ] Inline structs/tuples/fixed arrays и tagged enums; `match`, exhaustiveness, basic patterns.
-- [ ] Базовый LLVM lowering, object emission, linking и запуск `main` без зависимости от готовых `String`/`Vec`.
+- [ ] Rust source lowering, rustc object/executable emission и запуск `main` без зависимости от готовых `String`/`Vec`.
 
 **Критерий готовности:** исполняемые программы с вычислениями, ветвлениями, recursion и массивами; ошибки типов/инициализации не доходят до backend. Пока ownership для формы не реализован, форма отклоняется, а не исполняется небезопасно.
 
 ### Этап 2. MIR, владение и безопасные заимствования
 
-- [x] CFG-based MIR с places: local, field, variant payload, element и projection path (LLVM получает код через MIR; подключены local inline views, resource ownership inference ещё не готов).
+- [x] CFG-based MIR с places: local, field, variant payload, element и projection path (Rust backend получает код через MIR; подключены local inline views и inline/class resource cleanup; borrowed aggregate/callable contracts подключены).
 - [ ] Раздельные признаки initialization, ownership, access mode, provenance и lifetime; type `T` не подменяет эти сведения.
 - [ ] Явные IR operations для Copy, Move, Borrow, Reborrow, Initialize, Replace и Drop.
 - [ ] Liveness/future-use analysis по всему CFG: branches, early exits, back edges, repeated iterations, reinitialization.
 - [ ] Place-sensitive loans: непересекающиеся доказанные поля допускают независимые операции, неизвестные пересечения индексированных элементов проверяются консервативно.
 - [ ] Автоматический выбор move/view/Copy и проверка перехода readonly owned → mutable owned.
-- [ ] Вывод и проверка owned/borrowed entries, consuming-only effects, lifetime результатов, borrowed полей и static/instance receiver contracts.
+- [x] Вывод и проверка owned/borrowed entries, consuming-only effects, lifetime результатов, borrowed полей и static/instance receiver contracts.
 - [ ] Fixed-point inference для recursive call groups без runtime выбора entry. Неоднозначный неподтверждённый контракт диагностируется.
-- [ ] Class identity, construction, heap allocation; проверки полного и частичного initialization.
-- [ ] Проверка `#[Copy]`, включая запрет ресурса с destructor и отдельную identity у Copy class.
+- [x] Class identity, construction, heap allocation; проверки полного и частичного initialization.
+- [x] Проверка `#[Copy]`, включая запрет ресурса с destructor и отдельную identity у Copy class.
 - [ ] Diagnostics с местом создания loan, конфликтующей операцией и зависимым последующим use.
 
 **Критерий готовности:** checker пропускает корректные программы и отвергает use-after-move, escaped view, readonly promotion, conflicting mutation, invalid return и использование неинициализированного payload. Владение не вычисляется динамически при запуске.
 
 ### Этап 3. Детерминированный cleanup и первая проверка модели памяти
+
+Статус 2026-10-13: inline resource subset реализован в C1
+[mvp_plan.md](mvp_plan.md), включая source/generic destructors и native Rust cleanup.
+Общие чекбоксы ниже сохраняют полный scope, включая ещё не реализованные borrowed aggregates и inheritance.
 
 - [ ] Drop elaboration после ownership analysis: cleanup blocks и необходимые drop flags на каждом выходе из CFG.
 - [ ] Cleanup на normal exit, `return`, `break`/`continue`, замене значения и panic unwinding.
@@ -229,12 +246,12 @@ Backend предоставляет unsafe target intrinsic с номером в�
 
 ### Этап 4. Generics, interfaces и контракты библиотек
 
-- [ ] Generic `class`, `struct`, `enum`, `interface`, функции и методы; явные type arguments и однозначный inference.
-- [ ] Interface/Copy constraints, conjunction через `&`, проверка body по constraints, static dispatch.
-- [ ] Ограниченные `const N: usize` для fixed arrays; проверка размера при specialization. Простые defaults — по §38.
-- [ ] Monomorphization сохраняет ownership/lifetime/access modes и выбирает применимые entries, включая смешанные режимы нескольких параметров.
-- [ ] Проверки рекурсивных типов: class indirection допустима, бесконечный inline layout отклоняется.
-- [ ] Function pointers и их конкретные entry contracts; plain C function pointers не смешиваются с Nether ABI.
+- [x] Generic `class`, `struct`, `enum`, `interface`, функции и методы; явные type arguments и однозначный inference.
+- [x] Interface/Copy constraints, conjunction через `&`, проверка body по constraints, static dispatch.
+- [x] Ограниченные `const N: usize` для fixed arrays; проверка размера при specialization. Простые defaults — по §38.
+- [x] Monomorphization сохраняет ownership/lifetime/access modes и выбирает применимые entries, включая смешанные режимы нескольких параметров.
+- [x] Проверки рекурсивных типов: class indirection допустима, бесконечный inline layout отклоняется.
+- [x] Function pointers и их конкретные entry contracts; plain C function pointers не смешиваются с Nether ABI.
 - [ ] Сериализация public signatures, ownership/lifetime/effect metadata и compiler-readable generic bodies.
 - [ ] Импортированная библиотека проверяется по metadata; correctness не зависит от чтения исходного body обычной функции.
 
@@ -336,3 +353,14 @@ Backend предоставляет unsafe target intrinsic с номером в�
 - отсутствие скрытого clone, GC или ARC.
 
 Для оптимизации нужны измерение конкретного overhead и прохождение всей memory suite в сравнении с baseline. Async и многопоточность получают отдельный план после стабилизации синхронной модели; они не являются условием выпуска 0.1.
+
+## Приёмка Rust-target архитектуры
+
+- [x] Generated Rust поддержанного subset компилируется обычным rustc без Clang/C runtime linking.
+- [x] Native Rust O0/O3 совпадает с HIR/MIR на текущих 90 переносимых conformance cases; новые resource/class cases добавляются при реализации.
+- [ ] Class A → payload + trait + Box; B : A → embedded base + trait implementation.
+- [ ] B принимается вместо A; static specialization и смешанные dyn коллекции сохраняют права.
+- [ ] Upcast сохраняет identity и не добавляет allocation; concrete destructor вызывается один раз.
+- [ ] Unsafe emission проверено на provenance, aliasing, partial initialization и cleanup.
+- [ ] Benchmark suite против эквивалентного handwritten Rust: allocations, время и code size.
+- [ ] Нет обязательного GC/ARC, RefCell, скрытого clone или runtime ownership dispatch.

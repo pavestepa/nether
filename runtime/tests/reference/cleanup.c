@@ -26,6 +26,7 @@ void __nether_v1_cleanup_forget(Root *);
 void __nether_v1_cleanup_push(Scope *, Root *);
 bool __nether_v1_cleanup_root(Panic *, Root *);
 bool __nether_v1_cleanup_scope(Panic *, Scope *);
+bool __nether_v1_cleanup_selected(Panic *, Scope *, Root *const *, uint64_t);
 
 static unsigned log_values[32], log_length;
 typedef struct { unsigned id; bool fail; Root *root; } Resource;
@@ -138,6 +139,18 @@ int main(void) {
     assert(scope.last == &ra);
     assert(__nether_v1_cleanup_scope(&panic, &scope));
     expected((unsigned[]){4, 5, 2}, 3);
+
+    /* A partial storage boundary respects initialization order, not the order
+     * of the static selection array, and preserves the unselected return root. */
+    __nether_v1_cleanup_push(&scope, &ra);
+    __nether_v1_cleanup_push(&scope, &rb);
+    __nether_v1_cleanup_push(&scope, &rc);
+    Root *selected[] = {&ra, &rc, &ra};
+    assert(__nether_v1_cleanup_selected(&panic, &scope, selected, 3));
+    expected((unsigned[]){4, 5}, 2);
+    assert(scope.last == &rb && !rb.previous && !rb.next);
+    assert(__nether_v1_cleanup_scope(&panic, &scope));
+    expected((unsigned[]){2}, 1);
 
     /* A first destructor panic still drains the remaining scope. */
     a.fail = true;

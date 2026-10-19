@@ -1,5 +1,7 @@
 # Metadata и вывод контрактов 0.1
 
+Архитектура: [Nether → Rust](rust-backend.md). Правила памяти сохраняются; прямой LLVM backend удалён.
+
 Контракт этапа 0. Schema/algorithm определены здесь; serializer и checker пока
 не реализованы. Library artifact — native object/archive плюс UTF-8 JSON `.nmeta`.
 
@@ -71,8 +73,10 @@ refcount для обхода recursion или обращения к неиниц
 
 ## Граница доверия
 
-Native object и metadata должны быть из согласованной trusted build. Signature
+Generated Rust / rustc artifacts и metadata должны быть из согласованной trusted build. Signature
 validation не доказывает безопасность враждебного native object. Unsafe wrapper
 отвечает за raw resource protocol; importer проверяет доступные ему ordinary
 ownership/lifetime contracts. Изменение consuming/cleanup/return effects может
 ломать API при прежней source signature и требует пересборки dependents.
+
+Rust binary ABI нестабилен: metadata привязана к версии Nether, rustc, target и representation profile. Trait upcast/dispatch и concrete destructor identity входят в class contracts.

@@ -38,7 +38,7 @@ fn safe_views_write_original_places_and_rebinding_preserves_old_target() {
         assert_eq!(a,b,"{source}");
         let Value::Integer(a) = a else { panic!() };
         assert_eq!(a.signed_value(), Some(expected),"{source}");
-        nether_core::llvm::emit(&hir, OverflowChecks::Checked).unwrap();
+        nether_core::rust::emit(&hir, OverflowChecks::Checked).unwrap();
     }
 }
 #[test]

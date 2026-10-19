@@ -1,4 +1,4 @@
-use nether_core::{check::check, llvm::emit};
+use nether_core::{check::check, rust::emit};
 use nether_frontend::{parser::parse, source::SourceId};
 use nether_semantics::OverflowChecks;
 use std::{
@@ -14,32 +14,31 @@ fn verify(source: &str, checks: OverflowChecks) {
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let program = check(&parsed.module.unwrap()).unwrap();
     let ir = emit(&program, checks).unwrap();
-    assert!(!ir.contains(" inbounds "));
-    let compiler = std::env::var("NETHER_CLANG").unwrap_or_else(|_| "clang".into());
-    // A missing compiler is a failure: these are actual LLVM verification tests.
+    let compiler = std::env::var("NETHER_RUSTC").unwrap_or_else(|_| "rustc".into());
+    // A missing rustc is a failure: these tests compile emitted Rust.
     let dir = std::env::temp_dir().join(format!(
-        "nether-llvm-{}-{}",
+        "nether-rust-{}-{}",
         std::process::id(),
         SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ));
     fs::create_dir_all(&dir).unwrap();
-    let input = dir.join("case.ll");
+    let input = dir.join("case.rs");
     let output = dir.join("case.o");
     fs::write(&input, &ir).unwrap();
-    for optimization in ["-O0", "-O2"] {
+    for optimization in ["opt-level=0", "opt-level=3"] {
         let result = Command::new(&compiler)
             .args([
-                "--target=x86_64-unknown-linux-gnu",
-                "-x",
-                "ir",
-                "-c",
+                "--edition=2021",
+                "--crate-type=lib",
+                "--emit=obj",
+                "-C",
                 optimization,
             ])
             .arg(&input)
             .arg("-o")
             .arg(&output)
             .output()
-            .expect("LLVM compiler required; set NETHER_CLANG");
+            .expect("Rust compiler required; set NETHER_RUSTC");
         assert!(
             result.status.success(),
             "{}\n{ir}",
@@ -51,7 +50,7 @@ fn verify(source: &str, checks: OverflowChecks) {
 }
 
 #[test]
-fn llvm_accepts_recursive_control_flow_and_aggregate_values() {
+fn rust_accepts_recursive_control_flow_and_aggregate_values() {
     for code in [
         include_str!("../../../examples/arithmetic/main.nr"),
         "#[Copy] struct Box<T:Copy> {value:T;fn create(value:T):Box<T> {return Box<T> {value:value}};fn extract(value:Box<T>):T {return value.value}} fn main():i32 {let boxed=Box<i32>.create(17);return Box.extract(boxed)}",
@@ -84,7 +83,7 @@ fn llvm_accepts_recursive_control_flow_and_aggregate_values() {
 }
 
 #[test]
-fn llvm_accepts_integer_checks_shifts_and_saturating_float_casts() {
+fn rust_accepts_integer_checks_shifts_and_saturating_float_casts() {
     for mode in [OverflowChecks::Checked, OverflowChecks::Wrapping] {
         for code in [
             "fn main():i32 {let x:i8=127;return (x+1) as i32}",
@@ -96,4 +95,35 @@ fn llvm_accepts_integer_checks_shifts_and_saturating_float_casts() {
             "fn main():i32 {let x:f32=1.5;let wide=x as f64;return wide as i32}",
         ] {verify(code,mode);}
     }
+}
+
+#[test]
+fn rust_accepts_fixed_entry_function_values() {
+    for source in [
+        "struct Math {fn add(n:i32):i32 {return n+2}} fn main():i32 {let f=Math.add;return f(3)}",
+        "struct Handler {run:(i32)=>i32;fn invoke(this):i32 {return run(4)}} fn add(n:i32):i32 {return n+2} fn main():i32 {let h=Handler {run:add};return h.invoke()}",
+        "fn add(n:i32):i32 {return n+2} fn main():i32 {let f:(i32)=>i32=add;return f(3)}",
+        "fn one():i32 {return 1} fn two():i32 {return 2} fn choose(b:bool):()=>i32 {return if b {one} else {two}} fn main():i32 {return choose(false)()}",
+        "fn bump(var n:i32):i32 {n+=1;return n} fn apply(f:(var i32)=>i32,n:i32):i32 {return f(n)} fn main():i32 {let n=3;return apply(bump,n)+n}",
+        "fn one():i32 {return 1} fn two():i32 {return 2} fn main():i32 {var f=one;let copy=f;f=two;return f()*10+copy()}",
+        "#[Copy] struct Handler {run:(i32)=>i32} fn add(n:i32):i32 {return n+2} fn main():i32 {let h=Handler {run:add};return h.run(3)}",
+        "fn add(n:i32):i32 {return n+2} fn apply<T:Copy>(f:(T)=>T,n:T):T {return f(n)} fn main():i32 {return apply(add,3)}",
+        "fn add(n:i32):i32 {return n+2} fn invoke<T:Copy>(f:()=>T):T {return f()} fn five():i32 {return 5} fn main():i32 {return invoke(five)}",
+        "fn yes(n:i32):bool {return n>0} fn main():i32 {let predicate=yes;return match 7 {x if predicate(x)=>x,_=>0}}",
+        "fn fail():i32 {return 1/0} fn main():i32 {let f=fail;return f()}",
+    ] { verify(source, OverflowChecks::Checked); }
+}
+
+#[test]
+fn rust_accepts_generic_function_values_and_consuming_reinitialization() {
+    for source in [
+        "fn identity<T>(x:T):T {return x} fn main():i32 {let f:(i32)=>i32=identity;return f(9)}",
+        "fn identity<T>(x:T):T {return x} fn main():i32 {let f:(i32)=>i32=identity<i32>;return f(9)}",
+        "fn first<T:Copy,const N:usize>(xs:{T;N}):T {return xs[0]} fn main():i32 {let f:({i32;2})=>i32=first;return f({8,9})}",
+        "fn identity<T>(x:T):T {return x} fn select():(i32)=>i32 {return identity} fn main():i32 {return select()(6)}",
+        "struct Cell {value:i32} fn take(x:Cell):i32 {var owned=x;owned.value+=1;return owned.value} fn main():i32 {var x=Cell {value:1};let n=take(x);x=Cell {value:4};return n+x.value}",
+        "struct Cell {value:i32} fn take(x:Cell):i32 {var owned=x;owned.value+=1;return owned.value} fn main():i32 {var x=Cell {value:1};let n=take(x);if true {x=Cell {value:4}} else {x=Cell {value:5}};return n+x.value}",
+        "struct Cell {value:i32} fn take(x:Cell):i32 {var owned=x;owned.value+=1;return owned.value} fn main():i32 {var x=Cell {value:1};var n=0;while n<6 {n+=take(x);x=Cell {value:1}};return n+x.value}",
+        "struct Cell {value:i32} fn take(x:Cell):i32 {var owned=x;owned.value+=1;return owned.value} fn main():i32 {var x=Cell {value:1};var n=0;while n<6 {var y=x;n+=take(y);x=Cell {value:1}};return n+x.value}",
+    ] { verify(source, OverflowChecks::Checked); }
 }

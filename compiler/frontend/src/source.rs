@@ -21,14 +21,45 @@ impl Span {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diagnostic {
+    pub notes: Vec<DiagnosticNote>,
     pub code: &'static str,
     pub message: String,
     pub span: Span,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiagnosticNote {
+    pub span: Span,
+    pub message: String,
+}
 impl Diagnostic {
+    pub fn with_note(mut self, span: Span, message: impl Into<String>) -> Self {
+        self.notes.push(DiagnosticNote {
+            span,
+            message: message.into(),
+        });
+        self
+    }
+    pub fn render(&self, sources: &[Source]) -> String {
+        let mut rendered = sources.get(self.span.source.0).map_or_else(
+            || format!("{}: {}", self.code, self.message),
+            |source| source.render(self),
+        );
+        for note in &self.notes {
+            let location = sources
+                .get(note.span.source.0)
+                .map(|source| {
+                    let (line, column) = source.location(note.span.start).unwrap_or((1, 1));
+                    format!("{}:{line}:{column}", source.name)
+                })
+                .unwrap_or_else(|| format!("source {}:{}", note.span.source.0, note.span.start));
+            rendered.push_str(&format!("\n{location}: note: {}", note.message));
+        }
+        rendered
+    }
     pub fn new(code: &'static str, message: impl Into<String>, span: Span) -> Self {
         Self {
+            notes: Vec::new(),
             code,
             message: message.into(),
             span,

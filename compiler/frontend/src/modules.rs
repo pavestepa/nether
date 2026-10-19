@@ -311,6 +311,10 @@ impl Rewrite<'_> {
         }
     }
     fn generics(&mut self, generics: &mut [Generic]) {
+        self.scopes
+            .last_mut()
+            .unwrap()
+            .extend(generics.iter().map(|g| g.name.clone()));
         for generic in generics {
             match &mut generic.kind {
                 GenericKind::Type {

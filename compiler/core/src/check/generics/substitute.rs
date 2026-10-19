@@ -1,5 +1,5 @@
 use super::*;
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(in crate::check) struct Substitution {
     pub types: BTreeMap<String, Type>,
     pub constants: BTreeMap<String, u64>,
@@ -132,6 +132,18 @@ impl Substitution {
     pub fn expr(&mut self, expr: &mut a::Expr) {
         if let a::ExprKind::Name(name) = &expr.kind {
             if !self.shadowed.iter().any(|scope| scope.contains(name)) {
+                if let Some(
+                    Type::Record { name: actual, .. }
+                    | Type::Class { name: actual, .. }
+                    | Type::Enum { name: actual, .. },
+                ) = self.types.get(name)
+                {
+                    *expr = a::Expr {
+                        kind: a::ExprKind::Name(actual.clone()),
+                        span: expr.span,
+                    };
+                    return;
+                }
                 if let Some(value) = self.constants.get(name) {
                     *expr = number(*value, expr.span);
                     return;
@@ -231,6 +243,20 @@ fn number(value: u64, span: Span) -> a::Expr {
 }
 pub(crate) fn ast_type(ty: &Type, span: Span) -> a::Type {
     let name = match ty {
+        Type::Function {
+            parameters, result, ..
+        } => {
+            return a::Type {
+                kind: a::TypeKind::Function {
+                    parameters: parameters
+                        .iter()
+                        .map(|(mutable, ty)| (*mutable, ast_type(ty, span)))
+                        .collect(),
+                    result: Box::new(ast_type(result, span)),
+                },
+                span,
+            }
+        }
         Type::Unit => {
             return a::Type {
                 kind: a::TypeKind::Tuple(vec![]),
@@ -252,7 +278,9 @@ pub(crate) fn ast_type(ty: &Type, span: Span) -> a::Type {
                 span,
             }
         }
-        Type::Record { name, .. } | Type::Enum { name, .. } => name.clone(),
+        Type::Record { name, .. } | Type::Enum { name, .. } | Type::Class { name, .. } => {
+            name.clone()
+        }
         Type::Integer(i) => format!("{i:?}").to_lowercase(),
         other => format!("{other:?}").to_lowercase(),
     };

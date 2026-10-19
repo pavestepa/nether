@@ -1,5 +1,7 @@
 # Исполнимый профиль Nether 0.1
 
+Архитектура: [Nether → Rust](rust-backend.md). Правила памяти сохраняются; прямой LLVM backend удалён.
+
 Статус: контракт этапа 0 для новой реализации. Этот документ фиксирует
 синтаксический subset и числовую семантику; он не означает, что parser,
 ownership checker или backend уже готовы. Реализованная часть отмечена в
@@ -57,7 +59,7 @@ parser с учётом контекста. Все ошибки получают 
 | `struct S { ... }` | Inline fields, methods; литерал `S { field: expr, ... }` |
 | `class C { ... }` | Identity, constructor/destructor, allocation через `new C(...)` |
 | `enum E { A, B(T), C { field: T } }` | Tagged inline union; active payload |
-| `interface I { fn ... }` | Статический constraint; signatures, без runtime vtable |
+| `interface I { fn ... }` | Реализованный статический constraint; dyn — отдельный этап C4.4 |
 
 Generic declarations: `<T, U: I & Copy, const N: usize>`; defaults типа
 `<T = i32, const N: usize = 4>`. Обязательные параметры идут раньше defaults;
@@ -66,10 +68,45 @@ default использует только предыдущие параметр�
 бесконечный inline layout — ошибки. Generic recursion не разрешает бесконечную
 цепочку специализаций; такая цепочка должна диагностироваться.
 
-После имени class/struct `: I, J` перечисляет interfaces. Если имя разрешается
-в class/struct base, выдаётся unsupported-inheritance, а не случайный layout.
+После имени class/struct `: I, J` перечисляет interfaces. Class может объявлять
+один class-parent первым, затем interfaces. Declaration checker проверяет граф,
+циклы и override signatures; полноценный lowering concrete inheritance пока
+отвергается с E0900. Struct не может наследовать concrete class/struct.
 `Copy` — проверяемый compiler constraint; пользовательские типы получают его
 через `#[Copy]`. `#[repr(C)]` предназначен для POD struct.
+
+`virtual fn` / `override fn` допускаются только у public class instance methods.
+`override` требует доступного inherited virtual/override method с тем же receiver
+mode, mutability параметров, результатом, generic kinds/constraints/defaults.
+Параметры method generics могут переименовываться; порядок conjunction constraints
+не важен. Неявное hiding доступного inherited member запрещено. Private base
+method нельзя override; независимый одноимённый member в derived scope допустим.
+Parent type/const arguments подставляются без захвата method binders или module
+constants. Для symbolic const signatures нет solver алгебраической эквивалентности.
+Root-class virtual methods уже компилируются как обычные static entries;
+это ещё не реализация inherited methods, super, base upcast или dyn dispatch.
+
+Private members class/struct доступны только из методов, constructor и destructor
+объявляющего типа; нахождения в том же модуле недостаточно. Это lexical context:
+free helper и другой type не получают права caller, generic specialization и
+receiver aliases не меняют declaring type. Чтение/запись поля, named patterns,
+literal construction и создание method pointers проходят одну проверку E0352
+с note на declaration. Private top-level declarations остаются module-private.
+Публичный метод вправе вернуть function pointer на private implementation;
+полученный pointer вызывается по его обычному callable contract.
+
+Interfaces реализованы номинально: matching methods без `: I` не удовлетворяют
+constraint. Все требуемые методы публичны, совпадают по receiver/mutability,
+типам параметров и результата, method generics, constraints и defaults.
+Поддержаны generic interfaces с type/const arguments, defaults, conjunction
+`T: I & J & Copy`, static methods и function values. Повтор одного constraint
+допустим; общие методы conjunction должны иметь совместимую сигнатуру.
+Generic body при специализации проверяется на abstract types: доступны только
+объявленные constraints, дополнительные методы конкретного типа недоступны.
+Обычные owned/borrowed entries сохраняют provenance, lifetime и may-write effects.
+Method-level const expressions в сигнатурах должны совпадать после переименования
+параметров; произвольная алгебраическая эквивалентность не доказывается.
+Interface value и dyn storage пока не реализованы.
 
 Компактная grammar (обозначение `list(X)` — comma-separated, optional trailing
 comma; newline не заменяет comma):
@@ -208,7 +245,7 @@ Signed division округляет к нулю, remainder имеет знак di
 Debug default — checked; release default — wrapping. Планируемая опция
 `--overflow-checks=on|off` переопределяет default независимо от оптимизации.
 Const evaluation **всегда checked**, ошибки становятся compile diagnostics.
-Invalid shift/overflow нельзя передавать в host/LLVM как UB или poison.
+Invalid shift/overflow проверяется до Rust операции; правила Nether не зависят от rustc overflow defaults.
 
 Float arithmetic работает в заявленной разрядности с round-to-nearest ties-even;
 IEEE NaN/Inf/±0 допустимы. Float `/ 0` не integer panic. `%` — remainder с
@@ -247,7 +284,9 @@ arbitrary integer → char. Pointer casts имеют отдельные unsafe/p
 | --- | --- |
 | `E0100` | async/await/spawn/task_scope, transfer, thread/channel API профиля языка |
 | `E0101` | `...` packs/varargs/forwarding |
-| `E0102` | Наследование class/struct, super, virtual/override, dyn |
+| `E0102` | Неподдержанные super/dyn; virtual/override разбираются и проверяются, concrete inheritance lowering пока даёт E0900 |
+| `E0410` | Некорректный class-parent, несколько родителей, inheritance cycle |
+| `E0411` | Некорректный virtual/override, несовместимая сигнатура или member hiding |
 | `E0103` | for, loop, range expressions; использовать while |
 | `E0104` | Lambda/capture; использовать named fn и явное состояние |
 | `E0105` | Backticks/interpolation, dynamic array literal; библиотечные операции |
@@ -261,3 +300,148 @@ arbitrary integer → char. Pointer casts имеют отдельные unsafe/p
 её отдельная диагностика должна говорить «ещё не реализовано», а не «исключено
 из 0.1». Ошибки arithmetic oracle: `TypeMismatch`, `LiteralOutOfRange`,
 `Overflow`, `DivisionByZero`, `InvalidShift`, `UnsignedNegation`.
+
+### Function values и specialization
+
+Named/static function может использоваться как value. Для method values
+допустима явная специализация owner и method, например `Box<i32>.method<bool>`. Для generic function value
+в текущем subset необходим concrete expected function type: например,
+`let f: (i32) => i32 = identity` или `identity<i32>`. Type/const arguments выводятся
+из этой signature, после чего проверяется обычный specialization и абстрактное тело.
+В expression context generic argument list допускается также перед концом value
+(`)`, `]`, `}`, comma, semicolon, newline, EOF), а не только перед call/member access.
+Неприменимые function value entry contracts диагностируются; runtime выбора
+owned/borrowed варианта по одному function pointer нет.
+Function values сохраняют статический owned/borrowed ABI, capability и provenance
+результата, component origins и may-write effects. Работают unbound receivers,
+generic/higher-order functions, returned pointers и выбор совместимых pointers.
+Значение занимает один code pointer без environment; metadata есть только в compiler.
+Несовместимые owned/borrowed result ABI отвергаются, implicit adapter не создаётся.
+
+### Borrowed returns: реализованный C3.1
+
+Для non-Copy результата compiler выводит owned либо borrowed контракт выбранного
+entry. Borrowed контракт включает readonly/mutable capability и зависимость от
+параметров с projection paths. Работают direct/generic/imported calls, методы,
+ветвления и рекурсивные группы. Например, `fn id<T>(x:T):T {return x}` при borrowed
+аргументе возвращает view, при owned аргументе передаёт владение. Copy-result
+копируется по обычным правилам.
+
+`let ref var result = owner.method()` допустим для mutable borrowed result;
+readonly результат не повышает права при связывании с `var`. View не может
+пережить локального владельца, owned parameter или temporary receiver. Разные
+ветви одного entry не могут смешивать owned и borrowed return. Для dynamic index
+зависимость консервативно относится ко всему содержащему месту. Recursive result
+и target-effect contracts выводятся до стабильного состояния.
+
+Borrowed result можно сохранить в readonly поле локального aggregate (см. ниже).
+Ошибки конфликтов показывают место владельца, создание view и последующее
+использование, поддерживающее заимствование. `E0395` обозначает несовместимый
+result contract или выход view за lifetime владельца.
+
+
+### Readonly aggregate storage: реализованный C3.2
+
+Structs, tuples, fixed arrays и enum payload могут хранить readonly
+views non-Copy значений. Source type остаётся прежним: внутреннее представление
+поля выводится статически из initializer. Поля struct/tuple и variant payload могут
+иметь разные режимы; все элементы одного массива имеют одинаковый режим.
+
+```nether
+struct Item {value:i32;destructor {}}
+struct Holder {value:Item}
+fn main():i32 {
+    let owner=Item {value:7}
+    let ref view=owner
+    let holder=Holder {value:view}
+    let elements={view,view}
+    return holder.value.value+elements[0].value
+}
+```
+
+Перенос оболочки переносит descriptors; копирование Copy tuple/array копирует
+только descriptors. Target не копируется и не уничтожается при cleanup оболочки.
+Owned соседние поля очищаются по обычным правилам, включая частичное создание и
+panic. Извлечение поля сохраняет readonly capability и исходный lifetime, в том
+числе через несколько вложенных оболочек и view на всю оболочку.
+
+В mutable оболочке `holder.value = another_owner` перепривязывает descriptor.
+`holder.value.value = 1` не разрешается: mutable оболочка не даёт права изменять
+readonly target. Новый target должен оставаться жив при последующих чтениях.
+Режим готового места не меняется при присваивании. Несовместимые owned/view
+режимы диагностируются (`E0396`); runtime ownership tag не вводится.
+
+Такие оболочки передаются и возвращаются через ordinary functions, методы,
+generics и imports/reexports. Entry специализируется по physical storage types
+аргументов. Result contract отдельно хранит пути borrowed компонентов и их
+зависимости от параметров; inference достигает fixed point, включая рекурсивные
+вызовы. Возврат оболочки с view локального/owned target запрещён. View на target
+внутри полученного по значению wrapper может пережить сам wrapper, если target
+принадлежит внешнему владельцу. Descriptor slot и его target имеют разные lifetime.
+
+Mutable borrowed aggregate arguments поддерживают переназначение readonly
+компонентов через `var`-параметр или `var this`. Static may-write contract связывает
+каждое изменяемое поле с входными origins. Запись view локального или owned target,
+уничтожаемого в callee, запрещена даже при последующей panic. Контракт проходит
+через calls, generics, imports и рекурсию; caller учитывает новые зависимости на
+normal и panic edges. Массивные dynamic indices расширяются до возможных slots.
+Это не даёт mutable-доступа к readonly targets и не меняет physical storage mode.
+
+Анализ консервативен: после вызова прежние зависимости полей сохраняются наряду
+с возможными новыми; гарантированный overwrite пока не освобождает старый target
+от lifetime restrictions. Обычная передача Copy aggregate по значению остаётся
+копированием descriptor storage; `var` у такого параметра сам по себе не означает
+изменение caller storage. Mutable receiver/borrowed non-Copy entry меняет target.
+Class payloads поддерживают те же static storage modes; constructor, методы и
+destructor используют согласованный layout. Destructor оболочки удерживает loans
+до implicit reads при cleanup; target обязан уничтожаться позже оболочки.
+Извлечённый view можно передавать и возвращать, в том числе через function pointer.
+Для именованных локальных переменных режимы также выводятся из последующих
+прямых присваиваний: к полям struct/tuple, элементам array и wrapper целиком.
+Требование readonly компонента переносится на initializer и связанные локальные
+wrapper bindings до fixed point. Это работает и для nested fields, mutable aliases,
+параметров, returned values, if/match и function values. Parameter/result requirements
+распространяются между entries; final representation каждого entry фиксирована.
+Destructor dependencies не меняют установленный порядок cleanup. Внутренние циклы
+между owning частями одной группы относятся к C7.
+
+У массива единый mode выводится из требований всех элементов, включая повторные
+uses одного target. Порядок элементов не заставляет выбирать owned mode раньше,
+чем обнаружен readonly компонент. Initializers при этом вычисляются ровно один
+раз в исходном порядке; числовые literals сохраняют contextual type первого
+элемента. Если для согласования нужен view временного owning значения, программа
+отвергается: compiler не создаёт скрытого владельца/heap allocation. Уже созданное
+storage имеет один mode; никакого runtime переключения при присваиваниях нет.
+
+Для локальных enum известный variant переносится через создание, move и root
+replacement. Если доказано `e = E.Empty`, чтение borrowed payload в недостижимой
+`E.Item`-ветви больше не создаёт ложный lifetime conflict. Анализ учитывает joins
+и повторные проходы loops: при разных возможных variants остаются обе ветви.
+Те же доказанные переходы используются для initialization, result/effect contracts
+и generated Rust. Даже недостижимые source-ветви проходят обычную проверку типов.
+
+Calls и записи через projected/aliased places сбрасывают знание variants;
+произвольные вложенные enum places пока не уточняются. Поэтому после таких
+операций безопасная программа ещё может быть отклонена консервативно. Эти
+ограничения могут консервативно отклонять безопасные программы; C3 закрыт.
+Примеры: [borrowed_storage](../../examples/borrowed_storage/main.nr), результат 24;
+[borrowed_storage_write](../../examples/borrowed_storage_write/main.nr), результат 10;
+[enum_refinement](../../examples/enum_refinement/main.nr), результат 3;
+[storage_modes](../../examples/storage_modes/main.nr), результат 11.
+
+## Source classes: реализованный C2
+
+`new C(...)` вызывает единственный constructor класса. У класса без полей
+допустим неявный пустой constructor. Класс с полями требует constructor;
+все поля должны быть инициализированы на каждом успешном пути выхода.
+Typed CFG учитывает aliases и exhaustive branches; чтение поля до initialization
+и передача неполного `this` в вызов отвергаются с `E0393`.
+
+Class move сохраняет identity. `#[Copy] class` требует Copy-поля и создаёт
+независимый объект; destructor у Copy-типа запрещён. `==`, `!=` и intrinsic
+`same_identity(a,b)` сравнивают совместимые class operands через readonly borrow,
+включая Copy classes. Сравнение не создаёт новый объект и не потребляет operands.
+
+Class views допускают поля, methods и rebind по capability. `*view = new C(...)`
+отвергается с `E0394`: view не даёт права заменить owning slot. Inheritance и dyn
+ещё не реализованы. Пример: [classes/main.nr](../../examples/classes/main.nr).

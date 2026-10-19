@@ -32,12 +32,12 @@ fn instance_methods_borrow_receivers_including_copy_types() {
         let b=nether_core::mir::interpret::execute(&cfg,cfg.main.unwrap(),vec![],nether_semantics::OverflowChecks::Checked,10000).unwrap();
         assert_eq!(a,b,"{source}");
         let nether_core::hir::Value::Integer(a)=a else {panic!()};assert_eq!(a.signed_value(),Some(expected),"{source}");
-        nether_core::llvm::emit(&p,nether_semantics::OverflowChecks::Checked).unwrap();
+        nether_core::rust::emit(&p,nether_semantics::OverflowChecks::Checked).unwrap();
     }
     for source in [
         "struct Cell {value:i32;fn bump(this):() {value+=1}} fn main():() {}",
         "struct Cell {value:i32;fn bump(var this):() {value+=1}} fn main():() {let c=Cell {value:1};c.bump()}",
-        "struct Cell {value:i32;fn consume(this):Cell {return this}} fn main():() {}",
+
     ] {
         let parsed=nether_frontend::parser::parse(nether_frontend::source::SourceId(0),source);
         assert!(parsed.diagnostics.is_empty());

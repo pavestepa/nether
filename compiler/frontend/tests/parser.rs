@@ -232,3 +232,25 @@ fn type_closers_split_adjacent_assignment_tokens() {
     module("fn f():() {let a:Option<i32>=get();let b:Outer<Inner<i32>>=get()} ");
     module("fn f(a:i32,b:i32,c:i32):bool {return a < b >> c}");
 }
+
+#[test]
+fn class_method_dispatch_modifiers_are_preserved() {
+    let parsed=module("class A {public virtual fn read(this):i32 {return 1}} class B:A {override fn read(this):i32 {return 2}}");
+    for (item, expected) in parsed
+        .items
+        .iter()
+        .zip([MethodDispatch::Virtual, MethodDispatch::Override])
+    {
+        let ItemKind::Aggregate { members, .. } = &item.kind else {
+            panic!()
+        };
+        assert!(matches!(&members[0],Member::Method {dispatch,..} if *dispatch==expected));
+    }
+    for source in [
+        "class A {virtual value:i32}",
+        "class A {override constructor() {}}",
+        "class A {virtual override fn read(this):i32 {return 1}}",
+    ] {
+        failure(source);
+    }
+}

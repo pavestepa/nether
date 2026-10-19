@@ -5,7 +5,6 @@ pub(super) fn collect(module: &a::Module) -> a::Module {
     let mut functions = Vec::new();
     for item in &mut module.items {
         let a::ItemKind::Aggregate {
-            class: false,
             name,
             generics,
             members,
@@ -15,7 +14,10 @@ pub(super) fn collect(module: &a::Module) -> a::Module {
             continue;
         };
         members.retain(|member| {
-            let a::Member::Method { function, private } = member else {
+            let a::Member::Method {
+                function, private, ..
+            } = member
+            else {
                 return true;
             };
             let mut function = function.clone();
@@ -79,6 +81,33 @@ pub(super) fn static_call(callee: &a::Expr) -> Option<(String, Vec<a::TypeArgume
     }
 }
 
+pub(super) fn resolved_static_call(
+    callee: &a::Expr,
+    nominals: &records::Nominals,
+) -> Option<(String, Vec<a::TypeArgument>)> {
+    let (name, mut arguments) = static_call(callee)?;
+    let (owner, method) = name.rsplit_once('.')?;
+    if nominals.get(owner).is_some() {
+        let mut supplied = nominals
+            .arguments(owner)
+            .into_iter()
+            .map(|arg| match arg {
+                records::Argument::Type(ty) => {
+                    a::TypeArgument::Type(generics::substitute::ast_type(&ty, callee.span))
+                }
+                records::Argument::Const(n) => a::TypeArgument::Const(a::Expr {
+                    kind: a::ExprKind::Literal(a::Literal::Integer(n.to_string())),
+                    span: callee.span,
+                }),
+            })
+            .collect::<Vec<_>>();
+        supplied.append(&mut arguments);
+        Some((format!("{}.{method}", nominals.origin(owner)), supplied))
+    } else {
+        Some((name, arguments))
+    }
+}
+
 pub(super) fn receiver_modes(function: &a::Function) -> Vec<Option<crate::mir::loans::Access>> {
     function
         .parameters
@@ -127,7 +156,7 @@ impl Checker<'_> {
             _ => return Ok(None),
         };
         let value = self.expr(&receiver, None, true)?;
-        let Type::Record { name, .. } = &value.ty else {
+        let (Type::Record { name, .. } | Type::Class { name, .. }) = &value.ty else {
             return Ok(None);
         };
         let candidate = format!("{}.{}", self.nominals.origin(name), method);

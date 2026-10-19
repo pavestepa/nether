@@ -1,5 +1,7 @@
 # Nether Language Specification Draft v0.1
 
+Nether компилируется в Rust source, затем обычным rustc в native code. Прямой LLVM backend не используется. Собственная модель памяти сохраняется; внутренний проверенный unsafe разрешён. Цель производительности — эквивалентный вручную написанный Rust при тех же storage/dispatch/cleanup contracts; проверка выполняется benchmarks. [Контракт backend](0.1/rust-backend.md).
+
 ## 0. Назначение
 
 Этот документ фиксирует базовый синтаксис и семантику языка до начала реализации компилятора.
@@ -1175,7 +1177,7 @@ Borrowed результат метода сохраняет lifetime receiver/д
 
 # 35. Inheritance
 
-Только class поддерживает concrete inheritance.
+Только class поддерживает concrete inheritance. В Rust backend class A представлен payload struct, trait A и owned Box; B содержит base payload inline и реализует trait A. Upcast сохраняет identity без дополнительной allocation. Rust traits не содержат поля: доступ к base state реализуется accessors.
 
 ```nether
 class Animal {
@@ -1351,7 +1353,7 @@ let sound = speak(new Dog())
 
 # 40. `dyn`
 
-Runtime polymorphism должен быть явным для interfaces и class inheritance:
+Runtime polymorphism выражается через `dyn`; class B допустим там, где ожидается базовый A. При известном concrete type используется static specialization, при runtime выборе — trait object с сохранением ownership:
 
 ```nether
 fn execute(handler: dyn Handler): () {
@@ -1962,6 +1964,8 @@ Destructor вызывается deterministic в соответствии с lif
 
 Destructor является специальным lifecycle body с implicit exclusive `this`, без явного receiver parameter. Cleanup выполняется и для readonly owned объекта: завершение ownership разрешает уничтожение и необходимое изменение его собственного завершаемого состояния после завершения зависимых views. Это не позволяет обычному методу изменить readonly объект и не повышает права на внешние borrowed цели. Автоматический cleanup не требует от пользователя объявлять каждый resource через `var`.
 
+Во время destructor запрещены целиком замена и повторная инициализация уничтожаемого target. Ограничение сохраняется через aliases и вызовы: mutable операция допустима только при доказанном отсутствии whole replacement этого target в её transitive effects. Поля можно читать, изменять и заменять по обычным правилам; перепривязка локального alias не заменяет target. После body очищаются оставшиеся initialized owned поля.
+
 Последнее использование view завершает заимствование, но само по себе не запускает destructor владельца. Не перенесённые owned locals живут до выхода из owning scope. Move передаёт ответственность новому владельцу; замена/удаление owned значения и несохранённый owned результат завершают соответствующий lifetime (§93). Compiler может сократить физическое storage, только сохранив наблюдаемые cleanup effects.
 
 Порядок cleanup:
@@ -2351,7 +2355,7 @@ Class имеет максимум одного class parent.
 
 ### Invariant 10
 
-Runtime polymorphism для interfaces и class inheritance требует `dyn`. Статически доказанный конкретный тип использует прямую специализацию.
+Class B подставляется вместо базового A. Статически доказанный concrete type использует прямую специализацию; runtime polymorphism использует dyn trait representation.
 
 ### Invariant 11
 

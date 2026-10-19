@@ -1,12 +1,14 @@
 # Базовое размещение типов Nether 0.1
 
+Архитектура: [Nether → Rust](rust-backend.md). Правила памяти сохраняются; прямой LLVM backend удалён.
+
 Статус: исполнимый контракт расчёта размера и выравнивания. Реализация —
 `compiler/semantics/src/layout.rs`. Это часть этапа 0, а не готовый ABI:
 calling convention, runtime symbols, panic/unwind и link protocol ещё открыты.
 
 ## Target и ограничения
 
-Начальный target — `x86_64-unknown-linux-gnu`, little-endian, указатель 64 bits.
+Rust backend требует 64-bit target; обычная сборка использует host rustc.
 Расчёт ведётся в target-размерах, не через host `size_of`. Размер одного объекта
 ограничен `2^63 - 1` bytes, включая padding. Размеры и offsets не должны
 переполняться. Alignment — ненулевая степень двойки, не больше этого предела.
@@ -25,7 +27,7 @@ calling convention, runtime symbols, panic/unwind и link protocol ещё отк
 | Raw pointer, class identity reference, function pointer | 8 | 8 |
 | `str` | 16 | 8 |
 
-`str` — data pointer и byte length в этом порядке. Descriptor не владеет
+`str` генерируется как Rust str view; порядок полей Rust descriptor не является публичным ABI. Descriptor не владеет
 данными и не стирает provenance. `bool` имеет допустимые значения 0 и 1,
 `char` — только Unicode scalars; подходящий размер не делает arbitrary bits
 корректным значением. Plain C function pointer не взаимозаменяем с Nether
@@ -39,11 +41,9 @@ metadata и размер фактического allocation определяю�
 
 ## Aggregates
 
-Поля struct, tuple, class payload и одного enum variant размещаются в порядке
-объявления. Перед каждым полем offset округляется вверх до alignment поля;
+Поля struct, tuple и enum payload размещаются в порядке объявления. Backend генерирует repr(C) structs, включая отдельные payload structs для tuples; обычный Rust tuple layout не используется. Перед каждым полем offset округляется вверх до alignment поля;
 конечный размер — до максимального alignment всех полей. Размер включает
-tail padding, поэтому он же является array stride. Packing и перестановки
-полей в baseline отсутствуют.
+tail padding, поэтому он же является array stride. Packing и перестановки полей отсутствуют. Фактический layout проверяется rustc на поддержанном target; foreign доступ требует отдельного ABI-safe контракта.
 
 Вход layout calculation — уже разрешённые **представления** полей. Он не
 выводит owned/view mode и не заменяет representation analysis. В частности,

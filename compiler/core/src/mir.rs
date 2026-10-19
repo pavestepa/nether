@@ -3,21 +3,36 @@
 use crate::hir::{self as h, Type, Value};
 use nether_frontend::source::Span;
 pub mod borrow_check;
+pub mod cleanup;
 pub mod dataflow;
+mod drop_borrows;
+pub mod drop_plan;
+pub mod drop_state;
+pub mod effects;
 pub mod initialization;
 pub mod interpret;
 pub mod loans;
 mod lower;
+mod reachability;
+pub mod returns;
+pub mod storage_writes;
 pub use lower::lower;
 pub type BlockId = usize;
 pub type LocalId = usize;
 #[derive(Clone, Debug)]
 pub struct Program {
+    pub classes: h::Classes,
+    pub destructors: drop_plan::Destructors,
     pub functions: Vec<Function>,
     pub main: Option<usize>,
 }
 #[derive(Clone, Debug)]
 pub struct Function {
+    pub drop_reads: std::collections::BTreeSet<LocalId>,
+    pub storage_writes: std::sync::Arc<Vec<storage_writes::Contract>>,
+    pub result_view: Option<returns::Contract>,
+    pub classes: std::sync::Arc<h::Classes>,
+    pub cleanup: cleanup::Plan,
     pub name: String,
     pub parameters: Vec<LocalId>,
     pub locals: Vec<h::Local>,
@@ -52,6 +67,21 @@ pub enum Operand {
 }
 #[derive(Clone, Debug)]
 pub enum Operation {
+    StoreView(Place),
+    LoadView(Place),
+    CallStorage {
+        function: usize,
+        arguments: Vec<Operand>,
+        contract: returns::StorageContract,
+    },
+    CallView {
+        function: usize,
+        arguments: Vec<Operand>,
+        contract: returns::Contract,
+    },
+    Identity(Place, Place),
+    AllocateClass(String),
+    CompleteClass(Operand),
     Borrow(Place),
     CapturePlace(Place),
     Copy(Place),
@@ -65,6 +95,7 @@ pub enum Operation {
     Tag(Operand),
     TagPlace(Place),
     Call(usize, Vec<Operand>),
+    CallIndirect(Operand, Vec<Operand>, h::CallContract),
 }
 #[derive(Clone, Debug)]
 pub enum Terminator {

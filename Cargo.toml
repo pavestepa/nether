@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["compiler/semantics", "compiler/frontend", "compiler/core", "cli"]
+members = ["compiler/semantics", "compiler/frontend", "compiler/core", "cli", "runtime"]
 
 [workspace.package]
 version = "0.1.0"

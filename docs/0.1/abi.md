@@ -1,136 +1,106 @@
-# ABI и panic protocol baseline 0.1
+# Rust code generation и границы ABI
 
-Контракт этапа 0 для `x86_64-unknown-linux-gnu`; object representation —
-[layout.md](layout.md). ABI version 1 привязан к toolchain и metadata version.
-Внутренние вызовы, borrowed аргументы, C main wrapper, allocator и panic reporting
-реализованы для текущего subset. Resource cleanup, borrowed returns, C boundary,
-syscall и сериализация metadata ещё не реализованы. Пока CLI компилирует встроенный
-C runtime при linking; отдельный runtime archive остаётся целевым форматом.
+Актуальная архитектура: [Nether → Rust](rust-backend.md). Прямой LLVM backend и
+старый C linking protocol удалены из основного pipeline. Внутренний ABI не является
+стабильным Rust или C binary ABI; совместимость требует одного toolchain/profile.
 
-## Внутренний вызов
+## Внутренние вызовы
 
-Baseline использует явные success/panic edges. LLVM signature entry:
+Текущий backend генерирует типизированные Rust функции:
 
-```text
-i1 symbol(ptr panic_context, ptr result_slot, ptr arg0_slot, ptr arg1_slot, ...)
+```rust
+unsafe fn entry(owned: Payload, borrowed: *mut Payload) -> Result<Output, Fault>
 ```
 
-True означает normal return с initialized result_slot (unit не требует записи).
-False означает panic с uninitialized result_slot. Все slots имеют target layout.
-Owned argument consumed при входе: его cleanup на обоих выходах делает callee;
-borrowed остаётся у caller. Receivers всегда borrowed. Arguments вычисляются
-слева направо; failure до входа очищает только уже созданные owned temporaries.
-Result slot не alias inputs; noalias LLVM attributes не выводятся из одного
-наличия pointers. Function pointer фиксирует entry и эту signature; runtime
-выбора owned/borrowed entry нет. Статические storage shapes входят в entry key.
+Это схема, а не требование, чтобы каждый entry имел оба параметра. Режимы
+параметров выбираются статически. Result — внутренний канал panic propagation,
+не пользовательский enum Result. Receivers borrowed. Readonly capability
+проверяется Nether checker; raw pointer не даёт пользователю права на запись.
+Function value указывает на фиксированный entry с известной signature.
 
-Symbol: `_N1_` + hex UTF-8 package/module/name с `_` separators + deterministic
-specialization/entry ID из metadata. Host randomized hash не является ABI ID.
-Collisions диагностируются. Cross-toolchain binary stability не обещается.
+Для программ с ресурсами функции дополнительно получают внутренний Context
+(panic state и последовательность успешных initialization). Resource view хранит
+типизированные raw pointers на payload и lifecycle flags; pointer на root stamp
+позволяет whole replacement обновлять порядок в исходном owning scope. Для field
+view этот pointer отсутствует: запись поля не переставляет root. Lifecycle flags
+фиксируют initialization, а не выбирают ownership динамически. Resource-free
+программы сохраняют простую схему выше без Context. Этот внутренний ABI пока
+не заявляется как оптимальный по размеру views; performance acceptance — C9.
 
-## Panic и unwind
+Локальные места используют MaybeUninit; payload types не получают произвольный
+Rust Drop. Нельзя читать неинициализированные или moved части; перед emission
+проверяются initialization и loans. Адрес поля формируется через raw place,
+без создания ссылки на целиком неинициализированный aggregate. Физический move
+не заменяет логические ownership/drop flags.
 
-Panic context передаётся из startup. C-compatible fields в порядке объявления:
-`active: u32`, `kind: u32`, `file: *u8`, `line: u32`, `column: u32`,
-`message_len: usize`, `message: {u8; 192}`. File — static UTF-8 path, message
-копируется без allocation и обрезается по UTF-8 границе. Kind: user=1,
-bounds=2, overflow=3, division=4, shift=5, allocation=6.
+## Panic и cleanup
 
-Panic origin устанавливает context и переходит к generated cleanup blocks.
-Caller, получив false, очищает свои initialized roots/temporaries и возвращает
-false. Это stack unwinding через обычные returns, без native exception
-personality. Panic не пользовательский Result и не может быть проигнорирована.
+Fallible операция возвращает Fault в MIR unwind edge. Сохраняется исходная
+позиция Nether source. Main печатает location и завершает процесс с кодом 101.
+Обычное завершение возвращает 0 для unit либо код i32. Арифметика генерирует явные
+checked/wrapping операции независимо от Rust debug/release overflow defaults.
+Bounds проверяются до доступа. Checked shift проверяет count, wrapping shift
+маскирует его по разрядности; division overflow (включая MIN % -1) вызывает panic
+в обоих режимах.
 
-Порядок §69: roots обратно initialization, destructor body до owned полей
-по объявлению, arrays/tuples по индексу, enum по active payload, group обратно
-принятию ownership. Drop flag сбрасывается **до** вызова drop. Moved/неинициализированные
-части пропускаются. Panic из destructor при обычном cleanup продолжает cleanup
-его оставшихся полей и живых roots. Повторная panic при active=1 — немедленный
-abort. Failure edge внутри destructor ведёт к remaining-field cleanup, а не
-просто возвращает false, пропуская поля. Active не сбрасывается при propagation.
-Пользовательского catch-panic в 0.1 нет; ожидаемые ошибки — enum Result.
+Для ресурсных типов обязательны cleanup flags и отдельный explicit cleanup:
+roots обратно последней успешной инициализации, body destructor до owned полей,
+поля по объявлению, элементы по индексу, enum по активному payload. Первый panic
+продолжает cleanup; повторный panic вызывает abort. Return staging очищается при
+failure cleanup, а на успешном выходе передаётся caller.
 
-OOM использует тот же allocation-free panic context и cleanup; failing allocation
-не выдаёт capability. Непоправимая ошибка runtime/double panic — abort. Эта схема
-имеет status checks на calls; оптимизация к native unwind/register arguments
-может менять ABI version, но не наблюдаемую semantics.
+Finalizing slot нельзя повторно инициализировать, перенести или уничтожить.
+Запись его живых полей разрешена. Effects проверяются через aliases и calls.
+Source destructors inline aggregates, включая generic instances, подключены к
+HIR/MIR и generated Rust. Class allocation и class cleanup используют тот же проверяемый protocol.
 
-## Entry и linking
+## Class representation
 
-Source entry: public `fn main(): ()` либо `fn main(): i32` в entry module,
-ровно один, без arguments/generics. Generated C main создаёт context и вызывает
-Nether main. Normal exit возвращает 0/unit либо i32 status; panic печатает
-сообщение в stderr и завершает status 101 после cleanup.
+Concrete owned class использует Box<ConcreteData>. Inheritance реализуется
+base payload внутри derived struct и trait implementations. Известный concrete
+тип специализируется статически. Owned runtime polymorphism использует
+Box<dyn BaseTrait>, borrowed — trait view с исходным lifetime/capability.
+Upcast сохраняет identity/allocation и не делает clone или дополнительный Box.
+Rust Drop конкретного Box сам по себе не заменяет Nether cleanup protocol.
 
-Build: LLVM IR → target object → target C linker driver + runtime archive.
-Linker path/sysroot настраиваются явно; аргументы передаются argv, не shell
-code. Unsupported target, несовместимая metadata и отсутствующий toolchain
-диагностируются. На macOS Linux ELF не запускается: acceptance в Linux CI/VM.
+## Сборка
 
-Runtime C symbols prefix `__nether_v1_`:
+`emit-rust` выдаёт самостоятельный Rust source текущего subset. `build` передаёт
+его rustc и атомарно публикует output только после успешной сборки. Аргументы
+передаются argv. `NETHER_RUSTC` выбирает executable; `--emit=object` выдаёт object
+для host, не универсальный переносимый binary. Профиль пока требует 64-bit target.
+Object хранит внутренние Rust symbols и может требовать Rust runtime при linking;
+для приложения следует использовать обычный `build`.
 
-```text
-allocate(size: u64, align: u64) -> ptr    // null при OOM, не throws
-deallocate(base: ptr, size: u64, align: u64) -> void
-abort_double_panic(context: ptr) -> never
-report_panic(context: ptr) -> void       // без heap allocation
-```
+## Foreign boundary и platform
 
-Zero-size storage использует aligned sentinel и не вызывает ordinary free.
-Compiler проверяет size/alignment до входа. Runtime не обходит graph и не
-считает owners. Диагностический allocation log не часть обычного view access.
+Будущие FFI wrappers используют extern "C", ABI-safe scalars, raw pointers и
+repr(C) POD. Обычные Rust tuples, trait objects, enums, classes и safe views не
+являются C ABI. Panic не пересекает foreign boundary. Direct syscalls реализуются
+через target-specific Rust asm adapters с явными registers/clobbers; первым
+остаётся Linux x86-64. Это требование roadmap, пока не реализованное API.
 
-## Очередь cleanup roots
+Allocation использует target Layout и allocator Rust; zero-size storage требует
+aligned sentinel. Нужны проверяемые deallocation layout, exactly-once cleanup,
+OOM и diagnostic allocation accounting. Shared owners/refcounts не вводятся.
 
-Принято [обновление порядка при замене root](decisions/root-cleanup-order.md).
-Runtime предоставляет ограниченную числом активных roots intrusive очередь.
-Scope содержит `last: ptr`; root содержит пять pointers в порядке
-`scope, previous, next, drop, value` (8 и 40 bytes, alignment 8). Scope и links
-root обнуляются до первого использования. Records принадлежат compiler frame;
-они не выделяются в heap и не продлевают lifetime values.
 
-`drop` имеет C-compatible signature `bool drop(Panic*, void*)`; generated adapter
-вызывает внутренний entry destructor и cleanup owned полей. Поля и их drop flags
-остаются ответственностью generated drop glue, runtime их не обходит.
+## Borrowed aggregate ABI: реализованный C3.2
 
-```text
-cleanup_push(scope, root) -> void       // только после успешной инициализации
-cleanup_forget(root) -> void            // move без destruction; unlinked = no-op
-cleanup_root(panic, root) -> bool       // unlink до drop; unlinked = success
-cleanup_scope(panic, scope) -> bool     // последние инициализации первыми
-```
+Readonly descriptors могут находиться внутри struct/tuple/array/enum и class payload.
+Concrete entry получает и возвращает выбранное статически представление. Owned
+wrapper может содержать borrowed поля, которые не становятся владельцами target.
+Result metadata внутри compiler хранит отдельные origins каждого descriptor и
+различает wrapper slot и внешний target; импорты проходят ту же проверку.
+Mutable borrowed aggregate entries дополнительно имеют may-write metadata:
+parameter/component paths и input origins для возможных новых descriptors. На
+normal и panic edges caller объединяет эти зависимости с прежними. Контракт
+специализируется вместе с ABI, не добавляя runtime ownership tags. Публиковать
+view callee-local/owned target запрещено. Экспорт metadata для отдельной компиляции
+остаётся C6.3/C6.4. User destructors имеют отдельный entry на каждый physical layout;
+их implicit reads участвуют в lifetime и cleanup-order checks.
 
-Все symbols имеют prefix `__nether_v1_`. Перед заменой occupied root его старое
-значение уничтожается; после успешной записи root снова добавляется в свой
-owning scope. Запись поля не вызывает push whole root. Нельзя повторно push
-linked root: это нарушение internal ABI. Перенос между владельцами делает
-forget source и push destination, не переносит запись вместе с value.
-
-Scope cleanup продолжает оставшиеся roots после первой panic. Drop, вернувший
-false, обязан установить panic context. False при уже активной panic вызывает
-abort. Успешный cleanup не сбрасывает active panic. False от cleanup сообщает
-о новой failure во время этого cleanup; propagation исходной panic остаётся
-за generated caller.
-
-Runtime queue реализована и отдельно тестируется. Подключение generated drop
-glue к source destructors и partial initialization ещё не завершено.
-
-## C boundary и syscall
-
-Plain C functions используют target C ABI. Первый subset: i8–i64/u8–u64,
-f32/f64, matching usize/isize, raw/function pointers, unit return,
-`#[repr(C)]` POD structs из этих полей. i128/u128, bool и char требуют явного
-преобразования через поддержанные типы. Classes, обычные tuples/enums/str не
-передаются. Aggregate argument/return classification следует
-[x86-64 psABI](https://gitlab.com/x86-psABIs/x86-64-ABI), не одному размеру.
-
-Export syntax: `extern "C" fn name(args): R { ... }`. C adapter вызывает
-internal Nether entry, при panic abort до возврата в C. Link name — export name,
-duplicates запрещены. Module re-export не меняет ABI. Foreign exceptions/longjmp
-через живые Nether frames запрещены. Retention/callbacks после возврата требуют
-явного unsafe resource protocol.
-
-Unsafe syscall intrinsic: `syscall(number: usize, args: {usize; 6}): isize`.
-Lowering — системная инструкция target с правильными registers/clobbers/memory
-effects; libc syscall не заменяет этот критерий. Platform wrappers учитывают
-negative error codes, partial results, bounds и lifetime buffers.
+Function pointer остаётся одним адресом кода. Статическая signature фиксирует
+owned/borrowed параметры и результат; component origins и may-write effects
+применяются к indirect call так же, как к direct call. Ни environment, ни runtime
+ownership tag, ни ABI adapter не добавляются.

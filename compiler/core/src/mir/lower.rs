@@ -1,14 +1,40 @@
 use super::*;
 use crate::hir::{Expr, ExprKind, Statement};
 pub fn lower(program: &h::Program) -> Program {
+    let classes = std::sync::Arc::new(program.classes.clone());
+    let writes = std::sync::Arc::new(
+        program
+            .functions
+            .iter()
+            .map(|f| f.storage_writes.clone())
+            .collect::<Vec<_>>(),
+    );
+    let destructors = drop_plan::Destructors::from_functions(&program.functions)
+        .expect("checked destructor declarations");
     Program {
-        functions: program.functions.iter().map(function).collect(),
+        classes: program.classes.clone(),
+        destructors: destructors.clone(),
+        functions: program
+            .functions
+            .iter()
+            .map(|f| function(f, classes.clone(), writes.clone(), &destructors))
+            .collect(),
         main: program.main,
     }
 }
-fn function(source: &h::Function) -> Function {
+fn function(
+    source: &h::Function,
+    classes: std::sync::Arc<h::Classes>,
+    writes: std::sync::Arc<Vec<storage_writes::Contract>>,
+    destructors: &drop_plan::Destructors,
+) -> Function {
     let mut builder = Builder {
         function: Function {
+            drop_reads: Default::default(),
+            storage_writes: writes,
+            result_view: source.result_view.clone(),
+            classes,
+            cleanup: cleanup::Plan::new(source.locals.len()),
             name: source.name.clone(),
             parameters: source.parameters.clone(),
             locals: source.locals.clone(),
@@ -22,6 +48,7 @@ fn function(source: &h::Function) -> Function {
         loops: vec![],
         scopes: vec![],
         temporary_start: source.locals.len(),
+        cleanup_scopes: vec![0],
     };
     let entry = builder.block_id(source.span);
     builder.function.entry = entry;
@@ -40,6 +67,15 @@ fn function(source: &h::Function) -> Function {
         locals: (0..builder.function.locals.len()).collect(),
         next: resume,
     };
+    builder.function.drop_reads = builder
+        .function
+        .locals
+        .iter()
+        .enumerate()
+        .filter(|(_, local)| local.view.is_none() && drop_borrows::reads(&local.ty, destructors))
+        .map(|(id, _)| id)
+        .collect();
+    reachability::prune(&mut builder.function);
     builder.function
 }
 struct Builder {
@@ -49,6 +85,7 @@ struct Builder {
     loops: Vec<(BlockId, BlockId, usize, LocalId)>,
     scopes: Vec<Vec<LocalId>>,
     temporary_start: LocalId,
+    cleanup_scopes: Vec<cleanup::ScopeId>,
 }
 impl Builder {
     fn block_id(&mut self, span: Span) -> BlockId {
@@ -66,6 +103,9 @@ impl Builder {
     }
     fn temp(&mut self, ty: &Type, span: Span) -> LocalId {
         let id = self.function.locals.len();
+        self.function
+            .cleanup
+            .add_local(*self.cleanup_scopes.last().unwrap());
         self.function.locals.push(h::Local {
             view: None,
             name: "<temporary>".into(),
@@ -93,6 +133,25 @@ impl Builder {
         let id = self.temp(ty, span);
         self.evaluate_into(operation, Place::local(id), span);
         Operand::Local(id)
+    }
+    // Completed field values are construction-owned until the final aggregate
+    // operation transfers them. Failure never invokes the unfinished parent's
+    // destructor, and its completed fields clean in declaration/index order.
+    fn aggregate_fields(&mut self, values: &[Expr]) -> Vec<Operand> {
+        let parent = *self.cleanup_scopes.last().unwrap();
+        let construction = self.function.cleanup.construction_scope(parent);
+        let mut fields = Vec::with_capacity(values.len());
+        for value in values {
+            let expression = self.function.cleanup.scope(construction);
+            self.cleanup_scopes.push(expression);
+            let operand = self.expr(value);
+            self.cleanup_scopes.pop();
+            if let Operand::Local(local) = &operand {
+                self.function.cleanup.assign(*local, construction);
+            }
+            fields.push(operand);
+        }
+        fields
     }
     fn check_place(&mut self, place: &Place, span: Span) {
         if self.current.is_none() {
@@ -134,6 +193,23 @@ impl Builder {
         self.end_locals(locals, span);
     }
     fn block(&mut self, body: &h::Block) -> Operand {
+        self.block_mode(body, None)
+    }
+    fn block_mode(&mut self, body: &h::Block, borrowed: Option<loans::Access>) -> Operand {
+        let parent = *self.cleanup_scopes.last().unwrap();
+        let scope = if body.construction.is_empty() {
+            self.function.cleanup.scope(parent)
+        } else {
+            let scope = self.function.cleanup.construction_scope(parent);
+            for (index, local) in body.construction.iter().enumerate() {
+                self.function.cleanup.field_order.insert(*local, index);
+            }
+            scope
+        };
+        self.cleanup_scopes.push(scope);
+        for local in &body.storage {
+            self.function.cleanup.assign(*local, scope);
+        }
         self.scopes.push(body.storage.clone());
         let mut result = Operand::Constant(Value::Unit);
         for (index, statement) in body.statements.iter().enumerate() {
@@ -141,12 +217,28 @@ impl Builder {
                 break;
             }
             let temporary_start = self.function.locals.len();
-            result = self.statement(statement, body.span);
+            let expression_scope = self.function.cleanup.scope(scope);
+            self.cleanup_scopes.push(expression_scope);
+            result = if index + 1 == body.statements.len() && borrowed.is_some() {
+                match statement {
+                    Statement::Evaluate(value) => self.expr_mode(value, borrowed),
+                    _ => self.statement(statement, body.span),
+                }
+            } else {
+                self.statement(statement, body.span)
+            };
+            self.cleanup_scopes.pop();
             let keep_result = index + 1 == body.statements.len() && body.result != Type::Unit;
+            if keep_result {
+                if let Operand::Local(local) = &result {
+                    self.function.cleanup.assign(*local, parent);
+                }
+            }
             self.end_temporaries(temporary_start, keep_result.then_some(&result), body.span);
         }
         self.end_storage(self.scopes.len() - 1, body.span);
         self.scopes.pop();
+        self.cleanup_scopes.pop();
         if body.result == Type::Unit {
             Operand::Constant(Value::Unit)
         } else {
@@ -161,11 +253,31 @@ impl Builder {
             }
             Statement::Evaluate(value) => return self.expr(value),
             Statement::Return(value) => {
-                let result = value
-                    .as_ref()
-                    .map_or(Operand::Constant(Value::Unit), |v| self.expr(v));
+                let result = if let (Some(contract), Some(value)) =
+                    (self.function.result_view.clone(), value)
+                {
+                    self.expr_mode(value, Some(contract.access))
+                } else {
+                    value
+                        .as_ref()
+                        .map_or(Operand::Constant(Value::Unit), |v| self.expr(v))
+                };
+                if let Operand::Local(local) = &result {
+                    self.function.cleanup.assign(*local, 0);
+                }
                 self.end_temporaries(self.temporary_start, Some(&result), span);
                 self.end_storage(0, span);
+                let result = if self.function.result_view.is_some() {
+                    let Operand::Local(id) = result else {
+                        unreachable!()
+                    };
+                    Operand::Address(Place {
+                        local: id,
+                        projections: vec![Projection::Dereference],
+                    })
+                } else {
+                    result
+                };
                 self.end(Terminator::Return(result));
             }
             Statement::Break | Statement::Continue => {
@@ -184,6 +296,26 @@ impl Builder {
     }
     fn place(&mut self, expr: &Expr) -> Place {
         match &expr.kind {
+            ExprKind::StoredView(storage) => {
+                let source = self.place(storage);
+                let id = self.temp(&expr.ty, expr.span);
+                self.function.locals[id].view = Some(loans::Access::Readonly);
+                self.evaluate_into(Operation::LoadView(source), Place::local(id), expr.span);
+                Place {
+                    local: id,
+                    projections: vec![Projection::Dereference],
+                }
+            }
+            ExprKind::BorrowedCall { .. }
+            | ExprKind::CallIndirect(_, _, h::CallContract { view: Some(_), .. }) => {
+                let Operand::Local(id) = self.expr(expr) else {
+                    unreachable!()
+                };
+                Place {
+                    local: id,
+                    projections: vec![Projection::Dereference],
+                }
+            }
             ExprKind::Local(id) => Place::local(*id),
             ExprKind::View(id) => Place {
                 local: *id,
@@ -224,10 +356,100 @@ impl Builder {
         }
     }
     fn expr(&mut self, expr: &Expr) -> Operand {
+        self.expr_mode(expr, None)
+    }
+    fn result_into(
+        &mut self,
+        value: Operand,
+        result: LocalId,
+        borrowed: Option<loans::Access>,
+        span: Span,
+    ) {
+        if self.current.is_none() {
+            return;
+        }
+        let operation = if borrowed.is_some() {
+            let Operand::Local(local) = value else {
+                unreachable!()
+            };
+            Operation::Borrow(Place {
+                local,
+                projections: vec![Projection::Dereference],
+            })
+        } else {
+            Operation::Use(value)
+        };
+        self.evaluate_into(operation, Place::local(result), span);
+    }
+    fn expr_mode(&mut self, expr: &Expr, borrowed: Option<loans::Access>) -> Operand {
         if self.current.is_none() {
             return Operand::Constant(Value::Unit);
         }
+        if let Some(access) = borrowed {
+            if !matches!(
+                expr.kind,
+                ExprKind::Block(_) | ExprKind::If { .. } | ExprKind::Match(_)
+            ) {
+                let source = self.place(expr);
+                let id = self.temp(&expr.ty, expr.span);
+                self.function.locals[id].view = Some(access);
+                self.evaluate_into(Operation::Borrow(source), Place::local(id), expr.span);
+                return Operand::Local(id);
+            }
+        }
         let operation = match &expr.kind {
+            ExprKind::StoreView(value) => Operation::StoreView(self.place(value)),
+            ExprKind::StoredView(_) => {
+                let place = self.place(expr);
+                if expr.ty.copyable() {
+                    Operation::Copy(place)
+                } else {
+                    Operation::Move(place)
+                }
+            }
+            ExprKind::StorageCall {
+                function,
+                arguments,
+                contract,
+            } => Operation::CallStorage {
+                function: *function,
+                arguments: arguments.iter().map(|a| self.expr(a)).collect(),
+                contract: contract.clone(),
+            },
+            ExprKind::BorrowedCall {
+                function,
+                arguments,
+                contract,
+            } => {
+                let arguments = arguments.iter().map(|a| self.expr(a)).collect();
+                let id = self.temp(&expr.ty, expr.span);
+                self.function.locals[id].view = Some(contract.access);
+                self.evaluate_into(
+                    Operation::CallView {
+                        function: *function,
+                        arguments,
+                        contract: contract.clone(),
+                    },
+                    Place::local(id),
+                    expr.span,
+                );
+                return Operand::Local(id);
+            }
+            ExprKind::Identity(left, right) => {
+                let mut places = Vec::new();
+                for value in [left, right] {
+                    let place = self.place(value);
+                    let id = self.temp(&value.ty, value.span);
+                    self.function.locals[id].view = Some(loans::Access::Readonly);
+                    self.evaluate_into(Operation::Borrow(place), Place::local(id), value.span);
+                    places.push(Place {
+                        local: id,
+                        projections: vec![Projection::Dereference],
+                    });
+                }
+                Operation::Identity(places.remove(0), places.remove(0))
+            }
+            ExprKind::Take(value) => Operation::Move(self.place(value)),
             ExprKind::ArgumentView { place, access } => {
                 let source = self.place(place);
                 let id = self.temp(&place.ty, expr.span);
@@ -237,6 +459,28 @@ impl Builder {
                     local: id,
                     projections: vec![Projection::Dereference],
                 });
+            }
+            ExprKind::New {
+                constructor,
+                arguments,
+            } => {
+                let args = arguments.iter().map(|v| self.expr(v)).collect::<Vec<_>>();
+                let object = self.evaluate(
+                    Operation::AllocateClass(expr.ty.class_key()),
+                    &expr.ty,
+                    expr.span,
+                );
+                let Operand::Local(local) = object else {
+                    unreachable!()
+                };
+                let mut supplied = vec![Operand::Address(Place::local(local))];
+                supplied.extend(args);
+                self.evaluate(
+                    Operation::Call(*constructor, supplied),
+                    &Type::Unit,
+                    expr.span,
+                );
+                Operation::CompleteClass(Operand::Local(local))
             }
             ExprKind::Value(value) => Operation::Use(Operand::Constant(value.clone())),
             ExprKind::Borrow { local, place } => {
@@ -256,12 +500,12 @@ impl Builder {
                     Operation::Move(place)
                 }
             }
-            ExprKind::Block(body) => return self.block(body),
+            ExprKind::Block(body) => return self.block_mode(body, borrowed),
             ExprKind::Tuple(values) | ExprKind::Array(values) => {
-                Operation::Aggregate(values.iter().map(|v| self.expr(v)).collect())
+                Operation::Aggregate(self.aggregate_fields(values))
             }
             ExprKind::Enum { variant, fields } => {
-                Operation::Enum(*variant, fields.iter().map(|v| self.expr(v)).collect())
+                Operation::Enum(*variant, self.aggregate_fields(fields))
             }
             ExprKind::Tag(value) => Operation::TagPlace(self.place(value)),
             ExprKind::Unary(operator, value) => Operation::Unary(operator, self.expr(value)),
@@ -300,6 +544,21 @@ impl Builder {
             ExprKind::Call(id, args) => {
                 Operation::Call(*id, args.iter().map(|v| self.expr(v)).collect())
             }
+            ExprKind::CallIndirect(callee, args, contract) => {
+                let callee = self.expr(callee);
+                let operation = Operation::CallIndirect(
+                    callee,
+                    args.iter().map(|v| self.expr(v)).collect(),
+                    contract.clone(),
+                );
+                if let Some(view) = &contract.view {
+                    let id = self.temp(&expr.ty, expr.span);
+                    self.function.locals[id].view = Some(view.access);
+                    self.evaluate_into(operation, Place::local(id), expr.span);
+                    return Operand::Local(id);
+                }
+                operation
+            }
             ExprKind::Assign {
                 place,
                 operator,
@@ -337,22 +596,23 @@ impl Builder {
                 let no_id = self.block_id(expr.span);
                 let end = self.block_id(expr.span);
                 let result = self.temp(&expr.ty, expr.span);
+                self.function.locals[result].view = borrowed;
                 self.end(Terminator::Branch {
                     condition,
                     yes: yes_id,
                     no: no_id,
                 });
                 self.current = Some(yes_id);
-                let value = self.block(yes);
+                let value = self.block_mode(yes, borrowed);
                 let yes_reaches = self.current.is_some();
-                self.evaluate_into(Operation::Use(value), Place::local(result), expr.span);
+                self.result_into(value, result, borrowed, expr.span);
                 self.end(Terminator::Goto(end));
                 self.current = Some(no_id);
-                let value = no
-                    .as_ref()
-                    .map_or(Operand::Constant(Value::Unit), |body| self.block(body));
+                let value = no.as_ref().map_or(Operand::Constant(Value::Unit), |body| {
+                    self.block_mode(body, borrowed)
+                });
                 let no_reaches = self.current.is_some();
-                self.evaluate_into(Operation::Use(value), Place::local(result), expr.span);
+                self.result_into(value, result, borrowed, expr.span);
                 self.end(Terminator::Goto(end));
                 self.current = (yes_reaches || no_reaches).then_some(end);
                 return Operand::Local(result);
@@ -371,7 +631,8 @@ impl Builder {
                     yes: run,
                     no: end,
                 });
-                self.loops.push((test, end, self.scopes.len(), temporary_start));
+                self.loops
+                    .push((test, end, self.scopes.len(), temporary_start));
                 self.current = Some(run);
                 self.block(body);
                 self.end(Terminator::Goto(test));
@@ -382,6 +643,7 @@ impl Builder {
             ExprKind::Match(arms) => {
                 let end = self.block_id(expr.span);
                 let result = self.temp(&expr.ty, expr.span);
+                self.function.locals[result].view = borrowed;
                 let mut reaches = false;
                 for arm in arms {
                     let condition = self.expr(&arm.condition);
@@ -409,9 +671,9 @@ impl Builder {
                     for binding in &arm.bindings {
                         self.statement(binding, expr.span);
                     }
-                    let value = self.block(&arm.body);
+                    let value = self.block_mode(&arm.body, borrowed);
                     reaches |= self.current.is_some();
-                    self.evaluate_into(Operation::Use(value), Place::local(result), expr.span);
+                    self.result_into(value, result, borrowed, expr.span);
                     self.end(Terminator::Goto(end));
                     self.current = Some(next);
                 }

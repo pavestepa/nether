@@ -146,6 +146,16 @@ pub fn overlaps(a: &Place, b: &Place) -> bool {
         if a == b {
             continue;
         }
+        // An unknown index may select the same element, but still inspect the
+        // suffix: a descriptor slot and its external target do not overlap.
+        if matches!(
+            (a, b),
+            (Projection::Index(_), Projection::ConstantIndex(_))
+                | (Projection::ConstantIndex(_), Projection::Index(_))
+                | (Projection::Index(_), Projection::Index(_))
+        ) {
+            continue;
+        }
         return match (a, b) {
             (Projection::Field(a), Projection::Field(b)) => a == b,
             (Projection::ConstantIndex(a), Projection::ConstantIndex(b)) => a == b,
@@ -153,7 +163,17 @@ pub fn overlaps(a: &Place, b: &Place) -> bool {
             _ => true,
         };
     }
-    true
+    // An abstract descriptor target does not overlap the wrapper that stores
+    // its pointer. Dereference remains symbolic only at parameter boundaries.
+    !a.projections
+        .iter()
+        .skip(b.projections.len())
+        .any(|p| *p == Projection::Dereference)
+        && !b
+            .projections
+            .iter()
+            .skip(a.projections.len())
+            .any(|p| *p == Projection::Dereference)
 }
 fn contains(parent: &Place, child: &Place) -> bool {
     parent.local == child.local

@@ -1,5 +1,7 @@
 # Storage, provenance и эффекты 0.1
 
+Архитектура: [Nether → Rust](rust-backend.md). Правила памяти сохраняются; прямой LLVM backend удалён.
+
 Статус: нормативный контракт этапа 0; реализации intrinsics ещё нет.
 Основание — [утверждённые статические режимы](decisions/container-ownership.md).
 Сигнатуры ниже доступны из compiler-owned модуля `core/intrinsic` по symbol ID,
@@ -162,4 +164,4 @@ unsafe кодом, а safe views возвращаются из RawStorage, бе�
 
 Backend baseline не навешивает noalias/inbounds/alignment assumptions из
 одного наличия raw pointer. Сначала должны быть доказаны нужные premises;
-unsafe source contract не разрешает вводить более сильные LLVM assumptions.
+unsafe source contract не разрешает вводить более сильные Rust aliasing/provenance assumptions.

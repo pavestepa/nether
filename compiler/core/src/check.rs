@@ -5,13 +5,22 @@ use nether_frontend::{
 };
 use nether_semantics::{Integer, IntegerType as I};
 use std::collections::BTreeMap;
+mod classes;
+mod classes_init;
+mod constructors;
 mod entries;
 mod enums;
+mod function_values;
 mod future;
 mod generics;
+mod inheritance;
+mod interfaces;
+mod lifecycle;
 mod methods;
 mod patterns;
+mod privacy;
 mod records;
+mod storage;
 mod uses;
 mod views;
 
@@ -24,15 +33,54 @@ struct Signature {
     result: Type,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ReturnInfo {
+    complete: bool,
+    parameters: Vec<Type>,
+    modes: Vec<Option<crate::mir::loans::Access>>,
+    ty: Type,
+    view: Option<crate::mir::returns::Contract>,
+    storage: crate::mir::returns::StorageContract,
+    writes: crate::mir::storage_writes::Contract,
+}
+type ReturnContracts = BTreeMap<String, ReturnInfo>;
+enum Pass {
+    Ready(h::Program),
+    Retry(ReturnContracts),
+}
 pub fn check(module: &a::Module) -> std::result::Result<h::Program, Vec<Diagnostic>> {
-    let prepared = methods::collect(module);
+    inheritance::validate(module).map_err(|e| vec![e])?;
+    let mut contracts = ReturnContracts::new();
+    for _ in 0..64 {
+        match check_pass(module, &contracts)? {
+            Pass::Ready(program) => return Ok(program),
+            Pass::Retry(next) => contracts = next,
+        }
+    }
+    Err(vec![error(
+        module.items.first().map(|i| i.span).unwrap_or(Span {
+            source: nether_frontend::source::SourceId(0),
+            start: 0,
+            end: 0,
+        }),
+        "E0395",
+        "result contracts did not converge",
+    )])
+}
+fn check_pass(
+    module: &a::Module,
+    contracts: &ReturnContracts,
+) -> std::result::Result<Pass, Vec<Diagnostic>> {
+    let class_module = classes::prepare(module).map_err(|e| vec![e])?;
+    let lifecycle_module = lifecycle::prepare(&class_module).map_err(|e| vec![e])?;
+    let prepared = methods::collect(&lifecycle_module);
     let module = &prepared;
     let private_functions: BTreeMap<_, _> = module
         .items
         .iter()
         .filter_map(|item| match &item.kind {
             a::ItemKind::Function(function) if item.private => {
-                Some((function.name.clone(), function.span.source))
+                Some((function.name.clone(), function.span))
             }
             _ => None,
         })
@@ -47,8 +95,9 @@ pub fn check(module: &a::Module) -> std::result::Result<h::Program, Vec<Diagnost
         if matches!(
             item.kind,
             a::ItemKind::Const { .. }
-                | a::ItemKind::Aggregate { class: false, .. }
+                | a::ItemKind::Aggregate { .. }
                 | a::ItemKind::Enum { .. }
+                | a::ItemKind::Interface { .. }
         ) {
             continue;
         }
@@ -135,6 +184,7 @@ pub fn check(module: &a::Module) -> std::result::Result<h::Program, Vec<Diagnost
     }
     let mono = std::cell::RefCell::new(generics::Monomorphization {
         templates,
+        result_contracts: contracts.clone(),
         next_id: declarations.len(),
         ..Default::default()
     });
@@ -147,54 +197,126 @@ pub fn check(module: &a::Module) -> std::result::Result<h::Program, Vec<Diagnost
             .bodies
             .insert(signature.id, declaration.clone());
     }
-    let mut functions = Vec::new();
-    while let Some((signature, declaration)) = work.pop_front() {
-        let checked = check_declaration(
-            &declaration,
-            &signature,
-            &signatures,
-            &constants,
-            &nominals,
-            &mono,
-            &private_functions,
-        );
-        match checked {
-            Ok(function) => functions.push(function),
-            Err(e) => errors.push(e),
+    let mut functions = BTreeMap::new();
+    loop {
+        let before = mono.borrow().next_id;
+        let mut deferred = Vec::new();
+        while let Some((signature, declaration)) = work.pop_front() {
+            let checked = check_declaration(
+                &declaration,
+                &signature,
+                &signatures,
+                &constants,
+                &nominals,
+                &mono,
+                &private_functions,
+            );
+            match checked {
+                Ok(function) => {
+                    functions.insert(signature.id, function);
+                }
+                Err(e) if e.code == function_values::PENDING_CALLABLE => {
+                    deferred.push((signature, declaration, e));
+                }
+                Err(e) => errors.push(e),
+            }
+            work.extend(mono.borrow_mut().pending.drain(..));
         }
-        work.extend(mono.borrow_mut().pending.drain(..));
+        if deferred.is_empty() {
+            break;
+        }
+        // A returned pointer can name a generic entry which its producer has
+        // not instantiated yet in this contract pass. Check queued producers
+        // first, then retry callers; require progress to avoid an infinite retry.
+        if mono.borrow().next_id == before {
+            errors.extend(deferred.into_iter().map(|(_, _, e)| e));
+            break;
+        }
+        work.extend(deferred.into_iter().map(|(s, d, _)| (s, d)));
+    }
+    let functions = functions.into_values().collect::<Vec<_>>();
+    if !mono.borrow().result_requests.is_empty() {
+        let mut next = contracts.clone();
+        let mono_ref = mono.borrow();
+        for (key, ty) in &mono_ref.result_requests {
+            let signature = signatures
+                .values()
+                .chain(mono_ref.instances.values())
+                .chain(mono_ref.entries.values())
+                .find(|s| {
+                    mono_ref
+                        .bodies
+                        .get(&s.id)
+                        .is_some_and(|d| entries::result_key(d, s) == *key)
+                });
+            let Some(signature) = signature else { continue };
+            let info = next.entry(key.clone()).or_insert_with(|| ReturnInfo {
+                complete: false,
+                parameters: signature.parameters.clone(),
+                modes: signature.modes.clone(),
+                ty: signature.result.clone(),
+                view: None,
+                storage: Vec::new(),
+                writes: Vec::new(),
+            });
+            info.ty = storage::union(&info.ty, ty, mono_ref.bodies[&signature.id].span)
+                .map_err(|e| vec![e])?;
+            info.complete = false;
+        }
+        if &next != contracts {
+            return Ok(Pass::Retry(next));
+        }
     }
     if errors.is_empty() {
         let mut audit_work: std::collections::VecDeque<_> =
             mono.borrow_mut().audits.drain(..).collect();
         let audit_mono = std::cell::RefCell::new(generics::Monomorphization {
             templates: mono.borrow().templates.clone(),
+            result_contracts: contracts.clone(),
             bodies: mono.borrow().bodies.clone(),
             next_id: mono.borrow().next_id,
             auditing: true,
             ..Default::default()
         });
-        while let Some((signature, declaration)) = audit_work.pop_front() {
-            if let Err(diagnostic) = check_declaration(
-                &declaration,
-                &signature,
-                &signatures,
-                &constants,
-                &nominals,
-                &audit_mono,
-                &private_functions,
-            ) {
-                errors.push(error(
-                    diagnostic.span,
-                    "E0373",
-                    format!(
-                        "generic body is not valid under its declared constraints: {}",
-                        diagnostic.message
-                    ),
-                ));
+        loop {
+            let before = audit_mono.borrow().next_id;
+            let mut deferred = Vec::new();
+            while let Some((signature, declaration)) = audit_work.pop_front() {
+                match check_declaration(
+                    &declaration,
+                    &signature,
+                    &signatures,
+                    &constants,
+                    &nominals,
+                    &audit_mono,
+                    &private_functions,
+                ) {
+                    Ok(_) => {}
+                    Err(diagnostic) if diagnostic.code == function_values::PENDING_CALLABLE => {
+                        deferred.push((signature, declaration, diagnostic));
+                    }
+                    Err(diagnostic) => {
+                        errors.push(error(
+                            diagnostic.span,
+                            "E0373",
+                            format!(
+                                "generic body is not valid under its declared constraints: {}",
+                                diagnostic.message
+                            ),
+                        ));
+                        break;
+                    }
+                }
+                audit_work.extend(audit_mono.borrow_mut().pending.drain(..));
+            }
+            if !errors.is_empty() || deferred.is_empty() {
                 break;
             }
-            audit_work.extend(audit_mono.borrow_mut().pending.drain(..));
+            if audit_mono.borrow().next_id == before {
+                errors.extend(deferred.into_iter().map(|(_, _, e)| e));
+                break;
+            }
+            audit_work.extend(deferred.into_iter().map(|(s, d, _)| (s, d)));
         }
     }
     let main = signatures.get("main").map(|s| s.id);
@@ -217,15 +339,141 @@ pub fn check(module: &a::Module) -> std::result::Result<h::Program, Vec<Diagnost
     }
     if errors.is_empty() {
         {
-            let program = h::Program { functions, main };
+            for function in &functions {
+                for local in &function.locals {
+                    nominals.register_storage(&local.ty)
+                }
+                nominals.register_storage(&function.result);
+            }
+            let mut program = h::Program {
+                classes: nominals.classes(),
+                functions,
+                main,
+            };
+            let mut typed = contracts.clone();
+            for (id, function) in program.functions.iter_mut().enumerate() {
+                let signature = Signature {
+                    id,
+                    modes: function
+                        .parameters
+                        .iter()
+                        .map(|p| function.locals[*p].view)
+                        .collect(),
+                    parameters: function
+                        .parameters
+                        .iter()
+                        .map(|p| function.locals[*p].ty.clone())
+                        .collect(),
+                    result: function.result.clone(),
+                };
+                let key = mono.borrow().entry_keys[&id].clone();
+                let mut info = contracts
+                    .get(&key)
+                    .filter(|info| info.ty == function.result)
+                    .cloned()
+                    .unwrap_or_else(|| ReturnInfo {
+                        complete: false,
+                        parameters: signature.parameters.clone(),
+                        modes: signature.modes.clone(),
+                        ty: function.result.clone(),
+                        view: None,
+                        storage: Vec::new(),
+                        writes: Vec::new(),
+                    });
+                info.parameters = signature.parameters.clone();
+                info.modes = signature.modes.clone();
+                function.storage_writes = info.writes.clone();
+                typed.insert(key, info);
+            }
+            if typed.keys().any(|key| !contracts.contains_key(key))
+                || typed.iter().any(|(key, info)| {
+                    contracts.get(key).is_some_and(|old| {
+                        old.ty != info.ty
+                            || old.parameters != info.parameters
+                            || old.modes != info.modes
+                    })
+                })
+            {
+                return Ok(Pass::Retry(typed));
+            }
             let mir = crate::mir::lower(&program);
+            let inferred = crate::mir::returns::infer(&mir).map_err(|e| {
+                let mut diagnostic = error(program.functions[e.function].span, "E0395", e.message);
+                if let Some(origin) = e.origin {
+                    diagnostic = diagnostic.with_note(
+                        origin,
+                        "this owner ends its lifetime when the function exits",
+                    );
+                }
+                vec![diagnostic]
+            })?;
+            let storage = crate::mir::returns::infer_storage(&mir, &inferred).map_err(|e| {
+                let mut diagnostic = error(program.functions[e.function].span, "E0395", e.message);
+                if let Some(origin) = e.origin {
+                    diagnostic = diagnostic.with_note(
+                        origin,
+                        "this owner ends its lifetime when the function exits",
+                    );
+                }
+                vec![diagnostic]
+            })?;
+            let writes = crate::mir::storage_writes::infer(&mir).map_err(|e| {
+                let mut diagnostic = error(program.functions[e.function].span, "E0396", e.message);
+                if let Some(origin) = e.origin {
+                    diagnostic = diagnostic
+                        .with_note(origin, "this owner cannot outlive the caller's storage");
+                }
+                vec![diagnostic]
+            })?;
+            let mut next = contracts.clone();
+            for (id, ((function, contract), storage)) in program
+                .functions
+                .iter_mut()
+                .zip(inferred)
+                .zip(storage)
+                .enumerate()
+            {
+                let signature = Signature {
+                    id,
+                    modes: function
+                        .parameters
+                        .iter()
+                        .map(|p| function.locals[*p].view)
+                        .collect(),
+                    parameters: function
+                        .parameters
+                        .iter()
+                        .map(|p| function.locals[*p].ty.clone())
+                        .collect(),
+                    result: function.result.clone(),
+                };
+                next.insert(
+                    mono.borrow().entry_keys[&id].clone(),
+                    ReturnInfo {
+                        complete: true,
+                        parameters: signature.parameters.clone(),
+                        modes: signature.modes.clone(),
+                        ty: function.result.clone(),
+                        view: contract.clone(),
+                        storage,
+                        writes: writes[id].clone(),
+                    },
+                );
+                function.result_view = contract;
+                function.storage_writes = writes[id].clone();
+            }
+            if &next != contracts {
+                return Ok(Pass::Retry(next));
+            }
+            let mir = crate::mir::lower(&program);
+            classes_init::validate(&mir).map_err(|e| vec![e])?;
             let mut errors: Vec<_> = mir
                 .functions
                 .iter()
                 .flat_map(|f| {
                     crate::mir::borrow_check::check(f)
                         .into_iter()
-                        .map(|e| error(f.blocks[e.block].span, "E0381", e.message))
+                        .map(|e| crate::mir::borrow_check::diagnostic(f, e, "E0381"))
                 })
                 .collect();
             for function in &mir.functions {
@@ -241,7 +489,8 @@ pub fn check(module: &a::Module) -> std::result::Result<h::Program, Vec<Diagnost
                 }
             }
             if errors.is_empty() {
-                Ok(program)
+                lifecycle::validate(&program).map_err(|e| vec![e])?;
+                Ok(Pass::Ready(program))
             } else {
                 Err(errors)
             }
@@ -251,15 +500,23 @@ pub fn check(module: &a::Module) -> std::result::Result<h::Program, Vec<Diagnost
     }
 }
 
+#[derive(Clone)]
 struct Checker<'a> {
+    member_owner: Option<String>,
+    storage_hints: storage::Modes,
+    storage_requests: storage::Modes,
+    storage_roots: std::collections::BTreeSet<usize>,
+    storage_sources: BTreeMap<usize, Vec<h::Expr>>,
+    storage_parameters: std::collections::BTreeSet<usize>,
     signatures: &'a BTreeMap<String, Signature>,
     mono: &'a std::cell::RefCell<generics::Monomorphization>,
     constants: &'a BTreeMap<String, (Value, Type)>,
     nominals: &'a records::Nominals,
-    private_functions: &'a BTreeMap<String, nether_frontend::source::SourceId>,
+    private_functions: &'a BTreeMap<String, Span>,
     scopes: Vec<BTreeMap<String, usize>>,
     locals: Vec<h::Local>,
     result: Type,
+    actual_result: Option<Type>,
     loops: usize,
     value_uses: BTreeMap<String, Vec<Span>>,
     pattern_views: bool,
@@ -331,12 +588,26 @@ impl Checker<'_> {
                         .as_ref()
                         .map(|ty| resolve_type_with(ty, self.constants, self.nominals))
                         .transpose()?;
-                    let value = self.expr(value, ty.as_ref(), true)?;
+                    let hint = self.storage_hints.get(&storage::key(pattern.span)).cloned();
+                    if let (Some(annotation), Some(hint)) = (&ty, &hint) {
+                        same(annotation, hint, pattern.span)?;
+                    }
+                    let value = self.expr(value, hint.as_ref().or(ty.as_ref()), true)?;
+                    if let Some(hint) = &hint {
+                        let joined = storage::union(hint, &value.ty, pattern.span)?;
+                        if joined != *hint {
+                            self.storage_requests
+                                .insert(storage::key(pattern.span), joined);
+                        } else if value.ty != *hint && !self.request_storage_mode(&value, hint)? {
+                            self.same_storage_mode(hint, &value.ty, value.span)?;
+                        }
+                    }
                     if !value.ty.copyable()
-                        && self.ownership_view_needed(match &statement.kind {
-                            a::StatementKind::Binding { value, .. } => value,
-                            _ => unreachable!(),
-                        })
+                        && (views::view_root(&value)
+                            || self.ownership_view_needed(match &statement.kind {
+                                a::StatementKind::Binding { value, .. } => value,
+                                _ => unreachable!(),
+                            }))
                     {
                         let a::StatementKind::Binding {
                             value: source,
@@ -367,6 +638,7 @@ impl Checker<'_> {
                         ty: value.ty.clone(),
                         span: pattern.span,
                     };
+                    self.storage_sources.insert(id, vec![value.clone()]);
                     let mut bindings = vec![h::Statement::Initialize(id, value)];
                     self.scopes.push(BTreeMap::new());
                     let first = self.locals.len();
@@ -384,10 +656,14 @@ impl Checker<'_> {
                         }
                     }
                     let names = self.scopes.pop().unwrap();
+                    if matches!(pattern.kind, a::PatternKind::Binding { by_ref: false, .. }) {
+                        self.storage_roots.extend(names.values().copied());
+                    }
                     self.scopes.last_mut().unwrap().extend(names);
                     diverges |= value_diverges;
                     h::Statement::Evaluate(h::Expr {
                         kind: h::ExprKind::Block(h::Block {
+                            construction: vec![],
                             storage: vec![],
                             statements: bindings,
                             result: Type::Unit,
@@ -409,17 +685,38 @@ impl Checker<'_> {
                         last && value_context,
                     )?;
                     if !diverges && last && value_context {
+                        if let Some(expected) = expected {
+                            self.request_storage_mode(&checked, expected)?;
+                        }
                         result = checked.ty.clone();
                     }
                     diverges |= expression_diverges(&checked);
                     h::Statement::Evaluate(checked)
                 }
                 a::StatementKind::Return(value) => {
-                    let expected = self.result.clone();
+                    let expected = self.actual_result.as_ref().unwrap_or(&self.result).clone();
                     let value = value
                         .as_ref()
                         .map(|v| self.expr(v, Some(&expected), true))
                         .transpose()?;
+                    if let Some(value) = &value {
+                        if !expression_diverges(value) {
+                            same(&self.result, &value.ty, value.span)?;
+                            self.request_storage_mode(value, &expected)?;
+                            if !self.actual_result.as_ref().is_some_and(|previous| {
+                                previous.contains_views()
+                                    && !value.ty.contains_views()
+                                    && !self.mono.borrow().pending_results.is_empty()
+                            }) {
+                                self.actual_result =
+                                    Some(if let Some(previous) = &self.actual_result {
+                                        storage::union(previous, &value.ty, value.span)?
+                                    } else {
+                                        value.ty.clone()
+                                    });
+                            }
+                        }
+                    }
                     if value.is_none() && expected != Type::Unit {
                         return Err(error(
                             statement.span,
@@ -463,6 +760,7 @@ impl Checker<'_> {
             }
         }
         Ok(h::Block {
+            construction: vec![],
             storage: (storage_start..self.locals.len()).collect(),
             statements,
             result,
@@ -478,6 +776,8 @@ impl Checker<'_> {
         value_context: bool,
     ) -> Result<h::Expr> {
         let span = source.span;
+        let expression_hint = self.storage_hints.get(&storage::key(span)).cloned();
+        let expected = expression_hint.as_ref().or(expected);
         let (kind, ty) = match &source.kind {
             a::ExprKind::Match { value, arms } => {
                 return self.match_expression(value, arms, expected, value_context, span);
@@ -487,12 +787,18 @@ impl Checker<'_> {
                 let ty = block.result.clone();
                 (h::ExprKind::Block(block), ty)
             }
+            a::ExprKind::New { ty, arguments } => {
+                return self.new_class(ty, arguments, expected, span)
+            }
             a::ExprKind::Group(value) => return self.expr(value, expected, value_context),
             a::ExprKind::Literal(value) => literal(value, expected, false, span)?,
             a::ExprKind::Name(name) => {
                 if self.lookup(name).is_none() {
                     if let Some(receiver) = self.lookup("this") {
-                        if matches!(&self.locals[receiver].ty,Type::Record {fields,..} if fields.iter().any(|f|f.name==*name))
+                        if self
+                            .nominals
+                            .fields(&self.locals[receiver].ty)
+                            .is_some_and(|fields| fields.iter().any(|f| f.name == *name))
                         {
                             let member = a::Expr {
                                 kind: a::ExprKind::Member {
@@ -516,6 +822,12 @@ impl Checker<'_> {
                             ty: ty.clone(),
                             span,
                         });
+                    }
+                    if let Some(value) = self.function_value(name, &[], expected, span)? {
+                        if let Some(expected) = expected {
+                            same(expected, &value.ty, span)?;
+                        }
+                        return Ok(value);
                     }
                 }
                 let id = self
@@ -593,6 +905,25 @@ impl Checker<'_> {
                 let hint = hint.or(inferred.as_ref());
                 let left = self.expr(left, hint, true)?;
                 let right = self.expr(right, if shift { None } else { Some(&left.ty) }, true)?;
+                if matches!(left.ty, Type::Class { .. }) && ["==", "!="].contains(operator) {
+                    if let Some(expected) = expected {
+                        same(expected, &Type::Bool, span)?;
+                    }
+                    let identity = h::Expr {
+                        kind: h::ExprKind::Identity(Box::new(left), Box::new(right)),
+                        ty: Type::Bool,
+                        span,
+                    };
+                    return Ok(if *operator == "==" {
+                        identity
+                    } else {
+                        h::Expr {
+                            kind: h::ExprKind::Unary("!", Box::new(identity)),
+                            ty: Type::Bool,
+                            span,
+                        }
+                    });
+                }
                 let valid = if logical {
                     left.ty == Type::Bool
                 } else if shift {
@@ -638,17 +969,50 @@ impl Checker<'_> {
                 types,
                 arguments,
             } => {
+                if matches!(&callee.kind, a::ExprKind::Name(name) if name=="same_identity" && self.lookup(name).is_none() && !self.signatures.contains_key(name) && !self.mono.borrow().templates.contains_key(name))
+                {
+                    if !types.is_empty() || arguments.len() != 2 {
+                        return Err(error(
+                            span,
+                            "E0313",
+                            "same_identity requires two class operands",
+                        ));
+                    }
+                    let left = self.expr(&arguments[0], None, true)?;
+                    let right = self.expr(&arguments[1], Some(&left.ty), true)?;
+                    if !matches!(left.ty, Type::Class { .. }) {
+                        return Err(error(
+                            span,
+                            "E0311",
+                            "same_identity requires compatible class operands",
+                        ));
+                    }
+                    if let Some(expected) = expected {
+                        same(expected, &Type::Bool, span)?;
+                    }
+                    return Ok(h::Expr {
+                        kind: h::ExprKind::Identity(Box::new(left), Box::new(right)),
+                        ty: Type::Bool,
+                        span,
+                    });
+                }
                 if types.is_empty() {
                     if let Some(value) = self.enum_call(callee, arguments, expected, span)? {
                         return Ok(value);
                     }
                 }
                 if let Some(value) = self.instance_call(callee, types, arguments, expected, span)? {
-                    return Ok(value);
+                    return self.contextual_result(value, expected);
+                }
+                if let Some(value) = self.indirect_call(callee, types, arguments, span)? {
+                    if let Some(expected) = expected {
+                        same(expected, &value.ty, span)?;
+                    }
+                    return self.contextual_result(value, expected);
                 }
                 let (name, mut generic_arguments) = match &callee.kind {
                     a::ExprKind::Name(name) => (name.clone(), Vec::new()),
-                    _ => methods::static_call(callee).ok_or_else(|| {
+                    _ => methods::resolved_static_call(callee, self.nominals).ok_or_else(|| {
                         error(
                             span,
                             "E0900",
@@ -670,22 +1034,13 @@ impl Checker<'_> {
                 generic_arguments.extend(types.iter().cloned());
                 let types = &generic_arguments;
                 let name = &name;
-                if self
-                    .private_functions
-                    .get(name)
-                    .is_some_and(|source| *source != span.source)
-                {
-                    return Err(error(
-                        span,
-                        "E0352",
-                        "private function is not accessible from this module",
-                    ));
-                }
+                self.check_function_access(name, span)?;
                 if self.lookup(name).is_some() {
                     return Err(error(callee.span, "E0313", "local binding shadows this function; callable values require function-pointer checking"));
                 }
                 if self.mono.borrow().templates.contains_key(name) {
-                    return self.generic_call(name, types, arguments, expected, span);
+                    let value = self.generic_call(name, types, arguments, expected, span)?;
+                    return self.contextual_result(value, expected);
                 }
                 if !types.is_empty() {
                     return Err(error(span, "E0370", "function has no generic parameters"));
@@ -700,7 +1055,32 @@ impl Checker<'_> {
                 for (arg, ty) in arguments.iter().zip(&signature.parameters) {
                     checked.push(self.expr(arg, Some(ty), true)?);
                 }
-                return self.call_entry(signature, arguments, checked, span);
+                let value = self.call_entry(signature, arguments, checked, span)?;
+                return self.contextual_result(value, expected);
+            }
+            a::ExprKind::Specialize { value, arguments } => {
+                if let Some(pointer) =
+                    self.static_function_value(value, arguments, expected, span)?
+                {
+                    return Ok(pointer);
+                }
+                let a::ExprKind::Name(name) = &value.kind else {
+                    return Err(error(
+                        span,
+                        "E0900",
+                        "specialized function values require a named function",
+                    ));
+                };
+                if self.lookup(name).is_some() {
+                    return Err(error(
+                        span,
+                        "E0390",
+                        "stored function values cannot be specialized",
+                    ));
+                }
+                return self
+                    .function_value(name, arguments, expected, span)?
+                    .ok_or_else(|| error(span, "E0310", "unknown function"));
             }
             a::ExprKind::Construct { ty, fields } => {
                 return self.record(ty, fields, expected, span)
@@ -716,31 +1096,13 @@ impl Checker<'_> {
                     };
                     let mut checked = Vec::new();
                     for (index, value) in values.iter().enumerate() {
-                        checked.push(self.expr(value, hints.and_then(|v| v.get(index)), true)?);
+                        checked.push(self.storage_value(value, hints.and_then(|v| v.get(index)))?);
                     }
                     let ty = Type::Tuple(checked.iter().map(|e| e.ty.clone()).collect());
                     (h::ExprKind::Tuple(checked), ty)
                 }
             }
-            a::ExprKind::Array(values) => {
-                let mut element = if let Some(Type::Array(element, _)) = expected {
-                    Some((**element).clone())
-                } else {
-                    None
-                };
-                let mut checked = Vec::new();
-                for value in values {
-                    let value = self.expr(value, element.as_ref(), true)?;
-                    element = Some(value.ty.clone());
-                    checked.push(value);
-                }
-                let element = element
-                    .ok_or_else(|| error(span, "E0314", "empty array requires an element type"))?;
-                (
-                    h::ExprKind::Array(checked),
-                    Type::Array(Box::new(element), values.len() as u64),
-                )
-            }
+            a::ExprKind::Array(values) => return self.storage_array(values, expected, span),
             a::ExprKind::Index { value, index } => {
                 let value = self.expr(value, None, true)?;
                 let index = self.expr(index, Some(&Type::Integer(I::Usize)), true)?;
@@ -751,6 +1113,9 @@ impl Checker<'_> {
                 (h::ExprKind::Index(Box::new(value), Box::new(index)), ty)
             }
             a::ExprKind::Member { value, name } => {
+                if let Some(pointer) = self.static_function_value(source, &[], expected, span)? {
+                    return Ok(pointer);
+                }
                 if let Some(value) = self.enum_unit(value, name, expected, span)? {
                     return Ok(value);
                 }
@@ -766,19 +1131,14 @@ impl Checker<'_> {
                             .ok_or_else(|| error(span, "E0315", "tuple field out of bounds"))?;
                         (index, ty)
                     }
-                    Type::Record { fields, .. } => {
+                    Type::Record { .. } | Type::Class { .. } => {
+                        let fields = self.nominals.fields(&value.ty).unwrap();
                         let index = fields
                             .iter()
                             .position(|field| field.name == *name)
                             .ok_or_else(|| error(span, "E0351", "unknown struct field"))?;
                         let field = &fields[index];
-                        if field.private && field.source != span.source {
-                            return Err(error(
-                                span,
-                                "E0352",
-                                "private field is not accessible from this module",
-                            ));
-                        }
+                        self.check_field_access(&value.ty, field, span)?;
                         (index, field.ty.clone())
                     }
                     _ => return Err(error(span, "E0900", "member access requires an aggregate")),
@@ -791,6 +1151,27 @@ impl Checker<'_> {
                 value,
             } => {
                 let place = self.expr(place, None, true)?;
+                if let h::ExprKind::StoredView(slot) = &place.kind {
+                    if *operator != "=" {
+                        return Err(error(
+                            span,
+                            "E0396",
+                            "stored readonly view only supports rebinding",
+                        ));
+                    }
+                    self.mutable_place(slot)?;
+                    let value = self.storage_value(value, Some(&slot.ty))?;
+                    self.same_storage_mode(&slot.ty, &value.ty, value.span)?;
+                    return Ok(h::Expr {
+                        kind: h::ExprKind::Assign {
+                            place: slot.clone(),
+                            operator,
+                            value: Box::new(value),
+                        },
+                        ty: Type::Unit,
+                        span,
+                    });
+                }
                 if let h::ExprKind::View(local) = place.kind {
                     // Only explicit dereference writes the whole target.
                     fn explicit(v: &a::Expr) -> bool {
@@ -803,6 +1184,13 @@ impl Checker<'_> {
                     let a::ExprKind::Assign { place: source, .. } = &source.kind else {
                         unreachable!()
                     };
+                    if explicit(source) && matches!(place.ty, Type::Class { .. }) {
+                        return Err(error(
+                            span,
+                            "E0394",
+                            "class view cannot replace its owning slot",
+                        ));
+                    }
                     if !explicit(source) {
                         if !self.locals[local].mutable {
                             return Err(error(
@@ -819,6 +1207,7 @@ impl Checker<'_> {
                             ));
                         }
                         let value = self.expr(value, Some(&place.ty), true)?;
+                        self.same_storage_mode(&place.ty, &value.ty, value.span)?;
                         if !views::place(&value) {
                             return Err(error(
                                 span,
@@ -829,6 +1218,10 @@ impl Checker<'_> {
                         if self.locals[local].view == Some(crate::mir::loans::Access::Mutable) {
                             self.mutable_place(&value)?;
                         }
+                        self.storage_sources
+                            .entry(local)
+                            .or_default()
+                            .push(value.clone());
                         return Ok(h::Expr {
                             kind: h::ExprKind::Borrow {
                                 local,
@@ -841,7 +1234,19 @@ impl Checker<'_> {
                 }
                 self.mutable_place(&place)?;
                 let shift = ["<<=", ">>="].contains(operator);
-                let value = self.expr(value, if shift { None } else { Some(&place.ty) }, true)?;
+                let value = if *operator == "="
+                    && self.infers_storage_place(&place)
+                    && matches!(
+                        place.kind,
+                        h::ExprKind::Field(..) | h::ExprKind::Index(..) | h::ExprKind::Payload(..)
+                    ) {
+                    self.storage_assignment(value, &place)?
+                } else {
+                    self.expr(value, if shift { None } else { Some(&place.ty) }, true)?
+                };
+                if !shift && !self.request_storage_mode(&place, &value.ty)? {
+                    self.same_storage_mode(&place.ty, &value.ty, value.span)?;
+                }
                 if *operator != "=" {
                     let integer_only = ["&=", "|=", "^=", "<<=", ">>="].contains(operator);
                     if !place.ty.numeric()
@@ -878,13 +1283,27 @@ impl Checker<'_> {
                     .as_ref()
                     .map(|branch| self.branch(branch, branch_hint, value_context))
                     .transpose()?;
-                let ty = if !value_context {
-                    Type::Unit
-                } else if yes.diverges {
-                    no.as_ref().map_or(Type::Unit, |b| b.result.clone())
-                } else {
-                    yes.result.clone()
-                };
+                if let Some(no) = &no {
+                    if !yes.diverges && !no.diverges {
+                        let joined = storage::union(&yes.result, &no.result, span)?;
+                        if !self.request_expression_mode(span, &yes.result, &joined)?
+                            && !self.storage_requests.contains_key(&storage::key(span))
+                        {
+                            storage::same_mode(&joined, &yes.result, span)?;
+                            storage::same_mode(&joined, &no.result, span)?;
+                        }
+                    }
+                }
+                let ty =
+                    if value_context && !yes.diverges && no.as_ref().is_some_and(|b| !b.diverges) {
+                        storage::union(&yes.result, &no.as_ref().unwrap().result, span)?
+                    } else if !value_context {
+                        Type::Unit
+                    } else if yes.diverges {
+                        no.as_ref().map_or(Type::Unit, |b| b.result.clone())
+                    } else {
+                        yes.result.clone()
+                    };
                 if no.is_none() && value_context && ty != Type::Unit {
                     return Err(error(span, "E0316", "value-producing if requires else"));
                 }
@@ -898,15 +1317,8 @@ impl Checker<'_> {
                 let body = checked?;
                 (h::ExprKind::While { condition, body }, Type::Unit)
             }
-            _ => {
-                return Err(error(
-                    span,
-                    "E0900",
-                    "this expression requires a later checker stage; it is not executed",
-                ))
-            }
         };
-        let checked = h::Expr { kind, ty, span };
+        let checked = storage::read(h::Expr { kind, ty, span });
         if !expression_diverges(&checked) {
             if let Some(expected) = expected {
                 same(expected, &checked.ty, span)?;
@@ -928,6 +1340,7 @@ impl Checker<'_> {
         let result = expression.ty.clone();
         let diverges = expression_diverges(&expression);
         Ok(h::Block {
+            construction: vec![],
             storage: vec![],
             statements: vec![h::Statement::Evaluate(expression)],
             result,
@@ -958,6 +1371,9 @@ impl Checker<'_> {
     }
 
     fn mutable_place(&self, place: &h::Expr) -> Result<()> {
+        if self.pending_result_place(place) {
+            return Ok(());
+        }
         match &place.kind {
             h::ExprKind::Local(id) if self.locals[*id].mutable => Ok(()),
             h::ExprKind::View(id)
@@ -965,14 +1381,28 @@ impl Checker<'_> {
             {
                 Ok(())
             }
+            h::ExprKind::BorrowedCall { contract, .. }
+                if contract.access == crate::mir::loans::Access::Mutable =>
+            {
+                Ok(())
+            }
             h::ExprKind::Index(base, _)
             | h::ExprKind::Field(base, _)
             | h::ExprKind::Payload(base, _) => self.mutable_place(base),
-            _ => Err(error(
-                place.span,
-                "E0317",
-                "assignment requires a mutable place",
-            )),
+            _ => {
+                let mut diagnostic =
+                    error(place.span, "E0317", "assignment requires a mutable place");
+                if let h::ExprKind::View(id) = place.kind {
+                    diagnostic = diagnostic.with_note(
+                        self.locals[id].span,
+                        "this view only grants readonly access",
+                    );
+                } else if matches!(place.kind, h::ExprKind::BorrowedCall { .. }) {
+                    diagnostic =
+                        diagnostic.with_note(place.span, "this call returns a readonly view");
+                }
+                Err(diagnostic)
+            }
         }
     }
 }
@@ -1040,6 +1470,18 @@ fn resolve_type_with(
                 )
             }
         }
+        a::TypeKind::Function { parameters, result } => {
+            let parameters = parameters
+                .iter()
+                .map(|(mutable, ty)| Ok((*mutable, resolve_type_with(ty, constants, nominals)?)))
+                .collect::<Result<Vec<_>>>()?;
+            let result = resolve_type_with(result, constants, nominals)?;
+            Type::Function {
+                parameters,
+                result: Box::new(result),
+                contract: None,
+            }
+        }
         a::TypeKind::Array { element, length } => {
             let Value::Integer(length) =
                 constant_value(length, &Type::Integer(I::Usize), constants)?
@@ -1061,7 +1503,7 @@ fn resolve_type_with(
             ))
         }
     };
-    crate::llvm::layout(&resolved).map_err(|message| error(ty.span, "E0318", message))?;
+    crate::layout::layout(&resolved).map_err(|message| error(ty.span, "E0318", message))?;
     Ok(resolved)
 }
 
@@ -1072,6 +1514,12 @@ pub(crate) fn constant_value(
 ) -> Result<Value> {
     let signatures = BTreeMap::new();
     let mut checker = Checker {
+        member_owner: None,
+        storage_hints: Default::default(),
+        storage_requests: Default::default(),
+        storage_roots: Default::default(),
+        storage_sources: Default::default(),
+        storage_parameters: Default::default(),
         signatures: &signatures,
         mono: &std::cell::RefCell::new(generics::Monomorphization::default()),
         constants,
@@ -1083,15 +1531,19 @@ pub(crate) fn constant_value(
         scopes: vec![BTreeMap::new()],
         locals: Vec::new(),
         result: ty.clone(),
+        actual_result: None,
         loops: 0,
     };
     let expression = checker.expr(value, Some(ty), true)?;
     let function = h::Function {
+        storage_writes: Vec::new(),
+        result_view: None,
         name: "constant".into(),
         parameters: Vec::new(),
         locals: checker.locals,
         result: ty.clone(),
         body: h::Block {
+            construction: vec![],
             storage: vec![],
             statements: vec![h::Statement::Return(Some(expression))],
             result: Type::Unit,
@@ -1101,6 +1553,7 @@ pub(crate) fn constant_value(
         span: value.span,
     };
     let program = h::Program {
+        classes: Default::default(),
         functions: vec![function],
         main: None,
     };
@@ -1197,7 +1650,7 @@ fn expression_diverges(expr: &h::Expr) -> bool {
     }
 }
 fn same(expected: &Type, actual: &Type, span: Span) -> Result<()> {
-    if expected == actual {
+    if expected.logical() == actual.logical() {
         Ok(())
     } else {
         Err(error(
@@ -1218,9 +1671,82 @@ fn check_declaration(
     constants: &crate::constants::Constants,
     nominals: &records::Nominals,
     mono: &std::cell::RefCell<generics::Monomorphization>,
-    private_functions: &BTreeMap<String, nether_frontend::source::SourceId>,
+    private_functions: &BTreeMap<String, Span>,
 ) -> Result<h::Function> {
+    let key = entries::result_key(declaration, signature);
+    mono.borrow_mut()
+        .entry_keys
+        .insert(signature.id, key.clone());
+    let initial = mono.borrow().clone();
+    let mut hints = storage::Modes::new();
+    if let Some(info) = initial.result_contracts.get(&key) {
+        for (index, (parameter, ty)) in declaration
+            .parameters
+            .iter()
+            .zip(&info.parameters)
+            .enumerate()
+        {
+            hints.insert(
+                storage::key(parameter.span),
+                if info.modes[index].is_some() && signature.modes[index].is_none() {
+                    Type::StoredView(Box::new(ty.clone()))
+                } else {
+                    ty.clone()
+                },
+            );
+        }
+    }
+    for _ in 0..64 {
+        let (result, requests) = check_declaration_modes(
+            declaration,
+            signature,
+            signatures,
+            constants,
+            nominals,
+            mono,
+            private_functions,
+            hints.clone(),
+        );
+        if requests.is_empty() {
+            return result;
+        }
+        for (key, ty) in requests {
+            hints.insert(key, ty);
+        }
+        // Provisional calls/destructor entries must not survive a representation
+        // retry. They may have a different ABI from the stable local modes.
+        let requests = mono.borrow().result_requests.clone();
+        *mono.borrow_mut() = initial.clone();
+        mono.borrow_mut().result_requests.extend(requests);
+    }
+    Err(error(
+        declaration.span,
+        "E0396",
+        "local storage mode inference did not converge",
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_declaration_modes(
+    declaration: &a::Function,
+    signature: &Signature,
+    signatures: &BTreeMap<String, Signature>,
+    constants: &crate::constants::Constants,
+    nominals: &records::Nominals,
+    mono: &std::cell::RefCell<generics::Monomorphization>,
+    private_functions: &BTreeMap<String, Span>,
+    hints: storage::Modes,
+) -> (Result<h::Function>, storage::Modes) {
     let mut checker = Checker {
+        member_owner: declaration
+            .name
+            .rsplit_once('.')
+            .map(|(owner, _)| owner.to_owned()),
+        storage_hints: hints,
+        storage_requests: Default::default(),
+        storage_roots: Default::default(),
+        storage_sources: Default::default(),
+        storage_parameters: Default::default(),
         signatures,
         mono,
         constants,
@@ -1235,10 +1761,15 @@ fn check_declaration(
             .unwrap_or_default(),
         scopes: vec![BTreeMap::new()],
         locals: Vec::new(),
-        result: signature.result.clone(),
+        result: mono
+            .borrow()
+            .result_contracts
+            .get(&entries::result_key(declaration, signature))
+            .map_or_else(|| signature.result.clone(), |i| i.ty.clone()),
+        actual_result: None,
         loops: 0,
     };
-    (|| {
+    let result = (|| {
         let mut parameters = Vec::new();
         let mut prelude = Vec::new();
         for (parameter_index, (parameter, ty)) in declaration
@@ -1247,7 +1778,22 @@ fn check_declaration(
             .zip(&signature.parameters)
             .enumerate()
         {
-            let mode = signature.modes[parameter_index];
+            let ty = checker
+                .storage_hints
+                .get(&storage::key(parameter.span))
+                .unwrap_or(ty)
+                .clone();
+            let (ty, mode) = match ty {
+                Type::StoredView(target) => (
+                    *target,
+                    Some(if parameter.mutable {
+                        crate::mir::loans::Access::Mutable
+                    } else {
+                        crate::mir::loans::Access::Readonly
+                    }),
+                ),
+                ty => (ty, signature.modes[parameter_index]),
+            };
             let id = checker.locals.len();
             checker.locals.push(h::Local {
                 view: mode,
@@ -1257,6 +1803,8 @@ fn check_declaration(
                 span: parameter.span,
             });
             parameters.push(id);
+            checker.storage_roots.insert(id);
+            checker.storage_parameters.insert(id);
             let value = h::Expr {
                 kind: if mode.is_some() {
                     h::ExprKind::View(id)
@@ -1304,13 +1852,29 @@ fn check_declaration(
                 "non-unit function must explicitly return on every path",
             ));
         }
+        for ty in checker
+            .locals
+            .iter()
+            .map(|l| l.ty.clone())
+            .collect::<Vec<_>>()
+        {
+            checker.schedule_destructors(&ty, declaration.span)?;
+        }
+        checker.schedule_destructors(&signature.result, declaration.span)?;
+        let result = checker
+            .actual_result
+            .clone()
+            .unwrap_or_else(|| signature.result.clone());
         Ok(h::Function {
+            storage_writes: Vec::new(),
+            result_view: None,
             name: declaration.name.clone(),
             parameters,
-            locals: checker.locals,
-            result: signature.result.clone(),
+            locals: std::mem::take(&mut checker.locals),
+            result,
             body,
             span: declaration.span,
         })
-    })()
+    })();
+    (result, checker.storage_requests)
 }

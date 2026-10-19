@@ -1,8 +1,12 @@
 use super::*;
 pub(super) mod substitute;
 use substitute::Substitution;
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct Monomorphization {
+    pub result_contracts: ReturnContracts,
+    pub entry_keys: BTreeMap<usize, String>,
+    pub result_requests: BTreeMap<String, Type>,
+    pub pending_results: std::collections::BTreeSet<usize>,
     pub bodies: BTreeMap<usize, a::Function>,
     pub entries: BTreeMap<String, Signature>,
     pub templates: BTreeMap<String, a::Function>,
@@ -12,6 +16,8 @@ pub(super) struct Monomorphization {
     pub audits: Vec<(Signature, a::Function)>,
     pub audit_keys: std::collections::BTreeSet<String>,
     pub instances: BTreeMap<String, Signature>,
+    pub class_destructor_payloads: std::collections::BTreeSet<String>,
+    pub destructor_types: std::collections::BTreeSet<String>,
 }
 impl Checker<'_> {
     pub(super) fn generic_call(
@@ -34,8 +40,7 @@ impl Checker<'_> {
         let mut const_names = std::collections::BTreeSet::new();
         for generic in &template.generics {
             match &generic.kind {
-                a::GenericKind::Type { constraints, .. } => {
-                    if constraints.iter().any(|ty| !matches!(&ty.kind,a::TypeKind::Named {path,arguments} if path==&["Copy".to_owned()] && arguments.is_empty())) {return Err(error(generic.span,"E0900","interface constraints require interface checking"));}
+                a::GenericKind::Type { .. } => {
                     if !type_names.insert(generic.name.clone())
                         || const_names.contains(&generic.name)
                     {
@@ -95,7 +100,7 @@ impl Checker<'_> {
         if let Some(expected) = expected {
             infer(
                 &template.result,
-                expected,
+                &expected.logical(),
                 &type_names,
                 &const_names,
                 &mut substitutions,
@@ -108,7 +113,7 @@ impl Checker<'_> {
             if let Some(ty) = self.known_type(arg) {
                 infer(
                     parameter.ty.as_ref().unwrap(),
-                    &ty,
+                    &ty.logical(),
                     &type_names,
                     &const_names,
                     &mut substitutions,
@@ -126,7 +131,7 @@ impl Checker<'_> {
             let arg = self.expr(arg, hint.as_ref(), true)?;
             infer(
                 source,
-                &arg.ty,
+                &arg.ty.logical(),
                 &type_names,
                 &const_names,
                 &mut substitutions,
@@ -181,31 +186,56 @@ impl Checker<'_> {
         }
         for generic in &template.generics {
             if let a::GenericKind::Type { constraints, .. } = &generic.kind {
-                if !constraints.is_empty()
-                    && !self.nominals.copyable(&substitutions.types[&generic.name])
-                {
-                    return Err(error(
-                        span,
-                        "E0373",
-                        "generic argument does not satisfy Copy",
-                    ));
+                for constraint in constraints {
+                    self.nominals
+                        .interfaces
+                        .require(
+                            &substitutions.types[&generic.name],
+                            constraint,
+                            &substitutions,
+                            self.constants,
+                            self.nominals,
+                        )
+                        .map_err(|mut diagnostic| {
+                            diagnostic.span = span;
+                            diagnostic
+                                .with_note(constraint.span, "required by this generic constraint")
+                        })?;
                 }
             }
         }
         if !self.mono.borrow().auditing {
             let audit_key = format!("{name}:{:?}", substitutions.constants);
-            if self.mono.borrow_mut().audit_keys.insert(audit_key) {
+            if self.mono.borrow_mut().audit_keys.insert(audit_key.clone()) {
                 let mut abstract_substitution = Substitution::default();
                 abstract_substitution.constants = substitutions.constants.clone();
                 for generic in &template.generics {
                     if let a::GenericKind::Type { constraints, .. } = &generic.kind {
                         let marker = self.nominals.marker(
-                            format!("<generic {name}:{}>", generic.name),
-                            !constraints.is_empty(),
+                            format!("<generic {audit_key}:{}>", generic.name),
+                            constraints.iter().any(interfaces::copy),
                         );
                         abstract_substitution
                             .types
                             .insert(generic.name.clone(), marker);
+                    }
+                }
+                self.nominals.interfaces.prepare_markers(
+                    &template.generics,
+                    &abstract_substitution,
+                    self.constants,
+                    self.nominals,
+                )?;
+                for marker in abstract_substitution.types.values() {
+                    for method in self.nominals.interfaces.marker_methods(
+                        marker,
+                        self.constants,
+                        self.nominals,
+                    )? {
+                        self.mono
+                            .borrow_mut()
+                            .templates
+                            .insert(method.name.clone(), method);
                     }
                 }
                 let mut declaration = template.clone();
@@ -265,7 +295,9 @@ impl Checker<'_> {
             };
             mono.instances.insert(key, signature.clone());
             mono.bodies.insert(id, function.clone());
-            mono.pending.push((signature.clone(), function));
+            if !mono.auditing || function.body.is_some() {
+                mono.pending.push((signature.clone(), function));
+            }
             signature
         };
         for (arg, ty) in checked.iter().zip(&signature.parameters) {
@@ -288,6 +320,51 @@ fn infer(
     span: Span,
 ) -> Result<()> {
     match (&pattern.kind, actual) {
+        (
+            a::TypeKind::Function { parameters, result },
+            Type::Function {
+                parameters: actual_parameters,
+                result: actual_result,
+                ..
+            },
+        ) => {
+            if parameters.len() != actual_parameters.len() {
+                return Err(error(
+                    span,
+                    "E0371",
+                    "function pointer parameter count mismatch",
+                ));
+            }
+            for ((mutable, parameter), (actual_mutable, actual)) in
+                parameters.iter().zip(actual_parameters)
+            {
+                if mutable != actual_mutable {
+                    return Err(error(
+                        span,
+                        "E0371",
+                        "function pointer parameter modes mismatch",
+                    ));
+                }
+                infer(
+                    parameter,
+                    actual,
+                    type_names,
+                    const_names,
+                    output,
+                    nominals,
+                    span,
+                )?;
+            }
+            infer(
+                result,
+                actual_result,
+                type_names,
+                const_names,
+                output,
+                nominals,
+                span,
+            )?;
+        }
         (a::TypeKind::Named { path, arguments }, ty)
             if path.len() == 1 && arguments.is_empty() && type_names.contains(&path[0]) =>
         {
@@ -299,7 +376,7 @@ fn infer(
         }
         (
             a::TypeKind::Named { path, arguments },
-            Type::Record { name, .. } | Type::Enum { name, .. },
+            Type::Record { name, .. } | Type::Enum { name, .. } | Type::Class { name, .. },
         ) if path == &[nominals.origin(name)] => {
             let actuals = nominals.arguments(name);
             for (pattern, actual) in arguments.iter().zip(actuals) {
@@ -382,6 +459,12 @@ fn validate_complexity(ty: &Type, span: Span) -> Result<()> {
             ));
         }
         match ty {
+            Type::Function {
+                parameters, result, ..
+            } => {
+                pending.extend(parameters.iter().map(|(_, ty)| (ty, depth + 1)));
+                pending.push((result, depth + 1));
+            }
             Type::Tuple(fields) => pending.extend(fields.iter().map(|ty| (ty, depth + 1))),
             Type::Array(element, _) => pending.push((element, depth + 1)),
             Type::Record { fields, .. } => {

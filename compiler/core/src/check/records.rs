@@ -1,21 +1,128 @@
 use super::generics::substitute::Substitution;
 use super::*;
 use std::{cell::RefCell, collections::BTreeSet};
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Argument {
     Type(Type),
     Const(u64),
 }
 #[derive(Default)]
 pub(super) struct Nominals {
+    pub(super) interfaces: interfaces::Registry,
     definitions: BTreeMap<String, a::Item>,
+    classes: RefCell<h::Classes>,
     instances: RefCell<BTreeMap<String, Type>>,
     active: RefCell<BTreeSet<String>>,
+    pending_classes: RefCell<Vec<(a::Item, String, Substitution, usize)>>,
+    class_depth: std::cell::Cell<usize>,
     opaque: RefCell<BTreeMap<String, bool>>,
     origins: RefCell<BTreeMap<String, String>>,
     arguments: RefCell<BTreeMap<String, Vec<Argument>>>,
 }
 impl Nominals {
+    pub fn register_storage(&self, ty: &Type) {
+        match ty {
+            Type::Class {
+                storage: Some(fields),
+                copy,
+                ..
+            } => {
+                self.classes.borrow_mut().insert(
+                    ty.class_key(),
+                    h::ClassDefinition {
+                        fields: fields.clone(),
+                        copy: *copy,
+                    },
+                );
+                for field in fields {
+                    self.register_storage(&field.ty)
+                }
+            }
+            Type::Record { fields, .. } => {
+                for field in fields {
+                    self.register_storage(&field.ty)
+                }
+            }
+            Type::Tuple(fields) => {
+                for field in fields {
+                    self.register_storage(field)
+                }
+            }
+            Type::Array(ty, _) | Type::StoredView(ty) => self.register_storage(ty),
+            Type::Enum { variants, .. } => {
+                for field in variants.iter().flat_map(|v| &v.fields) {
+                    self.register_storage(field)
+                }
+            }
+            Type::Function {
+                parameters, result, ..
+            } => {
+                for (_, ty) in parameters {
+                    self.register_storage(ty)
+                }
+                self.register_storage(result)
+            }
+            _ => {}
+        }
+    }
+    pub(super) fn interface_claims(
+        &self,
+        ty: &Type,
+        constants: &crate::constants::Constants,
+    ) -> Result<Vec<interfaces::Bound>> {
+        let (Type::Record { name, .. } | Type::Class { name, .. }) = ty else {
+            return Ok(Vec::new());
+        };
+        let Some(item) = self.definitions.get(&self.origin(name)) else {
+            return Ok(Vec::new());
+        };
+        let a::ItemKind::Aggregate {
+            generics,
+            interfaces,
+            ..
+        } = &item.kind
+        else {
+            return Ok(Vec::new());
+        };
+        let mut outer = Substitution::default();
+        for (generic, arg) in generics.iter().zip(self.arguments(name)) {
+            match arg {
+                Argument::Type(ty) => {
+                    outer.types.insert(generic.name.clone(), ty);
+                }
+                Argument::Const(n) => {
+                    outer.constants.insert(generic.name.clone(), n);
+                }
+            }
+        }
+        self.interfaces.claims(interfaces, &outer, constants, self)
+    }
+    pub(super) fn field_declaration(&self, owner: &str, name: &str) -> Option<Span> {
+        let a::ItemKind::Aggregate { members, .. } = &self.definitions.get(owner)?.kind else {
+            return None;
+        };
+        members.iter().find_map(|member| match member {
+            a::Member::Field {
+                name: field, span, ..
+            } if field == name => Some(*span),
+            _ => None,
+        })
+    }
+    pub fn classes(&self) -> h::Classes {
+        self.classes.borrow().clone()
+    }
+    pub fn fields(&self, ty: &Type) -> Option<Vec<h::RecordField>> {
+        match ty {
+            Type::Record { fields, .. } => Some(fields.clone()),
+            Type::Class {
+                storage: Some(fields),
+                ..
+            } => Some(fields.clone()),
+            Type::Class { name, .. } => self.classes.borrow().get(name).map(|c| c.fields.clone()),
+            _ => None,
+        }
+    }
+
     pub fn is_enum(&self, name: &str) -> bool {
         matches!(
             self.definitions.get(name).map(|item| &item.kind),
@@ -89,10 +196,9 @@ impl Nominals {
             }
             match &generic.kind {
                 a::GenericKind::Type {
-                    constraints,
+                    constraints: _,
                     default,
                 } => {
-                    if constraints.iter().any(|ty|!matches!(&ty.kind,a::TypeKind::Named {path,arguments} if path==&["Copy".to_owned()] && arguments.is_empty())) {return Err(error(generic.span,"E0900","interface constraints require interface checking"));}
                     let mut ty = match args.get(index) {
                         Some(a::TypeArgument::Type(ty)) => ty.clone(),
                         None => default
@@ -102,13 +208,6 @@ impl Nominals {
                     };
                     substitution.ty(&mut ty);
                     let ty = resolve_type_with(&ty, constants, self)?;
-                    if !constraints.is_empty() && !self.copyable(&ty) {
-                        return Err(error(
-                            span,
-                            "E0373",
-                            "generic argument does not satisfy Copy",
-                        ));
-                    }
                     substitution.types.insert(generic.name.clone(), ty);
                 }
                 a::GenericKind::Const { default, .. } => {
@@ -138,6 +237,19 @@ impl Nominals {
                 }
             }
         }
+        for generic in generics {
+            if let a::GenericKind::Type { constraints, .. } = &generic.kind {
+                for constraint in constraints {
+                    self.interfaces.require(
+                        &substitution.types[&generic.name],
+                        constraint,
+                        &substitution,
+                        constants,
+                        self,
+                    )?;
+                }
+            }
+        }
         let key = if generics.is_empty() {
             name.to_owned()
         } else {
@@ -149,23 +261,67 @@ impl Nominals {
         if let Some(ty) = self.get(&key) {
             return Ok(ty);
         }
-        {
-            let mut active = self.active.borrow_mut();
-            if active.len() >= 32 || !active.insert(key.clone()) {
-                return Err(error(
-                    span,
-                    "E0350",
-                    "recursive inline type or type nesting limit",
-                ));
-            }
+        let is_class = matches!(item.kind, a::ItemKind::Aggregate { class: true, .. });
+        if is_class {
+            // Register the identity handle before resolving its payload. A class
+            // edge breaks inline layout recursion without leaking Rc cycles.
+            self.instances.borrow_mut().insert(
+                key.clone(),
+                Type::Class {
+                    name: key.clone(),
+                    storage: None,
+                    copy: item.attributes.contains(&a::Attribute::Copy),
+                },
+            );
         }
-        let result = self.build(item, &key, &mut substitution, constants);
-        self.active.borrow_mut().remove(&key);
-        let ty = result?;
+        let defer_class = is_class && !self.active.borrow().is_empty();
+        let depth = self.active.borrow().len() + self.class_depth.get();
+        if depth >= 32 {
+            return Err(error(
+                span,
+                "E0350",
+                "recursive inline type or type nesting limit",
+            ));
+        }
+        let result = if defer_class {
+            // Class handles break layout recursion even when resolution started
+            // from an inline enum/struct. Complete this payload after that inline
+            // layout is available, independent of declaration order.
+            self.pending_classes.borrow_mut().push((
+                item.clone(),
+                key.clone(),
+                substitution.clone(),
+                depth,
+            ));
+            Ok(self.get(&key).unwrap())
+        } else {
+            {
+                let mut active = self.active.borrow_mut();
+                if !active.insert(key.clone()) {
+                    return Err(error(
+                        span,
+                        "E0350",
+                        "recursive inline type or type nesting limit",
+                    ));
+                }
+            }
+            let result = self.build(item, &key, &mut substitution, constants);
+            self.active.borrow_mut().remove(&key);
+            result
+        };
+        let ty = match result {
+            Ok(ty) => ty,
+            Err(error) => {
+                if is_class {
+                    self.instances.borrow_mut().remove(&key);
+                }
+                return Err(error);
+            }
+        };
         if item.attributes.contains(&a::Attribute::Copy) && !self.copyable(&ty) {
             return Err(error(span, "E0373", "Copy aggregate requires Copy fields"));
         }
-        crate::llvm::layout(&ty).map_err(|message| error(span, "E0318", message))?;
+        crate::layout::layout(&ty).map_err(|message| error(span, "E0318", message))?;
         let arguments = generics
             .iter()
             .map(|generic| match generic.kind {
@@ -182,6 +338,29 @@ impl Nominals {
             .borrow_mut()
             .insert(key.clone(), name.to_owned());
         self.instances.borrow_mut().insert(key, ty.clone());
+        if let a::ItemKind::Aggregate { interfaces, .. } = &item.kind {
+            self.interfaces.validate_implementation(
+                &ty,
+                interfaces,
+                &substitution,
+                constants,
+                self,
+            )?;
+        }
+        if self.active.borrow().is_empty() {
+            loop {
+                let pending = self.pending_classes.borrow_mut().pop();
+                let Some((item, key, mut substitution, depth)) = pending else {
+                    break;
+                };
+                self.active.borrow_mut().insert(key.clone());
+                let previous = self.class_depth.replace(depth);
+                let result = self.build(&item, &key, &mut substitution, constants);
+                self.class_depth.set(previous);
+                self.active.borrow_mut().remove(&key);
+                result?;
+            }
+        }
         Ok(ty)
     }
     fn build(
@@ -198,19 +377,25 @@ impl Nominals {
         };
         match &item.kind {
             a::ItemKind::Aggregate {
+                class,
                 interfaces,
                 members,
                 ..
             } => {
-                if !interfaces.is_empty() {
-                    return Err(error(
-                        item.span,
-                        "E0900",
-                        "interface implementations require interface checking",
-                    ));
+                for interface in interfaces {
+                    if !matches!(&interface.kind,a::TypeKind::Named {path,..} if self.interfaces.contains(&path.join("::")))
+                    {
+                        return Err(error(interface.span,"E0900","embedded base construction and inherited method lowering require the remaining C4.2 work"));
+                    }
+                }
+                if *class {
+                    super::constructors::validate(members)?;
                 }
                 let mut fields = Vec::new();
                 for member in members {
+                    if *class && !matches!(member, a::Member::Field { .. }) {
+                        continue;
+                    }
                     let a::Member::Field {
                         name,
                         ty,
@@ -235,8 +420,28 @@ impl Nominals {
                         source: span.source,
                     });
                 }
+                let copy = item.attributes.contains(&a::Attribute::Copy);
+                if *class {
+                    if copy && fields.iter().any(|f| !f.ty.copyable()) {
+                        return Err(error(item.span, "E0373", "Copy class requires Copy fields"));
+                    }
+                    // Validate the payload separately: the handle itself always
+                    // has pointer layout, even when a payload field is recursive.
+                    crate::layout::layout(&Type::Tuple(
+                        fields.iter().map(|f| f.ty.clone()).collect(),
+                    ))
+                    .map_err(|message| error(item.span, "E0318", message))?;
+                    self.classes
+                        .borrow_mut()
+                        .insert(name.into(), h::ClassDefinition { copy, fields });
+                    return Ok(Type::Class {
+                        name: name.into(),
+                        copy,
+                        storage: None,
+                    });
+                }
                 Ok(Type::Record {
-                    copy: item.attributes.contains(&a::Attribute::Copy),
+                    copy,
                     name: name.into(),
                     fields,
                 })
@@ -296,15 +501,13 @@ pub(super) fn collect(
     module: &a::Module,
     constants: &crate::constants::Constants,
 ) -> Result<Nominals> {
-    let mut nominals = Nominals::default();
+    let mut nominals = Nominals {
+        interfaces: interfaces::Registry::collect(module)?,
+        ..Default::default()
+    };
     let mut roots = Vec::new();
     for item in &module.items {
-        if let a::ItemKind::Aggregate {
-            class: false,
-            name,
-            generics,
-            ..
-        }
+        if let a::ItemKind::Aggregate { name, generics, .. }
         | a::ItemKind::Enum { name, generics, .. } = &item.kind
         {
             if nominals
@@ -322,6 +525,9 @@ pub(super) fn collect(
     for (name, span) in roots {
         nominals.resolve(&name, &[], constants, span)?;
     }
+    nominals
+        .interfaces
+        .validate_declarations(constants, &nominals)?;
     Ok(nominals)
 }
 impl Checker<'_> {
@@ -351,7 +557,14 @@ impl Checker<'_> {
         if let Some(expected) = expected {
             same(expected, &ty, span)?;
         }
-        let Type::Record { fields, .. } = &ty else {
+        let mut ty = expected
+            .filter(|expected| {
+                matches!(expected, Type::Record { .. }) && expected.logical() == ty.logical()
+            })
+            .cloned()
+            .unwrap_or(ty);
+        let owner = ty.clone();
+        let Type::Record { fields, .. } = &mut ty else {
             return Err(error(span, "E0351", "named construction requires a struct"));
         };
         let mut values = vec![None; fields.len()];
@@ -362,14 +575,8 @@ impl Checker<'_> {
                 .iter()
                 .position(|f| f.name == *name)
                 .ok_or_else(|| error(source.span, "E0351", format!("unknown field '{name}'")))?;
-            let field = &fields[index];
-            if field.private && field.source != span.source {
-                return Err(error(
-                    source.span,
-                    "E0352",
-                    "private field cannot be initialized from this module",
-                ));
-            }
+            let field = &mut fields[index];
+            self.check_field_access(&owner, field, source.span)?;
             if values[index].is_some() {
                 return Err(error(
                     source.span,
@@ -377,7 +584,8 @@ impl Checker<'_> {
                     "field initialized more than once",
                 ));
             }
-            let value = self.expr(source, Some(&field.ty), true)?;
+            let value = self.storage_value(source, Some(&field.ty))?;
+            field.ty = value.ty.clone();
             let id = self.locals.len();
             self.locals.push(h::Local {
                 view: None,
@@ -400,6 +608,15 @@ impl Checker<'_> {
                 "every struct field must be initialized",
             ));
         }
+        let construction: Vec<_> = values
+            .iter()
+            .map(|v| {
+                let h::ExprKind::Local(id) = v.as_ref().unwrap().kind else {
+                    unreachable!()
+                };
+                id
+            })
+            .collect();
         statements.push(h::Statement::Evaluate(h::Expr {
             kind: h::ExprKind::Tuple(values.into_iter().map(Option::unwrap).collect()),
             ty: ty.clone(),
@@ -407,7 +624,8 @@ impl Checker<'_> {
         }));
         Ok(h::Expr {
             kind: h::ExprKind::Block(h::Block {
-                storage: vec![],
+                construction: construction.clone(),
+                storage: construction,
                 statements,
                 result: ty.clone(),
                 diverges: false,
@@ -416,5 +634,62 @@ impl Checker<'_> {
             ty,
             span,
         })
+    }
+}
+
+#[cfg(test)]
+mod class_tests {
+    use super::*;
+    use nether_frontend::{parser::parse, source::SourceId};
+    fn registry(source: &str) -> Result<Nominals> {
+        let parsed = parse(SourceId(0), source);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        collect(&parsed.module.unwrap(), &BTreeMap::new())
+    }
+    #[test]
+    fn class_indirection_breaks_recursive_payload_layout() {
+        let nominals=registry("class Node {next:Link;value:i32} enum Link {End,More(Node)} class Left {right:Right} class Right {left:Left}").unwrap();
+        let node = nominals.get("Node").unwrap();
+        assert!(matches!(node, Type::Class { copy: false, .. }));
+        assert_eq!(
+            crate::layout::layout(&node).unwrap(),
+            nether_semantics::Layout::POINTER
+        );
+        let classes = nominals.classes.borrow();
+        assert_eq!(classes["Node"].fields.len(), 2);
+        assert!(matches!(&classes["Left"].fields[0].ty,Type::Class {name,..} if name=="Right"));
+        assert!(matches!(&classes["Right"].fields[0].ty,Type::Class {name,..} if name=="Left"));
+        assert!(registry("struct Node {next:Node}").is_err());
+        let reversed =
+            registry("enum Link {End,More(Node)} class Node {next:Link;value:i32}").unwrap();
+        assert_eq!(reversed.classes()["Node"].fields.len(), 2);
+        let generic=registry("enum Link<T> {End,More(Node<T>)} class Node<T> {next:Link<T>;value:T} struct Root {link:Link<i32>}").unwrap();
+        assert_eq!(generic.classes().len(), 1);
+        assert!(registry("struct Root {node:Node<i32>} class Node<T> {next:Node<{T;1}>}").is_err());
+    }
+    #[test]
+    fn generic_class_instances_keep_distinct_payload_definitions() {
+        let nominals =
+            registry("class Cell<T> {value:T} struct Holder {small:Cell<i32>;large:Cell<i64>}")
+                .unwrap();
+        let classes = nominals.classes.borrow();
+        assert_eq!(classes.len(), 2);
+        let types = classes
+            .values()
+            .map(|c| c.fields[0].ty.clone())
+            .collect::<Vec<_>>();
+        assert!(types.contains(&Type::Integer(I::I32)));
+        assert!(types.contains(&Type::Integer(I::I64)));
+    }
+    #[test]
+    fn copy_class_requires_copy_payload_and_still_has_pointer_layout() {
+        assert!(registry("class Owned {} #[Copy] class Bad {value:Owned}").is_err());
+        let nominals = registry("#[Copy] class Number {value:i32}").unwrap();
+        let number = nominals.get("Number").unwrap();
+        assert!(number.copyable());
+        assert_eq!(
+            crate::layout::layout(&number).unwrap(),
+            nether_semantics::Layout::POINTER
+        );
     }
 }

@@ -3,6 +3,17 @@ use crate::mir::loans::Access;
 /// Explicit views of local inline values. Borrowing is represented in HIR/MIR;
 /// no copy of the source aggregate is inserted.
 impl Checker<'_> {
+    // Provisional call places are admitted only while result contracts are
+    // unresolved. The stable pass must establish a real borrowed result.
+    pub(super) fn pending_result_place(&self, value: &h::Expr) -> bool {
+        match &value.kind {
+            h::ExprKind::Call(id, _) => self.mono.borrow().pending_results.contains(id),
+            h::ExprKind::Field(base, _)
+            | h::ExprKind::Index(base, _)
+            | h::ExprKind::Payload(base, _) => self.pending_result_place(base),
+            _ => false,
+        }
+    }
     pub(super) fn view_binding(
         &mut self,
         pattern: &a::Pattern,
@@ -13,7 +24,7 @@ impl Checker<'_> {
             .map(|t| resolve_type_with(t, self.constants, self.nominals))
             .transpose()?;
         let value = self.expr(source, expected.as_ref(), true)?;
-        if !place(&value) {
+        if !place(&value) && !self.pending_result_place(&value) {
             return Err(error(
                 source.span,
                 "E0382",
@@ -43,6 +54,7 @@ impl Checker<'_> {
             view: Some(access),
             span: source.span,
         });
+        self.storage_sources.insert(id, vec![value.clone()]);
         let reference = h::Expr {
             kind: h::ExprKind::View(id),
             ty: value.ty.clone(),
@@ -69,6 +81,7 @@ impl Checker<'_> {
         self.scopes.last_mut().unwrap().extend(names);
         Ok(h::Statement::Evaluate(h::Expr {
             kind: h::ExprKind::Block(h::Block {
+                construction: vec![],
                 storage: vec![],
                 statements: bindings,
                 result: Type::Unit,
@@ -82,7 +95,11 @@ impl Checker<'_> {
 }
 pub(super) fn place(value: &h::Expr) -> bool {
     match &value.kind {
-        h::ExprKind::Local(_) | h::ExprKind::View(_) => true,
+        h::ExprKind::Local(_)
+        | h::ExprKind::View(_)
+        | h::ExprKind::StoredView(_)
+        | h::ExprKind::BorrowedCall { .. }
+        | h::ExprKind::CallIndirect(_, _, h::CallContract { view: Some(_), .. }) => true,
         h::ExprKind::Index(base, _)
         | h::ExprKind::Field(base, _)
         | h::ExprKind::Payload(base, _) => place(base),
@@ -91,7 +108,10 @@ pub(super) fn place(value: &h::Expr) -> bool {
 }
 pub(super) fn view_root(value: &h::Expr) -> bool {
     match &value.kind {
-        h::ExprKind::View(_) => true,
+        h::ExprKind::View(_)
+        | h::ExprKind::StoredView(_)
+        | h::ExprKind::BorrowedCall { .. }
+        | h::ExprKind::CallIndirect(_, _, h::CallContract { view: Some(_), .. }) => true,
         h::ExprKind::Index(base, _)
         | h::ExprKind::Field(base, _)
         | h::ExprKind::Payload(base, _) => view_root(base),

@@ -59,11 +59,8 @@ fn rejects_type_and_scope_violations_before_backend() {
 }
 
 #[test]
-fn unsupported_ownership_forms_are_not_silently_accepted() {
-    let errors =
-        checked("class Resource { destructor {} }\nfn main():() { let value=new Resource() }")
-            .unwrap_err();
-    assert!(errors.iter().any(|e| e.starts_with("E0900")));
+fn empty_source_class_has_default_constructor_and_cleanup() {
+    checked("class Resource { destructor {} } fn main():() {let value=new Resource()}").unwrap();
 }
 
 #[test]

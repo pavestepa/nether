@@ -24,7 +24,7 @@ fn borrowed_entries_mutate_the_caller_and_recursive_entries_are_reused() {
         let a=interpret::execute(&hir,hir.main.unwrap(),vec![],OverflowChecks::Checked,10000).unwrap();
         let b=mir::interpret::execute(&cfg,cfg.main.unwrap(),vec![],OverflowChecks::Checked,10000).unwrap();
         assert_eq!(a,b,"{source}");let Value::Integer(a)=a else {panic!()};assert_eq!(a.signed_value(),Some(expected),"{source}");
-        nether_core::llvm::emit(&hir,OverflowChecks::Checked).unwrap();
+        nether_core::rust::emit(&hir,OverflowChecks::Checked).unwrap();
     }
 }
 #[test]
@@ -34,4 +34,32 @@ fn borrowed_entries_preserve_uniqueness_and_readonly_access() {
         "struct Cell {value:i32} fn read_write(var x:Cell,y:Cell):i32 {x.value+=1;return y.value} fn main():i32 {var x=Cell {value:1};return read_write(x,x)}",
         "struct Cell {value:i32} fn consume(x:Cell):Cell {var y=x;y.value+=1;return y} fn main():i32 {let x=Cell {value:1};let y=consume(x);return x.value+y.value}",
     ] {assert!(checked(source).is_err(),"accepted {source}");}
+}
+
+#[test]
+fn consuming_calls_can_be_followed_by_definite_reinitialization() {
+    let prefix = "struct Cell {value:i32} fn take(x:Cell):i32 {var owned=x;owned.value+=1;return owned.value} ";
+    for (body, expected) in [
+        ("fn main():i32 {var x=Cell {value:1};let n=take(x);x=Cell {value:4};return n+x.value}",6),
+        ("fn main():i32 {var x=Cell {value:1};let n=take(x);if true {x=Cell {value:4}} else {x=Cell {value:5}};return n+x.value}",6),
+        ("fn main():i32 {var x=Cell {value:1};var n=0;while n<6 {n+=take(x);x=Cell {value:1}};return n+x.value}",7),
+        ("fn main():i32 {var x=Cell {value:1};var n=0;while n<6 {var y=x;n+=take(y);x=Cell {value:1}};return n+x.value}",7),
+    ] {
+        let source=format!("{prefix}{body}");
+        let p=checked(&source).unwrap_or_else(|errors| panic!("{source}: {errors:?}"));
+        let cfg=mir::lower(&p);
+        let a=interpret::execute(&p,p.main.unwrap(),vec![],OverflowChecks::Checked,10000).unwrap();
+        let b=mir::interpret::execute(&cfg,cfg.main.unwrap(),vec![],OverflowChecks::Checked,10000).unwrap();
+        assert_eq!(a,b);
+        let Value::Integer(a)=a else {panic!()};
+        assert_eq!(a.signed_value(),Some(expected));
+    }
+    for body in [
+        "fn main():i32 {var x=Cell {value:1};var n=0;while n<6 {n+=take(x)};return n}",
+        "fn main():i32 {var x=Cell {value:1};let n=take(x);if true {x=Cell {value:4}};return n+x.value}",
+        "fn main():i32 {var x=Cell {value:1};return take(x)+x.value}",
+    ] {
+        let source=format!("{prefix}{body}");
+        assert!(checked(&source).is_err(),"accepted {source}");
+    }
 }

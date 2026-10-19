@@ -1,16 +1,108 @@
 //! Demand-driven static owned/borrowed entry specialization.
 use super::*;
 use crate::mir::loans::Access;
+pub(super) fn result_key(declaration: &a::Function, signature: &Signature) -> String {
+    format!(
+        "{:?}:{:?}:{:?}:{:?}:{:?}",
+        declaration.span,
+        declaration.body,
+        signature.parameters,
+        signature.modes,
+        signature.result.logical()
+    )
+}
+pub(super) fn source_key(declaration: &a::Function, signature: &Signature) -> String {
+    format!(
+        "{:?}:{:?}:{:?}:{:?}",
+        declaration.span,
+        declaration.body,
+        signature
+            .parameters
+            .iter()
+            .map(Type::logical)
+            .collect::<Vec<_>>(),
+        signature.result.logical()
+    )
+}
 impl Checker<'_> {
+    pub(super) fn contextual_result(
+        &mut self,
+        mut value: h::Expr,
+        expected: Option<&Type>,
+    ) -> Result<h::Expr> {
+        if let Some(expected) = expected {
+            let expected = match expected {
+                Type::StoredView(target) => &**target,
+                other => other,
+            };
+            same(expected, &value.ty, value.span)?;
+            if expected != &value.ty && self.request_storage_mode(&value, expected)? {
+                value.ty = storage::union(&value.ty, expected, value.span)?;
+            }
+        }
+        Ok(value)
+    }
+    pub(super) fn request_result_mode(&mut self, value: &h::Expr, required: &Type) -> Result<bool> {
+        if matches!(required, Type::StoredView(_)) {
+            return Ok(false);
+        }
+        let targets = match &value.kind {
+            h::ExprKind::Call(id, _)
+            | h::ExprKind::BorrowedCall { function: id, .. }
+            | h::ExprKind::StorageCall { function: id, .. } => vec![*id],
+            h::ExprKind::CallIndirect(_, _, contract) => contract.targets.clone(),
+            _ => return Ok(false),
+        };
+        let mut changed = false;
+        for id in targets {
+            let mut mono = self.mono.borrow_mut();
+            let Some(signature) = self
+                .signatures
+                .values()
+                .chain(mono.instances.values())
+                .chain(mono.entries.values())
+                .find(|s| s.id == id)
+                .cloned()
+            else {
+                continue;
+            };
+            let key = result_key(&mono.bodies[&id], &signature);
+            let known = mono
+                .result_requests
+                .get(&key)
+                .or_else(|| mono.result_contracts.get(&key).map(|i| &i.ty))
+                .unwrap_or(&value.ty);
+            let wanted = storage::union(known, required, value.span)?;
+            if known != &wanted {
+                mono.result_requests.insert(key, wanted);
+                changed = true;
+            }
+        }
+        Ok(changed)
+    }
     pub(super) fn call_entry(
+        &mut self,
+        signature: Signature,
+        source: &[a::Expr],
+        arguments: Vec<h::Expr>,
+        span: Span,
+    ) -> Result<h::Expr> {
+        self.call_entry_modes(signature, source, arguments, span, None)
+    }
+    pub(super) fn call_entry_modes(
         &mut self,
         signature: Signature,
         source: &[a::Expr],
         mut arguments: Vec<h::Expr>,
         span: Span,
+        forced: Option<&[Option<Access>]>,
     ) -> Result<h::Expr> {
+        for (argument, ty) in arguments.iter().zip(&signature.parameters) {
+            same(ty, &argument.ty, argument.span)?;
+        }
+        let parameters = arguments.iter().map(|a| a.ty.clone()).collect::<Vec<_>>();
         let declaration = self.mono.borrow().bodies.get(&signature.id).cloned();
-        let mut modes = signature.modes.clone();
+        let mut modes = forced.map_or_else(|| signature.modes.clone(), |m| m.to_vec());
         let mut prelude = Vec::new();
         let mut storage = Vec::new();
         if let Some(declaration) = &declaration {
@@ -18,7 +110,7 @@ impl Checker<'_> {
                 if modes[index].is_some()
                     || (!argument.ty.copyable()
                         && views::place(argument)
-                        && (views::view_root(argument) || self.needs_pattern_view(original)))
+                        && (views::view_root(argument) || self.call_view_needed(original)))
                 {
                     let access = if declaration.parameters[index].mutable {
                         Access::Mutable
@@ -53,8 +145,8 @@ impl Checker<'_> {
                 }
             }
         }
-        let selected = if modes != signature.modes {
-            let key = format!("{}:{modes:?}", signature.id);
+        let selected = if modes != signature.modes || parameters != signature.parameters {
+            let key = format!("{}:{modes:?}:{parameters:?}", signature.id);
             let mut mono = self.mono.borrow_mut();
             if let Some(entry) = mono.entries.get(&key) {
                 entry.clone()
@@ -69,7 +161,7 @@ impl Checker<'_> {
                 let entry = Signature {
                     id,
                     modes,
-                    parameters: signature.parameters.clone(),
+                    parameters,
                     result: signature.result.clone(),
                 };
                 mono.entries.insert(key, entry.clone());
@@ -80,9 +172,97 @@ impl Checker<'_> {
         } else {
             signature
         };
+        let info = {
+            let mut mono = self.mono.borrow_mut();
+            let known = mono
+                .bodies
+                .get(&selected.id)
+                .and_then(|d| mono.result_contracts.get(&result_key(d, &selected)))
+                .cloned();
+            if known.as_ref().is_none_or(|info| !info.complete) && !selected.result.copyable() {
+                mono.pending_results.insert(selected.id);
+            }
+            known
+        };
+        if let Some(info) = &info {
+            for (index, required) in info.parameters.iter().enumerate() {
+                if let Some(access) = info.modes[index] {
+                    if self.result.contains_views() {
+                        let place = match &arguments[index].kind {
+                            h::ExprKind::ArgumentView { place, .. } => &**place,
+                            _ => &arguments[index],
+                        };
+                        self.request_parameter_view(place);
+                    }
+                    if !matches!(arguments[index].kind, h::ExprKind::ArgumentView { .. }) {
+                        if !views::place(&arguments[index]) {
+                            return Err(error(
+                                arguments[index].span,
+                                "E0396",
+                                "borrowed result requires an argument with an existing owner",
+                            ));
+                        }
+                        let place = arguments[index].clone();
+                        if access == Access::Mutable {
+                            self.mutable_place(&place)?;
+                        }
+                        arguments[index] = h::Expr {
+                            ty: place.ty.clone(),
+                            span: place.span,
+                            kind: h::ExprKind::ArgumentView {
+                                place: Box::new(place),
+                                access,
+                            },
+                        };
+                    }
+                }
+                if arguments[index].ty == *required {
+                    continue;
+                }
+                let (place, access) = match &arguments[index].kind {
+                    h::ExprKind::ArgumentView { place, access } => {
+                        ((**place).clone(), Some(*access))
+                    }
+                    _ => (arguments[index].clone(), None),
+                };
+                if !self.request_storage_mode(&place, required)? {
+                    let value = self.expr(&source[index], Some(required), true)?;
+                    self.same_storage_mode(required, &value.ty, value.span)?;
+                    arguments[index] = if let Some(access) = access {
+                        h::Expr {
+                            ty: value.ty.clone(),
+                            span: value.span,
+                            kind: h::ExprKind::ArgumentView {
+                                place: Box::new(value),
+                                access,
+                            },
+                        }
+                    } else {
+                        value
+                    };
+                }
+            }
+        }
+        let result = info
+            .as_ref()
+            .map_or_else(|| selected.result.clone(), |info| info.ty.clone());
         let call = h::Expr {
-            kind: h::ExprKind::Call(selected.id, arguments),
-            ty: selected.result,
+            kind: if let Some(contract) = info.as_ref().and_then(|info| info.view.clone()) {
+                h::ExprKind::BorrowedCall {
+                    function: selected.id,
+                    arguments,
+                    contract,
+                }
+            } else if let Some(info) = info.filter(|info| !info.storage.is_empty()) {
+                h::ExprKind::StorageCall {
+                    function: selected.id,
+                    arguments,
+                    contract: info.storage,
+                }
+            } else {
+                h::ExprKind::Call(selected.id, arguments)
+            },
+            ty: result,
             span,
         };
         if prelude.is_empty() {
@@ -91,6 +271,7 @@ impl Checker<'_> {
             prelude.push(h::Statement::Evaluate(call.clone()));
             Ok(h::Expr {
                 kind: h::ExprKind::Block(h::Block {
+                    construction: vec![],
                     storage,
                     statements: prelude,
                     result: call.ty.clone(),

@@ -1,5 +1,7 @@
 # Приёмочные контракты памяти этапа 0
 
+Архитектура: [Nether → Rust](rust-backend.md). Правила памяти сохраняются; прямой LLVM backend удалён.
+
 Это normative positive/negative cases, **не уже пройденные compiler tests**.
 Они задают oracle для этапов 2–8. Source checker, MIR interpreter и backend
 должны проверяться отдельно. Общая prelude для фрагментов:

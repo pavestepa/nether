@@ -1,4 +1,4 @@
-use nether_core::{check::check, hir::Value, interpret::execute, llvm::emit};
+use nether_core::{check::check, hir::Value, interpret::execute, rust::emit};
 use nether_frontend::{parser::parse, source::SourceId};
 use nether_semantics::OverflowChecks;
 
@@ -20,7 +20,7 @@ fn forward_constants_and_array_lengths_are_evaluated_before_bodies() {
     assert_eq!(value.signed_value(), Some(6));
     assert!(emit(&program, OverflowChecks::Wrapping)
         .unwrap()
-        .contains("[3 x i32]"));
+        .contains("[i32; 3]"));
 }
 
 #[test]

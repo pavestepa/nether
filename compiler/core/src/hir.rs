@@ -6,6 +6,8 @@ pub type LocalId = usize;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Type {
+    /// Static readonly descriptor stored as an aggregate component.
+    StoredView(Box<Type>),
     Unit,
     Bool,
     Char,
@@ -13,7 +15,19 @@ pub enum Type {
     F32,
     F64,
     Str,
+    Function {
+        parameters: Vec<(bool, Type)>,
+        result: Box<Type>,
+        contract: Option<Box<FunctionContract>>,
+    },
     Tuple(Vec<Type>),
+    /// Identity-bearing handle. Payload definitions live in a nominal registry,
+    /// so recursive classes do not recursively expand the Type value.
+    Class {
+        name: String,
+        copy: bool,
+        storage: Option<Vec<RecordField>>,
+    },
     Record {
         copy: bool,
         name: String,
@@ -25,6 +39,22 @@ pub enum Type {
         name: String,
         variants: Vec<Variant>,
     },
+}
+/// Compile-time ABI and provenance of a plain code pointer. No environment is stored.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct FunctionContract {
+    pub sources: Vec<String>,
+    pub modes: Vec<Option<crate::mir::loans::Access>>,
+    pub view: Option<crate::mir::returns::Contract>,
+    pub storage: crate::mir::returns::StorageContract,
+    pub writes: crate::mir::storage_writes::Contract,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct CallContract {
+    pub targets: Vec<FunctionId>,
+    pub view: Option<crate::mir::returns::Contract>,
+    pub storage: crate::mir::returns::StorageContract,
+    pub writes: crate::mir::storage_writes::Contract,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Variant {
@@ -48,6 +78,7 @@ pub struct RecordField {
 impl Type {
     pub fn copyable(&self) -> bool {
         match self {
+            Self::Class { copy, .. } => *copy,
             Self::Record { copy, fields, .. } => *copy && fields.iter().all(|f| f.ty.copyable()),
             Self::Enum { copy, variants, .. } => {
                 *copy && variants.iter().flat_map(|v| &v.fields).all(Type::copyable)
@@ -58,13 +89,106 @@ impl Type {
         }
     }
 
+    /// Copy classes still own allocations. MIR value operands transfer those
+    /// temporary owners; only an explicit Copy operation duplicates identity.
+    pub fn owns_storage(&self) -> bool {
+        !self.copyable()
+            || match self {
+                Self::Class { .. } => true,
+                Self::Record { fields, .. } => fields.iter().any(|f| f.ty.owns_storage()),
+                Self::Enum { variants, .. } => variants
+                    .iter()
+                    .flat_map(|v| &v.fields)
+                    .any(Self::owns_storage),
+                Self::Tuple(fields) => fields.iter().any(Self::owns_storage),
+                Self::Array(element, count) => *count != 0 && element.owns_storage(),
+                _ => false,
+            }
+    }
+
+    pub fn contains_views(&self) -> bool {
+        match self {
+            Self::StoredView(_) => true,
+            Self::Class {
+                storage: Some(fields),
+                ..
+            } => fields.iter().any(|f| f.ty.contains_views()),
+            Self::Record { fields, .. } => fields.iter().any(|f| f.ty.contains_views()),
+            Self::Tuple(fields) => fields.iter().any(Self::contains_views),
+            Self::Array(element, _) => element.contains_views(),
+            Self::Enum { variants, .. } => variants
+                .iter()
+                .flat_map(|v| &v.fields)
+                .any(Self::contains_views),
+            _ => false,
+        }
+    }
+    /// Source annotations name the logical type; physical storage modes remain
+    /// part of the concrete HIR type and cannot change on assignment/call.
+    pub fn logical(&self) -> Self {
+        let mut ty = self.clone();
+        match &mut ty {
+            Self::StoredView(target) => return target.logical(),
+            Self::Class { storage, .. } => *storage = None,
+            Self::Function {
+                parameters,
+                result,
+                contract,
+            } => {
+                *contract = None;
+                for (_, ty) in parameters {
+                    *ty = ty.logical()
+                }
+                **result = result.logical();
+            }
+            Self::Record { fields, .. } => {
+                for f in fields {
+                    f.ty = f.ty.logical();
+                }
+            }
+            Self::Tuple(fields) => {
+                for t in fields {
+                    *t = t.logical();
+                }
+            }
+            Self::Array(t, _) => **t = t.logical(),
+            Self::Enum { variants, .. } => {
+                for v in variants {
+                    for t in &mut v.fields {
+                        *t = t.logical();
+                    }
+                }
+            }
+            _ => (),
+        }
+        ty
+    }
+    pub fn class_key(&self) -> String {
+        let Self::Class { name, storage, .. } = self else {
+            panic!("class key requires class")
+        };
+        if storage.is_some() {
+            format!("{name}${storage:?}")
+        } else {
+            name.clone()
+        }
+    }
     pub fn numeric(&self) -> bool {
         matches!(self, Self::Integer(_) | Self::F32 | Self::F64)
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClassDefinition {
+    pub fields: Vec<RecordField>,
+    pub copy: bool,
+}
+pub type Classes = std::collections::BTreeMap<String, ClassDefinition>;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
+    View(crate::reference_memory::ViewValue),
+    Class(crate::reference_memory::ClassValue),
     Unit,
     Bool(bool),
     Char(char),
@@ -72,17 +196,21 @@ pub enum Value {
     F32(f32),
     F64(f64),
     Str(String),
+    Function(FunctionId),
     Aggregate(Vec<Value>),
     Enum { variant: usize, fields: Vec<Value> },
 }
 
 #[derive(Clone, Debug)]
 pub struct Program {
+    pub classes: Classes,
     pub functions: Vec<Function>,
     pub main: Option<FunctionId>,
 }
 #[derive(Clone, Debug)]
 pub struct Function {
+    pub storage_writes: crate::mir::storage_writes::Contract,
+    pub result_view: Option<crate::mir::returns::Contract>,
     pub name: String,
     pub parameters: Vec<LocalId>,
     pub locals: Vec<Local>,
@@ -100,6 +228,8 @@ pub struct Local {
 }
 #[derive(Clone, Debug)]
 pub struct Block {
+    /// Staged named fields, in declaration order, owned by this construction.
+    pub construction: Vec<LocalId>,
     pub storage: Vec<LocalId>,
     pub statements: Vec<Statement>,
     pub result: Type,
@@ -122,6 +252,25 @@ pub struct Expr {
 }
 #[derive(Clone, Debug)]
 pub enum ExprKind {
+    StoreView(Box<Expr>),
+    StoredView(Box<Expr>),
+    StorageCall {
+        function: FunctionId,
+        arguments: Vec<Expr>,
+        contract: crate::mir::returns::StorageContract,
+    },
+    BorrowedCall {
+        function: FunctionId,
+        arguments: Vec<Expr>,
+        contract: crate::mir::returns::Contract,
+    },
+    Identity(Box<Expr>, Box<Expr>),
+    /// Transfer an already evaluated internal owner; never a language Copy.
+    Take(Box<Expr>),
+    New {
+        constructor: FunctionId,
+        arguments: Vec<Expr>,
+    },
     ArgumentView {
         place: Box<Expr>,
         access: crate::mir::loans::Access,
@@ -147,6 +296,7 @@ pub enum ExprKind {
     Binary(&'static str, Box<Expr>, Box<Expr>),
     Cast(Box<Expr>),
     Call(FunctionId, Vec<Expr>),
+    CallIndirect(Box<Expr>, Vec<Expr>, CallContract),
     Assign {
         place: Box<Expr>,
         operator: &'static str,

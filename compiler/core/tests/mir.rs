@@ -45,6 +45,11 @@ fn liveness_keeps_loop_and_panic_uses_and_init_intersects_branches() {
         end: 1,
     };
     let mut function = Function {
+        storage_writes: Default::default(),
+        drop_reads: Default::default(),
+        result_view: None,
+        classes: Default::default(),
+        cleanup: mir::cleanup::Plan::new(2),
         name: "test".into(),
         parameters: vec![0],
         locals: (0..2)
@@ -124,6 +129,11 @@ fn explicit_moves_invalidate_only_the_selected_path_and_backend_rejects_later_re
         projections: vec![Projection::Field(n)],
     };
     let function = Function {
+        storage_writes: Default::default(),
+        drop_reads: Default::default(),
+        result_view: None,
+        classes: Default::default(),
+        cleanup: mir::cleanup::Plan::new(3),
         name: "partial".into(),
         parameters: vec![0],
         locals: [pair.clone(), integer.clone(), integer]
@@ -179,6 +189,8 @@ fn explicit_moves_invalidate_only_the_selected_path_and_backend_rejects_later_re
         ],
     };
     let mut program = mir::Program {
+        classes: Default::default(),
+        destructors: Default::default(),
         functions: vec![function],
         main: None,
     };
@@ -188,7 +200,7 @@ fn explicit_moves_invalidate_only_the_selected_path_and_backend_rejects_later_re
         mir::interpret::execute(&program, 0, args.clone(), OverflowChecks::Checked, 1000).unwrap(),
         hir::Value::Aggregate(vec![number(9), number(2)])
     );
-    assert!(nether_core::llvm::emit_mir(&program, OverflowChecks::Checked).is_ok());
+    assert!(nether_core::rust::emit_mir(&program, OverflowChecks::Checked).is_ok());
     program.functions[0].blocks[2].terminator = T::Goto(3);
     assert_eq!(
         mir::dataflow::initialization_errors(&program.functions[0]),
@@ -201,7 +213,7 @@ fn explicit_moves_invalidate_only_the_selected_path_and_backend_rejects_later_re
         interpret::TrapKind::InvalidIr
     );
     assert_eq!(
-        nether_core::llvm::emit_mir(&program, OverflowChecks::Checked)
+        nether_core::rust::emit_mir(&program, OverflowChecks::Checked)
             .unwrap_err()
             .code,
         "E0401"

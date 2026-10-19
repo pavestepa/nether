@@ -44,6 +44,12 @@ impl Checker<'_> {
             self.nominals
                 .resolve(&path[0], arguments, self.constants, span)?
         };
+        let ty = expected
+            .filter(|expected| {
+                matches!(expected, Type::Enum { .. }) && expected.logical() == ty.logical()
+            })
+            .cloned()
+            .unwrap_or(ty);
         self.enum_pattern(&ty, path, span)
     }
     pub(super) fn enum_unit(
@@ -99,7 +105,7 @@ impl Checker<'_> {
         if self.lookup(base).is_some() {
             return Ok(None);
         }
-        let Some((ty, variant, definition)) =
+        let Some((mut ty, variant, definition)) =
             self.enum_variant(&[base.to_owned(), name.clone()], arguments, expected, span)?
         else {
             return Ok(None);
@@ -115,8 +121,13 @@ impl Checker<'_> {
             same(expected, &ty, span)?;
         }
         let mut fields = Vec::new();
-        for (arg, ty) in args.iter().zip(&definition.fields) {
-            fields.push(self.expr(arg, Some(ty), true)?);
+        let Type::Enum { variants, .. } = &mut ty else {
+            unreachable!()
+        };
+        for (arg, ty) in args.iter().zip(&mut variants[variant].fields) {
+            let value = self.storage_value(arg, Some(ty))?;
+            *ty = value.ty.clone();
+            fields.push(value);
         }
         Ok(Some(h::Expr {
             kind: h::ExprKind::Enum { variant, fields },
@@ -134,7 +145,8 @@ impl Checker<'_> {
         let a::TypeKind::Named { path, arguments } = &source_ty.kind else {
             return Ok(None);
         };
-        let Some((ty, variant, definition)) = self.enum_variant(path, arguments, expected, span)?
+        let Some((mut ty, variant, definition)) =
+            self.enum_variant(path, arguments, expected, span)?
         else {
             return Ok(None);
         };
@@ -146,6 +158,9 @@ impl Checker<'_> {
         }
         let mut fields = vec![None; names.len()];
         let mut statements = Vec::new();
+        let Type::Enum { variants, .. } = &mut ty else {
+            unreachable!()
+        };
         for (name, arg) in args {
             let index = names
                 .iter()
@@ -154,7 +169,8 @@ impl Checker<'_> {
             if fields[index].is_some() {
                 return Err(error(arg.span, "E0360", "duplicate variant field"));
             }
-            let value = self.expr(arg, Some(&definition.fields[index]), true)?;
+            let value = self.storage_value(arg, Some(&variants[variant].fields[index]))?;
+            variants[variant].fields[index] = value.ty.clone();
             let id = self.locals.len();
             self.locals.push(h::Local {
                 view: None,
@@ -177,6 +193,15 @@ impl Checker<'_> {
                 "every variant field must be initialized",
             ));
         }
+        let construction: Vec<_> = fields
+            .iter()
+            .map(|v| {
+                let h::ExprKind::Local(id) = v.as_ref().unwrap().kind else {
+                    unreachable!()
+                };
+                id
+            })
+            .collect();
         statements.push(h::Statement::Evaluate(h::Expr {
             kind: h::ExprKind::Enum {
                 variant,
@@ -187,7 +212,8 @@ impl Checker<'_> {
         }));
         Ok(Some(h::Expr {
             kind: h::ExprKind::Block(h::Block {
-                storage: vec![],
+                construction: construction.clone(),
+                storage: construction,
                 statements,
                 result: ty.clone(),
                 diverges: false,

@@ -13,9 +13,10 @@ impl Checker<'_> {
         let borrow =
             arms.iter().any(|arm| views::has_ref(&arm.pattern)) || self.needs_pattern_view(value);
         let value = self.expr(value, None, true)?;
+        let borrow = borrow || (!value.ty.copyable() && views::view_root(&value));
         let mut prelude = Vec::new();
         let scrutinee = if borrow {
-            if !views::place(&value) {
+            if !views::place(&value) && !self.pending_result_place(&value) {
                 return Err(error(
                     span,
                     "E0382",
@@ -119,7 +120,7 @@ impl Checker<'_> {
             body.storage = (arm_storage_start..self.locals.len()).collect();
             if !body.diverges && value_context {
                 if let Some(ty) = &result {
-                    same(ty, &body.result, arm.span)?;
+                    result = Some(storage::union(ty, &body.result, arm.span)?);
                 } else {
                     result = Some(body.result.clone());
                 }
@@ -145,6 +146,11 @@ impl Checker<'_> {
         } else {
             Type::Unit
         };
+        for arm in &checked {
+            if value_context && !arm.body.diverges {
+                self.request_expression_mode(span, &arm.body.result, &result)?;
+            }
+        }
         let diverges = checked.iter().all(|arm| arm.body.diverges);
         prelude.push(h::Statement::Evaluate(h::Expr {
             kind: h::ExprKind::Match(checked),
@@ -152,6 +158,7 @@ impl Checker<'_> {
             span,
         }));
         let block = h::Block {
+            construction: vec![],
             storage: (match_storage_start..self.locals.len()).collect(),
             statements: prelude,
             result: result.clone(),
@@ -171,6 +178,10 @@ impl Checker<'_> {
         value: &h::Expr,
         bindings: &mut Vec<h::Statement>,
     ) -> Result<(h::Expr, bool, Option<usize>)> {
+        if matches!(value.ty, Type::StoredView(_)) {
+            let value = storage::read(value.clone());
+            return self.pattern(&views::inferred_pattern(pattern, false), &value, bindings);
+        }
         let span = pattern.span;
         let yes = || h::Expr {
             kind: h::ExprKind::Value(Value::Bool(true)),
@@ -188,7 +199,17 @@ impl Checker<'_> {
                     return Err(error(span, "E0301", "duplicate binding in pattern"));
                 }
                 let id = self.local(name.clone(), value.ty.clone(), *mutable, span)?;
-                bindings.push(h::Statement::Initialize(id, value.clone()));
+                self.storage_sources.insert(id, vec![value.clone()]);
+                let value = if value.ty.copyable() && value.ty.owns_storage() && !self.pattern_views
+                {
+                    h::Expr {
+                        kind: h::ExprKind::Take(Box::new(value.clone())),
+                        ..value.clone()
+                    }
+                } else {
+                    value.clone()
+                };
+                bindings.push(h::Statement::Initialize(id, value));
                 Ok((yes(), true, None))
             }
             a::PatternKind::Binding {
@@ -210,6 +231,7 @@ impl Checker<'_> {
                     self.mutable_place(value)?;
                 }
                 let id = self.local(name.clone(), value.ty.clone(), *mutable, span)?;
+                self.storage_sources.insert(id, vec![value.clone()]);
                 self.locals[id].view = Some(if *mutable {
                     crate::mir::loans::Access::Mutable
                 } else {
@@ -284,13 +306,7 @@ impl Checker<'_> {
                             ));
                         }
                         let field = &definition[index];
-                        if field.private && field.source != span.source {
-                            return Err(error(
-                                pattern.span,
-                                "E0352",
-                                "private field is not accessible from this module",
-                            ));
-                        }
+                        self.check_field_access(&value.ty, field, pattern.span)?;
                         let projection = h::Expr {
                             kind: h::ExprKind::Field(Box::new(value.clone()), index),
                             ty: field.ty.clone(),
@@ -489,10 +505,17 @@ fn readonly_guard(expr: &h::Expr) -> bool {
         // mutable captures, globals or resource operations. Thus these calls
         // cannot mutate a guard's input; ownership/FFI support must use summaries.
         Call(_, values) | Tuple(values) | Array(values) => values.iter().all(readonly_guard),
-        Unary(_, value) | Cast(value) | Field(value, _) | Tag(value) | Payload(value, _) => {
-            readonly_guard(value)
+        CallIndirect(callee, values, _) => {
+            readonly_guard(callee) && values.iter().all(readonly_guard)
         }
-        Binary(_, left, right) | Index(left, right) => {
+        StoredView(value)
+        | StoreView(value)
+        | Unary(_, value)
+        | Cast(value)
+        | Field(value, _)
+        | Tag(value)
+        | Payload(value, _) => readonly_guard(value),
+        Identity(left, right) | Binary(_, left, right) | Index(left, right) => {
             readonly_guard(left) && readonly_guard(right)
         }
         Block(body) => block(body),

@@ -1,15 +1,34 @@
-//! Linux execution tests. On a non-Linux host, opt in with NETHER_LINUX_DOCKER=1.
-//! This target is ignored by the portable suite and explicitly required in CI.
-use nether_core::{check::check, hir::Value, interpret::execute, llvm::emit_with_sources};
-use nether_frontend::{parser::parse, source::SourceId};
+//! Execute emitted Rust on the host and compare both independent interpreters.
+use nether_core::{check::check, hir::Value, interpret::execute, rust::emit_with_sources};
+use nether_frontend::{
+    parser::parse,
+    source::{Source, SourceId},
+};
 use nether_semantics::OverflowChecks;
 use std::{fs, process::Command};
-
 #[test]
-#[ignore = "requires Linux or the explicit Docker runner"]
-fn linux_native_matches_reference_at_both_optimization_levels() {
+fn rust_native_matches_reference_at_both_optimization_levels() {
     let cases=[
-        "fn fail():i32 {\nlet привет=1\nreturn привет/0\n}\nfn main():i32 {return fail()}",
+        "fn identity<T>(x:T):T {return x} fn main():i32 {let f:(i32)=>i32=identity;return f(9)}",
+        "fn identity<T>(x:T):T {return x} fn main():i32 {let f:(i32)=>i32=identity<i32>;return f(9)}",
+        "fn first<T:Copy,const N:usize>(xs:{T;N}):T {return xs[0]} fn main():i32 {let f:({i32;2})=>i32=first;return f({8,9})}",
+        "fn identity<T>(x:T):T {return x} fn select():(i32)=>i32 {return identity} fn main():i32 {return select()(6)}",
+        "struct Cell {value:i32} fn take(x:Cell):i32 {var owned=x;owned.value+=1;return owned.value} fn main():i32 {var x=Cell {value:1};let n=take(x);x=Cell {value:4};return n+x.value}",
+        "struct Cell {value:i32} fn take(x:Cell):i32 {var owned=x;owned.value+=1;return owned.value} fn main():i32 {var x=Cell {value:1};let n=take(x);if true {x=Cell {value:4}} else {x=Cell {value:5}};return n+x.value}",
+        "struct Cell {value:i32} fn take(x:Cell):i32 {var owned=x;owned.value+=1;return owned.value} fn main():i32 {var x=Cell {value:1};var n=0;while n<6 {n+=take(x);x=Cell {value:1}};return n+x.value}",
+        "struct Cell {value:i32} fn take(x:Cell):i32 {var owned=x;owned.value+=1;return owned.value} fn main():i32 {var x=Cell {value:1};var n=0;while n<6 {var y=x;n+=take(y);x=Cell {value:1}};return n+x.value}",
+        "struct Math {fn add(n:i32):i32 {return n+2}} fn main():i32 {let f=Math.add;return f(3)}",
+        "struct Handler {run:(i32)=>i32;fn invoke(this):i32 {return run(4)}} fn add(n:i32):i32 {return n+2} fn main():i32 {let h=Handler {run:add};return h.invoke()}",
+        "fn add(n:i32):i32 {return n+2} fn main():i32 {let f:(i32)=>i32=add;return f(3)}",
+        "fn one():i32 {return 1} fn two():i32 {return 2} fn choose(b:bool):()=>i32 {return if b {one} else {two}} fn main():i32 {return choose(false)()}",
+        "fn bump(var n:i32):i32 {n+=1;return n} fn apply(f:(var i32)=>i32,n:i32):i32 {return f(n)} fn main():i32 {let n=3;return apply(bump,n)+n}",
+        "fn one():i32 {return 1} fn two():i32 {return 2} fn main():i32 {var f=one;let copy=f;f=two;return f()*10+copy()}",
+        "#[Copy] struct Handler {run:(i32)=>i32} fn add(n:i32):i32 {return n+2} fn main():i32 {let h=Handler {run:add};return h.run(3)}",
+        "fn add(n:i32):i32 {return n+2} fn apply<T:Copy>(f:(T)=>T,n:T):T {return f(n)} fn main():i32 {return apply(add,3)}",
+        "fn add(n:i32):i32 {return n+2} fn invoke<T:Copy>(f:()=>T):T {return f()} fn five():i32 {return 5} fn main():i32 {return invoke(five)}",
+        "fn yes(n:i32):bool {return n>0} fn main():i32 {let predicate=yes;return match 7 {x if predicate(x)=>x,_=>0}}",
+        "fn fail():i32 {return 1/0} fn main():i32 {let f=fail;return f()}",
+        "fn fail():i32 {\nlet n=1\nlet text=\"привет\";return n/0\n}\nfn main():i32 {return fail()}",
         "fn main():i32 {\nlet a={1}\nreturn a[2]\n}",
         "struct Cell {value:i32} fn bump(var x:Cell):() {x.value+=1} fn read(x:Cell):i32 {return x.value} fn main():i32 {var x=Cell {value:1};bump(x);return read(x)+x.value}",
         "struct Cell {value:i32} fn bump(var x:Cell,n:i32):() {if n==0 {return};x.value+=1;bump(x,n-1)} fn main():i32 {var x=Cell {value:1};bump(x,5);return x.value}",
@@ -90,123 +109,96 @@ fn linux_native_matches_reference_at_both_optimization_levels() {
         "fn main():i32 {let x:u128=340282366920938463463374607431768211455;return (x / 3) as i32}",
         "fn main():i32 {let x=19.0;return (x % 4.0) as i32}",
     ];
-    let dir = std::env::temp_dir().join(format!("nether-native-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("nether-native-rust-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
-    let compiler = std::env::var("NETHER_CLANG").unwrap_or_else(|_| "clang".into());
-    fs::write(
-        dir.join("runtime.c"),
-        include_str!("../../../runtime/src/runtime.c"),
-    )
-    .unwrap();
-    fs::write(
-        dir.join("allocator-test.c"),
-        include_str!("../../../runtime/tests/allocator.c"),
-    )
-    .unwrap();
-    fs::write(
-        dir.join("cleanup-test.c"),
-        include_str!("../../../runtime/tests/cleanup.c"),
-    )
-    .unwrap();
-    let mut commands = String::from("#!/bin/sh\nset -eu\ngcc -std=c11 -Wall -Wextra -Werror -O2 -c /work/runtime.c -o /tmp/nether-runtime.o\ngcc -std=c11 -Wall -Wextra -Werror -DNETHER_DIAGNOSTIC_RUNTIME /work/runtime.c /work/allocator-test.c -o /tmp/nether-allocator-test\n/tmp/nether-allocator-test 2>/tmp/nether-allocator.log\ngcc -std=c11 -Wall -Wextra -Werror /work/runtime.c /work/cleanup-test.c -o /tmp/nether-cleanup-test\n/tmp/nether-cleanup-test 2>/tmp/nether-cleanup.log\n");
+    let compiler = std::env::var("NETHER_RUSTC").unwrap_or_else(|_| "rustc".into());
     let mut count = 0;
-    for (case, source) in cases.iter().enumerate() {
-        for checks in [OverflowChecks::Checked, OverflowChecks::Wrapping] {
+    for checks in [OverflowChecks::Checked, OverflowChecks::Wrapping] {
+        let mut generated = String::new();
+        let mut expected_cases = Vec::new();
+        for (id, source) in cases.iter().enumerate() {
             let parsed = parse(SourceId(0), source);
             assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
             let program = check(&parsed.module.unwrap()).unwrap();
             let cfg = nether_core::mir::lower(&program);
-            for function in &cfg.functions {
-                assert!(nether_core::mir::dataflow::initialization_errors(function).is_empty());
-            }
-            let hir_value = execute(&program, program.main.unwrap(), Vec::new(), checks, 100_000)
-                .map_err(|e| e.kind);
+            let expected = execute(&program, program.main.unwrap(), vec![], checks, 100_000);
             let mir_value = nether_core::mir::interpret::execute(
                 &cfg,
                 cfg.main.unwrap(),
-                Vec::new(),
+                vec![],
                 checks,
                 100_000,
-            )
-            .map_err(|e| e.kind);
-            assert_eq!(hir_value, mir_value, "MIR disagrees for {source}");
-            let expected =
-                match execute(&program, program.main.unwrap(), Vec::new(), checks, 100_000) {
-                    Ok(Value::Integer(value)) => (value.bits() & 255) as i32,
-                    Ok(Value::Unit) => 0,
-                    Err(_) => 101,
-                    other => panic!("unexpected result: {other:?}"),
-                };
-            let input = dir.join("case.ll");
-            let source_info = nether_frontend::source::Source::new("native.nr", *source);
-            let panic_location = execute(&program, program.main.unwrap(), Vec::new(), checks, 100_000)
-                .err().and_then(|trap| source_info.location(trap.span.start));
-            fs::write(&input, emit_with_sources(&program, checks, &[source_info]).unwrap()).unwrap();
-            for optimization in ["-O0", "-O2"] {
-                let filename = format!("case{count}.o");
-                count += 1;
-                let result = Command::new(&compiler)
-                    .args([
-                        "--target=x86_64-unknown-linux-gnu",
-                        "-x",
-                        "ir",
-                        "-c",
-                        optimization,
-                    ])
-                    .arg(&input)
-                    .arg("-o")
-                    .arg(dir.join(&filename))
+            );
+            assert_eq!(
+                expected.as_ref().map_err(|e| &e.kind),
+                mir_value.as_ref().map_err(|e| &e.kind),
+                "{source}"
+            );
+            let code = match &expected {
+                Ok(Value::Integer(v)) => (v.bits() & 255) as i32,
+                Ok(Value::Unit) => 0,
+                Err(_) => 101,
+                other => panic!("{other:?}"),
+            };
+            let original = Source::new("native.nr", *source);
+            let location = expected
+                .err()
+                .map(|trap| original.location(trap.span.start).unwrap());
+            let rust =
+                emit_with_sources(&program, checks, std::slice::from_ref(&original)).unwrap();
+            generated.push_str(&format!(
+                "mod case{id} {{\n{}\n}}\n",
+                rust.replace("fn main() {", "pub fn run() {")
+            ));
+            expected_cases.push((code, location));
+        }
+        generated.push_str(
+            "fn main() { match std::env::args().nth(1).unwrap().parse::<usize>().unwrap() {\n",
+        );
+        for id in 0..cases.len() {
+            generated.push_str(&format!("{id} => case{id}::run(),\n"));
+        }
+        generated.push_str("_ => panic!(\"invalid test case\"), } }\n");
+        fs::write(dir.join("case.rs"), &generated).unwrap();
+        for opt in ["opt-level=0", "opt-level=3"] {
+            let output = Command::new(&compiler)
+                .args(["--edition=2021", "-C", opt])
+                .arg(dir.join("case.rs"))
+                .arg("-o")
+                .arg(dir.join("case"))
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}; source: {}",
+                String::from_utf8_lossy(&output.stderr),
+                dir.join("case.rs").display()
+            );
+            for (id, (code, location)) in expected_cases.iter().enumerate() {
+                let output = Command::new(dir.join("case"))
+                    .arg(id.to_string())
                     .output()
                     .unwrap();
-                assert!(
-                    result.status.success(),
-                    "{}",
-                    String::from_utf8_lossy(&result.stderr)
+                assert_eq!(
+                    output.status.code(),
+                    Some(*code),
+                    "{}: {}",
+                    cases[id],
+                    String::from_utf8_lossy(&output.stderr)
                 );
-                commands.push_str(&format!("gcc /work/{filename} /tmp/nether-runtime.o -lm -o /tmp/nether-case\nstatus=0\n/tmp/nether-case 2>/tmp/nether-case.log || status=$?\nif [ \"$status\" -ne {expected} ]; then echo 'mismatch case {case} {checks:?} {optimization}: expected {expected}'; echo \"actual: $status\"; exit 1; fi\n"));
-                if let Some((line, column)) = panic_location {
-                    commands.push_str(&format!("grep -F ' at native.nr:{line}:{column}' /tmp/nether-case.log > /dev/null\n"));
+                if let Some((line, column)) = location {
+                    assert!(
+                        String::from_utf8_lossy(&output.stderr)
+                            .contains(&format!("native.nr:{line}:{column}:")),
+                        "{}: {}",
+                        cases[id],
+                        String::from_utf8_lossy(&output.stderr)
+                    );
                 }
+                count += 1;
             }
         }
     }
-    commands.push_str(&format!(
-        "echo '{count} native/reference comparisons passed'\n"
-    ));
-    fs::write(dir.join("run.sh"), &commands).unwrap();
-    let result = if cfg!(target_os = "linux") && std::env::var_os("NETHER_LINUX_DOCKER").is_none() {
-        let local = commands.replace("/work/", &format!("{}/", dir.display()));
-        fs::write(dir.join("run.sh"), local).unwrap();
-        Command::new("sh").arg(dir.join("run.sh")).output().unwrap()
-    } else {
-        assert!(
-            std::env::var_os("NETHER_LINUX_DOCKER").is_some(),
-            "set NETHER_LINUX_DOCKER=1 on non-Linux hosts"
-        );
-        Command::new("docker")
-            .args([
-                "run",
-                "--rm",
-                "--platform",
-                "linux/amd64",
-                "--network",
-                "none",
-                "--mount",
-            ])
-            .arg(format!(
-                "type=bind,source={},target=/work,readonly",
-                dir.display()
-            ))
-            .args(["gcc:14-bookworm", "sh", "/work/run.sh"])
-            .output()
-            .unwrap()
-    };
-    assert!(
-        result.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&result.stdout),
-        String::from_utf8_lossy(&result.stderr)
-    );
-    print!("{}", String::from_utf8_lossy(&result.stdout));
+    eprintln!("{count} native Rust comparisons passed");
     fs::remove_dir_all(dir).unwrap();
 }

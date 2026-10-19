@@ -91,6 +91,14 @@ pub struct Parameter {
     pub span: Span,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MethodDispatch {
+    #[default]
+    Ordinary,
+    Virtual,
+    Override,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Member {
     Field {
@@ -103,6 +111,7 @@ pub enum Member {
     Method {
         function: Function,
         private: bool,
+        dispatch: MethodDispatch,
     },
     Constructor {
         parameters: Vec<Parameter>,

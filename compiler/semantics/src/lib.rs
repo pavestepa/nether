@@ -11,6 +11,5 @@ pub use integer::{ArithmeticError, BinaryOp, Integer, IntegerType, OverflowCheck
 pub use layout::{AggregateLayout, EnumLayout, Layout, LayoutError, MAX_OBJECT_SIZE};
 pub use storage::{ElementMode, ModeError, ModeRequirement, ModeVar, StorageModes};
 
-/// The initial target's pointer width; never derived from the compiler host.
+/// The supported Rust backend target profile uses 64-bit pointers.
 pub const TARGET_POINTER_BITS: u32 = 64;
-pub const TARGET_TRIPLE: &str = "x86_64-unknown-linux-gnu";

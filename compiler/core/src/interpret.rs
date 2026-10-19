@@ -1,6 +1,8 @@
 //! Bounded reference execution for the currently checked value subset.
-//! This is an oracle, not the native runtime or a substitute for LLVM lowering.
+//! This is an oracle, not the native runtime or a substitute for Rust source lowering.
 use crate::hir::*;
+mod drop;
+pub use crate::mir::interpret::DropEvent;
 use crate::reference_memory::{self as memory, Argument, Reference as Place, Slot};
 use nether_frontend::source::Span;
 use nether_semantics::{ArithmeticError, BinaryOp, Integer, OverflowChecks};
@@ -12,6 +14,7 @@ pub enum TrapKind {
     StepLimit,
     CallDepth,
     InvalidIr,
+    DoublePanic,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Trap {
@@ -20,7 +23,7 @@ pub struct Trap {
 }
 #[derive(Debug)]
 enum Signal {
-    Return(Value),
+    Return,
     Break,
     Continue,
     Trap(Trap),
@@ -34,11 +37,25 @@ pub fn execute(
     checks: OverflowChecks,
     fuel: u64,
 ) -> std::result::Result<Value, Trap> {
+    execute_traced(program, entry, arguments, checks, fuel).0
+}
+pub fn execute_traced(
+    program: &Program,
+    entry: FunctionId,
+    arguments: Vec<Value>,
+    checks: OverflowChecks,
+    fuel: u64,
+) -> (std::result::Result<Value, Trap>, Vec<DropEvent>) {
     let mut engine = Engine {
         program,
         checks,
         fuel,
         depth: 0,
+        clock: Default::default(),
+        destructors: crate::mir::drop_plan::Destructors::from_functions(&program.functions)
+            .expect("checked destructors"),
+        active_panic: false,
+        events: Vec::new(),
     };
     let span = program
         .functions
@@ -49,7 +66,7 @@ pub fn execute(
             start: 0,
             end: 0,
         });
-    match engine.call(
+    let result = match engine.call(
         entry,
         arguments.into_iter().map(Argument::Owned).collect(),
         span,
@@ -60,7 +77,8 @@ pub fn execute(
             kind: TrapKind::InvalidIr,
             span,
         }),
-    }
+    };
+    (result, engine.events)
 }
 
 struct Engine<'a> {
@@ -68,10 +86,17 @@ struct Engine<'a> {
     checks: OverflowChecks,
     fuel: u64,
     depth: usize,
+    clock: memory::Clock,
+    destructors: crate::mir::drop_plan::Destructors,
+    active_panic: bool,
+    events: Vec<DropEvent>,
 }
 struct Frame {
+    returned_view: bool,
     views: std::collections::BTreeMap<usize, Place>,
     locals: Vec<Slot>,
+    return_staging: Option<(Value, Type)>,
+    temporary_places: Vec<Slot>,
 }
 impl Engine<'_> {
     fn tick(&mut self, span: Span) -> Result<()> {
@@ -95,12 +120,26 @@ impl Engine<'_> {
             return Err(trap(TrapKind::InvalidIr, span));
         }
         let mut frame = Frame {
+            returned_view: function.result_view.is_some(),
+            return_staging: None,
+            temporary_places: Vec::new(),
             views: Default::default(),
-            locals: (0..function.locals.len()).map(|_| memory::slot()).collect(),
+            locals: function
+                .locals
+                .iter()
+                .map(|local| memory::typed_slot(local.ty.clone(), self.clock.clone()))
+                .collect(),
         };
         for (id, value) in function.parameters.iter().zip(arguments) {
             match value {
-                Argument::Owned(value) => *frame.locals[*id].borrow_mut() = Some(value),
+                Argument::Owned(value) => {
+                    Place {
+                        slot: frame.locals[*id].clone(),
+                        projections: vec![],
+                    }
+                    .write(value)
+                    .map_err(|kind| trap(kind, span))?;
+                }
                 Argument::Borrowed(place) => {
                     frame.views.insert(*id, place);
                 }
@@ -108,44 +147,101 @@ impl Engine<'_> {
         }
         self.depth += 1;
         let result = self.block(&function.body, &mut frame);
+        let parameters: Vec<_> = function
+            .parameters
+            .iter()
+            .copied()
+            .filter(|id| function.locals[*id].view.is_none())
+            .collect();
+        let result = self.finish_scope(result, &parameters, false, &Type::Unit, &mut frame, span);
         self.depth -= 1;
-        for local in &frame.locals {
-            *local.borrow_mut() = None;
-        }
         match result {
-            Err(Signal::Return(value)) => Ok(value),
+            Err(Signal::Return) => Ok(frame
+                .return_staging
+                .take()
+                .map(|p| p.0)
+                .unwrap_or(Value::Unit)),
             Ok(_) if function.result == Type::Unit => Ok(Value::Unit),
             Ok(_) => Err(trap(TrapKind::InvalidIr, span)),
+            Err(Signal::Trap(mut failure)) => {
+                if failure.kind != TrapKind::DoublePanic {
+                    if let Some((value, ty)) = frame.return_staging.take() {
+                        let mut pending = Some(failure.clone());
+                        if let Err(error) = self.drop_value(value, &ty, &mut pending, span) {
+                            failure = error;
+                        }
+                    }
+                }
+                Err(Signal::Trap(failure))
+            }
             other => other,
         }
     }
     fn block(&mut self, block: &Block, frame: &mut Frame) -> Result<Value> {
-        let result = self.block_body(block, frame);
-        for local in &block.storage {
-            *frame.locals[*local].borrow_mut() = None;
-            frame.views.remove(local);
-        }
-        result
+        self.block_mode(block, frame, false)
     }
-    fn block_body(&mut self, block: &Block, frame: &mut Frame) -> Result<Value> {
+    fn block_mode(&mut self, block: &Block, frame: &mut Frame, borrowed: bool) -> Result<Value> {
+        let result = self.block_body(block, frame, borrowed);
+        self.finish_scope(
+            result,
+            &block.storage,
+            !block.construction.is_empty(),
+            &block.result,
+            frame,
+            block.span,
+        )
+    }
+    fn block_body(&mut self, block: &Block, frame: &mut Frame, borrowed: bool) -> Result<Value> {
         let mut result = Value::Unit;
-        for statement in &block.statements {
+        for (index, statement) in block.statements.iter().enumerate() {
             self.tick(block.span)?;
             result = match statement {
                 Statement::Initialize(id, value) => {
                     let value = self.expr(value, frame)?;
-                    *frame.locals[*id].borrow_mut() = Some(value);
+                    Place {
+                        slot: frame.locals[*id].clone(),
+                        projections: vec![],
+                    }
+                    .write(value)
+                    .map_err(|kind| trap(kind, block.span))?;
                     Value::Unit
                 }
-                Statement::Evaluate(value) => self.expr(value, frame)?,
+                Statement::Evaluate(value) => {
+                    let evaluated = self.expr_mode(
+                        value,
+                        frame,
+                        borrowed && index + 1 == block.statements.len(),
+                    )?;
+                    if index + 1 == block.statements.len() && block.result != Type::Unit {
+                        evaluated
+                    } else {
+                        let mut pending = None;
+                        self.drop_value(evaluated, &value.ty, &mut pending, value.span)
+                            .map_err(Signal::Trap)?;
+                        if let Some(failure) = pending {
+                            return Err(Signal::Trap(failure));
+                        }
+                        Value::Unit
+                    }
+                }
                 Statement::Return(value) => {
-                    return Err(Signal::Return(
+                    let evaluated = if frame.returned_view {
+                        let value = value
+                            .as_ref()
+                            .ok_or_else(|| trap(TrapKind::InvalidIr, block.span))?;
+                        self.expr_mode(value, frame, true)?
+                    } else {
                         value
                             .as_ref()
                             .map(|v| self.expr(v, frame))
                             .transpose()?
-                            .unwrap_or(Value::Unit),
-                    ))
+                            .unwrap_or(Value::Unit)
+                    };
+                    frame.return_staging = Some((
+                        evaluated,
+                        value.as_ref().map(|v| v.ty.clone()).unwrap_or(Type::Unit),
+                    ));
+                    return Err(Signal::Return);
                 }
                 Statement::Break => return Err(Signal::Break),
                 Statement::Continue => return Err(Signal::Continue),
@@ -158,49 +254,143 @@ impl Engine<'_> {
         }
     }
     fn expr(&mut self, expr: &Expr, frame: &mut Frame) -> Result<Value> {
+        self.expr_mode(expr, frame, false)
+    }
+    fn expr_mode(&mut self, expr: &Expr, frame: &mut Frame, borrowed: bool) -> Result<Value> {
+        let already_panicking = self.active_panic;
+        let first_temporary = frame.temporary_places.len();
+        let result = self.expr_body(expr, frame, borrowed);
+        let result = match result {
+            Err(Signal::Trap(mut failure)) => {
+                if already_panicking {
+                    failure.kind = TrapKind::DoublePanic;
+                }
+                self.active_panic = true;
+                Err(Signal::Trap(failure))
+            }
+            result => result,
+        };
+        if matches!(&result,Err(Signal::Trap(t)) if t.kind==TrapKind::DoublePanic) {
+            return result;
+        }
+        let mut pending = match &result {
+            Err(Signal::Trap(t)) => Some(t.clone()),
+            _ => None,
+        };
+        for slot in frame.temporary_places.drain(first_temporary..).rev() {
+            self.drop_place(
+                Place {
+                    slot: slot.clone(),
+                    projections: vec![],
+                },
+                slot.ty(),
+                &mut pending,
+                expr.span,
+            )
+            .map_err(Signal::Trap)?;
+        }
+        if pending.is_some() {
+            if let Ok(value) = result {
+                self.drop_value(value, &expr.ty, &mut pending, expr.span)
+                    .map_err(Signal::Trap)?;
+            }
+            Err(Signal::Trap(pending.unwrap()))
+        } else {
+            result
+        }
+    }
+    fn expr_body(&mut self, expr: &Expr, frame: &mut Frame, borrowed: bool) -> Result<Value> {
         self.tick(expr.span)?;
         let span = expr.span;
+        if borrowed
+            && !matches!(
+                expr.kind,
+                ExprKind::Block(_) | ExprKind::If { .. } | ExprKind::Match(_)
+            )
+        {
+            return Ok(Value::View(memory::ViewValue(
+                self.place(expr, frame)?
+                    .captured()
+                    .map_err(|kind| trap(kind, span))?,
+            )));
+        }
         match &expr.kind {
-            ExprKind::View(id) => frame
-                .views
-                .get(id)
-                .ok_or_else(|| trap(TrapKind::InvalidIr, span))?
-                .read()
-                .map_err(|kind| trap(kind, span)),
+            ExprKind::StoreView(value) => Ok(Value::View(memory::ViewValue(
+                self.place(value, frame)?
+                    .captured()
+                    .map_err(|kind| trap(kind, span))?,
+            ))),
+            ExprKind::StoredView(_) => {
+                let place = self.place(expr, frame)?;
+                let value = place.read().map_err(|kind| trap(kind, span))?;
+                if expr.ty.copyable() {
+                    memory::copy_value(&value, self.clock.clone()).map_err(|kind| trap(kind, span))
+                } else {
+                    Err(trap(TrapKind::InvalidIr, span))
+                }
+            }
+            ExprKind::Identity(left, right) => {
+                let Value::Class(left) = self
+                    .place(left, frame)?
+                    .read()
+                    .map_err(|kind| trap(kind, span))?
+                else {
+                    return Err(trap(TrapKind::InvalidIr, span));
+                };
+                let Value::Class(right) = self
+                    .place(right, frame)?
+                    .read()
+                    .map_err(|kind| trap(kind, span))?
+                else {
+                    return Err(trap(TrapKind::InvalidIr, span));
+                };
+                Ok(Value::Bool(left.same_identity(&right)))
+            }
+            ExprKind::Take(value) => {
+                let place = self.place(value, frame)?;
+                let value = place.read().map_err(|kind| trap(kind, span))?;
+                place.forget().map_err(|kind| trap(kind, span))?;
+                Ok(value)
+            }
+            ExprKind::View(_)
+            | ExprKind::Local(_)
+            | ExprKind::Field(..)
+            | ExprKind::Index(..)
+            | ExprKind::Payload(..) => {
+                let place = self.place(expr, frame)?;
+                let value = place.read().map_err(|kind| trap(kind, span))?;
+                if !expr.ty.copyable() {
+                    place.forget().map_err(|kind| trap(kind, span))?;
+                    Ok(value)
+                } else {
+                    memory::copy_value(&value, self.clock.clone()).map_err(|kind| trap(kind, span))
+                }
+            }
             ExprKind::ArgumentView { .. } => Err(trap(TrapKind::InvalidIr, span)),
             ExprKind::Borrow { local, place } => {
                 let place = self.place(place, frame)?;
-                frame.views.insert(*local, place);
+                frame
+                    .views
+                    .insert(*local, place.captured().map_err(|kind| trap(kind, span))?);
                 Ok(Value::Unit)
             }
-            ExprKind::Block(block) => self.block(block, frame),
-            ExprKind::Enum { variant, fields } => {
-                let mut values = Vec::new();
-                for field in fields {
-                    values.push(self.expr(field, frame)?);
-                }
-                Ok(Value::Enum {
-                    variant: *variant,
-                    fields: values,
-                })
-            }
+            ExprKind::Block(block) => self.block_mode(block, frame, borrowed),
+            ExprKind::Enum { variant, fields } => Ok(Value::Enum {
+                variant: *variant,
+                fields: self.aggregate(fields, frame, span)?,
+            }),
             ExprKind::Tag(value) => {
-                let Value::Enum { variant, .. } = self.expr(value, frame)? else {
+                let Value::Enum { variant, .. } = self
+                    .place(value, frame)?
+                    .read()
+                    .map_err(|kind| trap(kind, span))?
+                else {
                     return Err(trap(TrapKind::InvalidIr, span));
                 };
                 Ok(Value::Integer(Integer::from_bits(
                     nether_semantics::IntegerType::U32,
                     variant as u128,
                 )))
-            }
-            ExprKind::Payload(value, expected) => {
-                let Value::Enum { variant, fields } = self.expr(value, frame)? else {
-                    return Err(trap(TrapKind::InvalidIr, span));
-                };
-                if variant != *expected {
-                    return Err(trap(TrapKind::InvalidIr, span));
-                }
-                Ok(Value::Aggregate(fields))
             }
             ExprKind::Match(arms) => {
                 for arm in arms {
@@ -209,6 +399,7 @@ impl Engine<'_> {
                     }
                     self.block(
                         &Block {
+                            construction: vec![],
                             storage: vec![],
                             statements: arm.guard_bindings.clone(),
                             result: Type::Unit,
@@ -224,6 +415,7 @@ impl Engine<'_> {
                     }
                     self.block(
                         &Block {
+                            construction: vec![],
                             storage: vec![],
                             statements: arm.bindings.clone(),
                             result: Type::Unit,
@@ -232,23 +424,15 @@ impl Engine<'_> {
                         },
                         frame,
                     )?;
-                    return self.block(&arm.body, frame);
+                    return self.block_mode(&arm.body, frame, borrowed);
                 }
                 Err(trap(TrapKind::InvalidIr, span))
             }
 
             ExprKind::Value(value) => Ok(value.clone()),
-            ExprKind::Local(id) => frame
-                .locals
-                .get(*id)
-                .and_then(|v| v.borrow().clone())
-                .ok_or_else(|| trap(TrapKind::InvalidIr, span)),
-            ExprKind::Tuple(values) | ExprKind::Array(values) => Ok(Value::Aggregate(
-                values
-                    .iter()
-                    .map(|v| self.expr(v, frame))
-                    .collect::<Result<_>>()?,
-            )),
+            ExprKind::Tuple(values) | ExprKind::Array(values) => {
+                Ok(Value::Aggregate(self.aggregate(values, frame, span)?))
+            }
             ExprKind::Unary(operator, value) => {
                 let value = self.expr(value, frame)?;
                 match (*operator, value) {
@@ -275,23 +459,107 @@ impl Engine<'_> {
             }
             ExprKind::Cast(value) => cast(self.expr(value, frame)?, &expr.ty)
                 .ok_or_else(|| trap(TrapKind::InvalidIr, span)),
-            ExprKind::Call(id, arguments) => {
+            ExprKind::StorageCall { .. }
+            | ExprKind::BorrowedCall { .. }
+            | ExprKind::New { .. }
+            | ExprKind::Call(..)
+            | ExprKind::CallIndirect(..) => {
+                let (id, arguments) = match &expr.kind {
+                    ExprKind::Call(id, arguments) => (*id, arguments),
+                    ExprKind::StorageCall {
+                        function,
+                        arguments,
+                        ..
+                    }
+                    | ExprKind::BorrowedCall {
+                        function,
+                        arguments,
+                        ..
+                    } => (*function, arguments),
+                    ExprKind::New {
+                        constructor,
+                        arguments,
+                    } => (*constructor, arguments),
+                    ExprKind::CallIndirect(callee, arguments, _) => {
+                        let Value::Function(id) = self.expr(callee, frame)? else {
+                            return Err(trap(TrapKind::InvalidIr, span));
+                        };
+                        (id, arguments)
+                    }
+                    _ => unreachable!(),
+                };
                 let mut args = Vec::new();
-                for value in arguments {
-                    args.push(match &value.kind {
-                        ExprKind::ArgumentView { place, .. } => {
-                            Argument::Borrowed(self.place(place, frame)?)
+                for (index, value) in arguments.iter().enumerate() {
+                    let argument = match &value.kind {
+                        ExprKind::ArgumentView { place, .. } => self
+                            .place(place, frame)
+                            .and_then(|p| p.captured().map_err(|kind| trap(kind, span)))
+                            .map(Argument::Borrowed),
+                        _ => self.expr(value, frame).map(Argument::Owned),
+                    };
+                    match argument {
+                        Ok(argument) => args.push(argument),
+                        Err(signal) => {
+                            if matches!(&signal,Signal::Trap(t) if t.kind==TrapKind::DoublePanic) {
+                                return Err(signal);
+                            }
+                            let mut pending = match &signal {
+                                Signal::Trap(t) => Some(t.clone()),
+                                _ => None,
+                            };
+                            for (argument, expression) in
+                                args.into_iter().zip(&arguments[..index]).rev()
+                            {
+                                if let Argument::Owned(value) = argument {
+                                    self.drop_value(value, &expression.ty, &mut pending, span)
+                                        .map_err(Signal::Trap)?;
+                                }
+                            }
+                            return Err(pending.map(Signal::Trap).unwrap_or(signal));
                         }
-                        _ => Argument::Owned(self.expr(value, frame)?),
-                    });
+                    }
                 }
-                self.call(*id, args, span)
+                if matches!(&expr.kind, ExprKind::New { .. }) {
+                    let name = &expr.ty.class_key();
+                    let object = memory::allocate_class(
+                        name,
+                        &self.program.classes[name],
+                        self.clock.clone(),
+                    );
+                    args.insert(
+                        0,
+                        Argument::Borrowed(memory::class_reference(
+                            object.clone(),
+                            self.clock.clone(),
+                        )),
+                    );
+                    match self.call(id, args, span) {
+                        Ok(_) => {
+                            let value = Value::Class(object);
+                            memory::complete_class(&value).map_err(|kind| trap(kind, span))?;
+                            Ok(value)
+                        }
+                        Err(Signal::Trap(error)) => {
+                            if error.kind == TrapKind::DoublePanic {
+                                return Err(Signal::Trap(error));
+                            }
+                            let mut pending = Some(error);
+                            self.drop_value(Value::Class(object), &expr.ty, &mut pending, span)
+                                .map_err(Signal::Trap)?;
+                            Err(Signal::Trap(pending.unwrap()))
+                        }
+                        Err(signal) => Err(signal),
+                    }
+                } else {
+                    self.call(id, args, span)
+                }
             }
             ExprKind::Assign {
                 place,
                 operator,
                 value,
             } => {
+                let ty = place.ty.clone();
                 let place = self.place(place, frame)?;
                 let old = if *operator != "=" {
                     Some(place.read().map_err(|kind| trap(kind, span))?)
@@ -305,41 +573,25 @@ impl Engine<'_> {
                 } else {
                     value
                 };
+                let mut pending = None;
+                self.drop_place(place.clone(), &ty, &mut pending, span)
+                    .map_err(Signal::Trap)?;
+                if pending.is_some() {
+                    self.drop_value(value, &ty, &mut pending, span)
+                        .map_err(Signal::Trap)?;
+                    return Err(Signal::Trap(pending.unwrap()));
+                }
                 place.write(value).map_err(|kind| trap(kind, span))?;
                 Ok(Value::Unit)
-            }
-            ExprKind::Index(value, index) => {
-                if is_place(value) {
-                    let place = self.place(expr, frame)?;
-                    return place.read().map_err(|kind| trap(kind, span));
-                }
-                let value = self.expr(value, frame)?;
-                let index = index_value(self.expr(index, frame)?, span)?;
-                let Value::Aggregate(values) = value else {
-                    return Err(trap(TrapKind::InvalidIr, span));
-                };
-                values
-                    .get(index)
-                    .cloned()
-                    .ok_or_else(|| trap(TrapKind::Bounds, span))
-            }
-            ExprKind::Field(value, index) => {
-                let Value::Aggregate(values) = self.expr(value, frame)? else {
-                    return Err(trap(TrapKind::InvalidIr, span));
-                };
-                values
-                    .get(*index)
-                    .cloned()
-                    .ok_or_else(|| trap(TrapKind::Bounds, span))
             }
             ExprKind::If { condition, yes, no } => {
                 let Value::Bool(condition) = self.expr(condition, frame)? else {
                     return Err(trap(TrapKind::InvalidIr, span));
                 };
                 if condition {
-                    self.block(yes, frame)
+                    self.block_mode(yes, frame, borrowed)
                 } else if let Some(no) = no {
-                    self.block(no, frame)
+                    self.block_mode(no, frame, borrowed)
                 } else {
                     Ok(Value::Unit)
                 }
@@ -365,6 +617,19 @@ impl Engine<'_> {
     }
     fn place(&mut self, expr: &Expr, frame: &mut Frame) -> Result<Place> {
         let place = match &expr.kind {
+            ExprKind::StoredView(storage) => {
+                let Value::View(value) = self.expr(storage, frame)? else {
+                    return Err(trap(TrapKind::InvalidIr, expr.span));
+                };
+                value.0
+            }
+            ExprKind::BorrowedCall { .. }
+            | ExprKind::CallIndirect(_, _, crate::hir::CallContract { view: Some(_), .. }) => {
+                let Value::View(value) = self.expr(expr, frame)? else {
+                    return Err(trap(TrapKind::InvalidIr, expr.span));
+                };
+                value.0
+            }
             ExprKind::View(id) => frame
                 .views
                 .get(id)
@@ -394,19 +659,22 @@ impl Engine<'_> {
                     .push(crate::mir::Projection::Field(*index));
                 place
             }
-            _ => return Err(trap(TrapKind::InvalidIr, expr.span)),
+            _ => {
+                let value = self.expr(expr, frame)?;
+                let slot = memory::typed_slot(expr.ty.clone(), self.clock.clone());
+                let place = Place {
+                    slot: slot.clone(),
+                    projections: vec![],
+                };
+                place.write(value).map_err(|kind| trap(kind, expr.span))?;
+                frame.temporary_places.push(slot);
+                place
+            }
         };
+        let place = place.normalized().map_err(|kind| trap(kind, expr.span))?;
         // Check bounds before evaluating the RHS; each index is evaluated once.
         let _ = place.read().map_err(|kind| trap(kind, expr.span))?;
         Ok(place)
-    }
-}
-
-fn is_place(expr: &Expr) -> bool {
-    match &expr.kind {
-        ExprKind::Local(_) | ExprKind::View(_) => true,
-        ExprKind::Index(base, _) | ExprKind::Field(base, _) => is_place(base),
-        _ => false,
     }
 }
 
