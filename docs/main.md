@@ -1,5 +1,10 @@
 # Nether Language Specification Draft v0.1
 
+**Приоритет модели памяти:** [Nether Memory Model от 2026-10-21](core-memory-managment.md)
+задаёт основополагающие O/R/W, non-Copy aliasing, ownership transfer и weak.
+Противоречащие ей memory-правила и примеры ниже относятся к предыдущей модели
+и требуют миграции; актуальный синтаксис сохраняется в совместимой части.
+
 Nether компилируется в Rust source, затем обычным rustc в native code. Прямой LLVM backend не используется. Собственная модель памяти сохраняется; внутренний проверенный unsafe разрешён. Цель производительности — эквивалентный вручную написанный Rust при тех же storage/dispatch/cleanup contracts; проверка выполняется benchmarks. [Контракт backend](0.1/rust-backend.md).
 
 ## 0. Назначение

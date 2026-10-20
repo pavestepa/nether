@@ -4,8 +4,13 @@ Nether компилируется в Rust. Собственные frontend, type
 сохраняют модель памяти языка; Rust backend генерирует source, который собирает
 обычный `rustc`. Прямого LLVM backend и зависимости от Clang больше нет.
 
+[Модель памяти NMM](docs/core-memory-managment.md) ·
 [Новая концепция](docs/0.1/rust-backend.md) · [Спецификация](docs/main.md) ·
 [План MVP](docs/0.1/mvp_plan.md) · [Roadmap](docs/0.1/roadmap.md) · [Состояние реализации](docs/0.1/status.md).
+
+NMM от 2026-10-21 — основополагающий контракт памяти с приоритетом над прежними
+правилами. Описанная ниже реализация ещё требует перехода на новую модель;
+план перехода и различия закреплены в документе NMM.
 
 Работают значения, generics, inline aggregates, local views, owned/borrowed entries,
 struct methods, function values с owned/borrowed-сигнатурами (включая non-Copy) и source destructors с
