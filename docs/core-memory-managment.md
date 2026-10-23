@@ -1338,6 +1338,10 @@ Owned значения, нужные после suspension, принадлежа
 Cancellation очищает initialized state и guards ровно один раз. Borrowed
 task не переживает владельца; detached task получает необходимые O.
 
+Модель асинхронности (stackless-задачи, вывод эффекта `MaySuspend`, отмена
+как drop состояния) зафиксирована в [async-await-runtime.md](async-await-runtime.md);
+этот раздел задаёт её memory-инварианты.
+
 Выбор Tokio или другого runtime — backend/library решение. NMM не обещает
 совпадение производительности с Rust и не делегирует ownership runtime.
 До реализации source async эти требования проверяются на symbolic MIR.
@@ -1907,7 +1911,7 @@ C0–C9 roadmap.
 | M1 | Effects, results, generics, modules, indirect calls и recursive fixed point; non-escaping замыкания (Copy/R/W captures) | Контракты не стираются на границах; нет R → W обходов; N35–N36, N41 |
 | M2 | Static aggregate/storage modes, invalidation, construction/replacement/panic; O captures и escaping замыкания | Differential results/drop traces; exactly-once cleanup; N37–N39, N42 |
 | M3 | Acyclic ownership, weak metadata/guards и destructor dependencies | Weak failure/reuse/unknown-origin tests; без strong ARC обычных objects |
-| M4 | Channel transfer, async state и cancellation; замыкания через каналы/`spawn`, weak captures (N40) | Проверены commit/failure/escape paths и изоляция |
+| M4 | Channel transfer, async state и cancellation (детали и этапы S0–S4 — [async-await-runtime.md](async-await-runtime.md)); замыкания через каналы/`spawn`, weak captures (N40) | Проверены commit/failure/escape paths и изоляция |
 | M5 | MIR verifier coverage, backend audit и performance acceptance | Корректность при O0/O3, опубликованные измерения и известные ограничения |
 
 ### 27.2. Детали, которые нельзя объявлять уже утверждёнными
