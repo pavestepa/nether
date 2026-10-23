@@ -1,0 +1,17 @@
+[package]
+name = "provenance"
+version = "0.0.1"
+edition = "2021"
+publish = false
+description = "Proof of work: joint inference of function contracts and access provenance (NMM)"
+
+# Самостоятельный пакет: не входит в workspace компилятора.
+[workspace]
+
+[lib]
+name = "provenance"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pow"
+path = "src/bin/pow.rs"

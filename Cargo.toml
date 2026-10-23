@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["compiler/semantics", "compiler/frontend", "compiler/core", "cli", "runtime"]
+exclude = ["proof-of-work"]
 
 [workspace.package]
 version = "0.1.0"
