@@ -171,8 +171,8 @@ fn local_storage_modes_are_inferred_before_imported_generic_calls() {
 fn enum_refinement_survives_imported_storage_specialization() {
     let files = Fixture::new(&[
         ("api.nr", "export {R, E, clear} from \"./storage\""),
-        ("storage.nr", "struct R {value:i32;destructor {}} enum E {Item(R),Empty} fn clear(e:E):i32 {var current=e;current=E.Empty;return match current {E.Item(x)=>x.value,E.Empty=>3}}"),
-        ("main.nr", "import {R, E, clear} from \"./api\"\nfn main():i32 {let a=R {value:7};let ref v=a;return clear(E.Item(v))}"),
+        ("storage.nr", "struct R {value:i32;destructor {}} enum E {Item(R),Empty} fn clear():i32 {let a=R {value:7};let ref v=a;var current=E.Item(v);current=E.Empty;return match current {E.Item(x)=>x.value,E.Empty=>3}}"),
+        ("main.nr", "import {R, E, clear} from \"./api\"\nfn main():i32 {return clear()}"),
     ]);
     assert_eq!(files.code(), 3);
 }
@@ -202,7 +202,7 @@ fn borrowed_aggregate_contracts_survive_generic_imports_and_reexports() {
     let files = Fixture::new(&[
         ("api.nr", "export {Holder, wrap, get} from \"./storage\""),
         ("storage.nr", "struct Holder<T> {value:T} fn wrap<T>(x:T):Holder<T> {return Holder<T> {value:x}} fn get<T>(x:Holder<T>):T {return x.value}"),
-        ("main.nr", "import {Holder, wrap, get} from \"./api\"\nstruct R {value:i32;destructor {}} fn main():i32 {let a=R {value:7};let h=wrap(a);let result=get(h);return a.value+result.value}"),
+        ("main.nr", "import {Holder, wrap, get} from \"./api\"\nstruct R {value:i32;destructor {}} fn main():i32 {let a=R {value:7};let ref va=a;let h=wrap(va);let result=get(h);return a.value+result.value}"),
     ]);
     assert_eq!(files.code(), 14);
     fs::write(files.0.join("main.nr"), "import {Holder, wrap, get} from \"./api\"\nstruct R {value:i32;destructor {}} fn main():i32 {var a=R {value:7};let ref v=a;let h=wrap(v);let result=get(h);a=R {value:2};return result.value}").unwrap();

@@ -57,7 +57,7 @@ fn class_copy_and_view_contracts_are_checked() {
         "class C {value:i32;constructor(n:i32) {value=n}} fn main():() {var a=new C(1);let ref var v=a;*v=new C(2)}",
         "class C {value:i32;constructor(n:i32) {value=n};fn bad(this):() {value=2}}",
         "class C {value:i32;constructor(n:i32) {value=n}} fn main():i32 {var a=new C(1);let ref v=a;a=new C(2);return v.value}",
-        "struct R {value:i32} class C {r:R;constructor() {r=R {value:1}};destructor {}} fn main():i32 {let c=new C();let r=c.r;return r.value}",
+        "struct R {value:i32} struct W {r:R} class C {r:R;constructor() {r=R {value:1}};destructor {}} fn main():i32 {let c=new C();let w=W {r:c.r};return w.r.value}",
         "class R {} #[Copy] class C {r:R}",
         "struct R {value:i32} fn main():() {let r=new R()}",
         "class C {} fn main():() {let a=new C();let x:i32=a==a}",

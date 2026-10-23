@@ -70,8 +70,21 @@ impl Checker<'_> {
             }) => Some((parameters, contract)),
             _ => None,
         };
+        // The entry's inferred storage modes (for example a borrowed parameter
+        // whose body stores views) are part of its physical parameter types.
+        let inferred = {
+            let mono = self.mono.borrow();
+            mono.bodies
+                .get(&signature.id)
+                .and_then(|d| {
+                    mono.result_contracts
+                        .get(&entries::result_key(d, &signature))
+                })
+                .filter(|info| info.complete)
+                .map(|info| info.parameters.clone())
+        };
         let parameters = wanted.map_or_else(
-            || signature.parameters.clone(),
+            || inferred.unwrap_or_else(|| signature.parameters.clone()),
             |(p, _)| p.iter().map(|(_, ty)| ty.clone()).collect(),
         );
         let modes = wanted.map_or_else(|| signature.modes.clone(), |(_, c)| c.modes.clone());
@@ -125,6 +138,7 @@ impl Checker<'_> {
         result
     }
     fn pointer_from_call(&self, call: h::Expr, span: Span) -> Result<h::Expr> {
+        let (_, _, call) = split_temporaries(call);
         let id = match &call.kind {
             h::ExprKind::Call(id, _) => *id,
             h::ExprKind::BorrowedCall { function, .. }
@@ -299,6 +313,8 @@ impl Checker<'_> {
         }
         let mut call_contract = h::CallContract::default();
         let mut result = (**result).clone();
+        // Temporaries kept alive for borrowed parameters of the selected entry.
+        let mut temporaries = (Vec::new(), Vec::new());
         if let Some(contract) = contract {
             let mut selected_type = None;
             let original_values = values.clone();
@@ -334,6 +350,8 @@ impl Checker<'_> {
                 let h::ExprKind::Value(Value::Function(id)) = pointer.kind else {
                     unreachable!()
                 };
+                let (prelude, storage, call) = split_temporaries(call);
+                temporaries = (prelude, storage);
                 call_contract.targets.push(id);
                 if let Some(old) = selected_type {
                     selected_type = Some(storage::union(&old, &pointer.ty, span)?)
@@ -368,14 +386,73 @@ impl Checker<'_> {
                 }
             }
         } else {
-            for (value, (_, ty)) in values.iter().zip(parameters) {
+            // A pointer type without a known entry uses the default ABI: non-Copy
+            // parameters are borrowed (NMM §11), Copy values are passed by value.
+            for (value, (mutable, ty)) in values.iter_mut().zip(parameters) {
+                if !ty.copyable() {
+                    let access = if *mutable {
+                        crate::mir::loans::Access::Mutable
+                    } else {
+                        crate::mir::loans::Access::Readonly
+                    };
+                    self.borrow_argument(value, access, &mut temporaries.0, &mut temporaries.1)?;
+                }
                 storage::same_mode(ty, &value.ty, value.span)?;
             }
         }
-        Ok(Some(h::Expr {
+        let call = h::Expr {
             kind: h::ExprKind::CallIndirect(Box::new(callee), values, call_contract),
             ty: result,
             span,
+        };
+        let (mut prelude, storage) = temporaries;
+        if prelude.is_empty() {
+            return Ok(Some(call));
+        }
+        prelude.push(h::Statement::Evaluate(call.clone()));
+        Ok(Some(h::Expr {
+            ty: call.ty.clone(),
+            kind: h::ExprKind::Block(h::Block {
+                construction: vec![],
+                storage,
+                statements: prelude,
+                result: call.ty,
+                diverges: false,
+                span,
+            }),
+            span,
         }))
+    }
+}
+
+/// A call whose borrowed arguments needed temporaries is wrapped in a block
+/// `{ tmp = value; call }`; return the prelude, its storage and the bare call.
+fn split_temporaries(call: h::Expr) -> (Vec<h::Statement>, Vec<usize>, h::Expr) {
+    match call.kind {
+        h::ExprKind::Block(mut block) if block.construction.is_empty() => {
+            match block.statements.pop() {
+                Some(h::Statement::Evaluate(inner)) => (block.statements, block.storage, inner),
+                Some(last) => {
+                    block.statements.push(last);
+                    (
+                        vec![],
+                        vec![],
+                        h::Expr {
+                            kind: h::ExprKind::Block(block),
+                            ..call
+                        },
+                    )
+                }
+                None => (
+                    vec![],
+                    vec![],
+                    h::Expr {
+                        kind: h::ExprKind::Block(block),
+                        ..call
+                    },
+                ),
+            }
+        }
+        _ => (vec![], vec![], call),
     }
 }

@@ -25,6 +25,48 @@ pub(super) fn source_key(declaration: &a::Function, signature: &Signature) -> St
     )
 }
 impl Checker<'_> {
+    pub(super) fn consuming_parameter(&self, declaration: &a::Function, index: usize) -> bool {
+        let mono = self.mono.borrow();
+        let table = mono.consuming.borrow();
+        table
+            .get(consume::base_name(&declaration.name))
+            .is_some_and(|flags| flags.get(index) == Some(&true))
+    }
+    /// Pass `argument` as a view of its place; a value without a place gets a
+    /// temporary that lives for the whole call.
+    pub(super) fn borrow_argument(
+        &mut self,
+        argument: &mut h::Expr,
+        access: Access,
+        prelude: &mut Vec<h::Statement>,
+        storage: &mut Vec<usize>,
+    ) -> Result<()> {
+        if !views::place(argument) {
+            let id = self.locals.len();
+            self.locals.push(h::Local {
+                view: None,
+                name: "<receiver temporary>".into(),
+                ty: argument.ty.clone(),
+                mutable: true,
+                span: argument.span,
+            });
+            prelude.push(h::Statement::Initialize(id, argument.clone()));
+            storage.push(id);
+            argument.kind = h::ExprKind::Local(id);
+        }
+        if access == Access::Mutable {
+            self.mutable_place(argument)?;
+        }
+        *argument = h::Expr {
+            ty: argument.ty.clone(),
+            span: argument.span,
+            kind: h::ExprKind::ArgumentView {
+                place: Box::new(argument.clone()),
+                access,
+            },
+        };
+        Ok(())
+    }
     pub(super) fn contextual_result(
         &mut self,
         mut value: h::Expr,
@@ -107,41 +149,31 @@ impl Checker<'_> {
         let mut storage = Vec::new();
         if let Some(declaration) = &declaration {
             for (index, (argument, original)) in arguments.iter_mut().zip(source).enumerate() {
-                if modes[index].is_some()
-                    || (!argument.ty.copyable()
-                        && views::place(argument)
-                        && (views::view_root(argument) || self.call_view_needed(original)))
+                // NMM §11: a borrowed parameter takes a view of the caller's place
+                // (or of a temporary kept alive for the call). Owned entries are
+                // declared only for parameters the body can consume; they take
+                // ownership from an owner or a fresh value, and keep a view entry
+                // for an alias, which cannot supply an owner token.
+                let _ = original;
+                // An owner (or fresh value) passed to a consuming parameter hands
+                // over its token: select the owned entry and pass by value.
+                if forced.is_none()
+                    && modes[index].is_some()
+                    && !argument.ty.copyable()
+                    && !views::view_root(argument)
+                    && self.consuming_parameter(declaration, index)
                 {
+                    modes[index] = None;
+                    continue;
+                }
+                if modes[index].is_some() {
                     let access = if declaration.parameters[index].mutable {
                         Access::Mutable
                     } else {
                         Access::Readonly
                     };
-                    if !views::place(argument) {
-                        let id = self.locals.len();
-                        self.locals.push(h::Local {
-                            view: None,
-                            name: "<receiver temporary>".into(),
-                            ty: argument.ty.clone(),
-                            mutable: true,
-                            span: argument.span,
-                        });
-                        prelude.push(h::Statement::Initialize(id, argument.clone()));
-                        storage.push(id);
-                        argument.kind = h::ExprKind::Local(id);
-                    }
-                    if access == Access::Mutable {
-                        self.mutable_place(argument)?;
-                    }
                     modes[index] = Some(access);
-                    *argument = h::Expr {
-                        ty: argument.ty.clone(),
-                        span: argument.span,
-                        kind: h::ExprKind::ArgumentView {
-                            place: Box::new(argument.clone()),
-                            access,
-                        },
-                    };
+                    self.borrow_argument(argument, access, &mut prelude, &mut storage)?;
                 }
             }
         }
@@ -179,7 +211,10 @@ impl Checker<'_> {
                 .get(&selected.id)
                 .and_then(|d| mono.result_contracts.get(&result_key(d, &selected)))
                 .cloned();
-            if known.as_ref().is_none_or(|info| !info.complete) && !selected.result.copyable() {
+            if known.as_ref().is_none_or(|info| !info.complete)
+                && (!selected.result.copyable()
+                    || selected.parameters.iter().any(|p| !p.copyable()))
+            {
                 mono.pending_results.insert(selected.id);
             }
             known

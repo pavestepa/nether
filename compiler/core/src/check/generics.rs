@@ -4,6 +4,7 @@ use substitute::Substitution;
 #[derive(Clone, Default)]
 pub(super) struct Monomorphization {
     pub result_contracts: ReturnContracts,
+    pub consuming: Consuming,
     pub entry_keys: BTreeMap<usize, String>,
     pub result_requests: BTreeMap<String, Type>,
     pub pending_results: std::collections::BTreeSet<usize>,
@@ -249,9 +250,17 @@ impl Checker<'_> {
                     })
                     .collect::<Result<Vec<_>>>()?;
                 let result = resolve_type_with(&declaration.result, self.constants, self.nominals)?;
+                // Audit generic bodies through the owned entry of consuming
+                // parameters: the checks must hold for an owner caller.
+                let mut audit_modes = methods::parameter_modes(&declaration, &parameters);
+                for (index, mode) in audit_modes.iter_mut().enumerate() {
+                    if self.consuming_parameter(&declaration, index) {
+                        *mode = None;
+                    }
+                }
                 self.mono.borrow_mut().audits.push((
                     Signature {
-                        modes: methods::receiver_modes(&declaration),
+                        modes: audit_modes,
                         id: 0,
                         parameters,
                         result,
@@ -288,7 +297,7 @@ impl Checker<'_> {
             mono.next_id += 1;
             function.name = format!("{name}$g{id}");
             let signature = Signature {
-                modes: methods::receiver_modes(&function),
+                modes: methods::parameter_modes(&function, &parameters),
                 id,
                 parameters,
                 result,

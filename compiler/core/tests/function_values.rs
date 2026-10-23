@@ -6,7 +6,7 @@ use nether_semantics::OverflowChecks;
 fn function_values_use_fixed_entries_and_propagate_panics() {
     for (source, expected) in [
         ("struct R {value:i32;destructor {}} fn take(r:R):i32 {return r.value} fn main():i32 {let f=take;return f(R {value:8})}",Some(8)),
-        ("struct R {value:i32;destructor {}} fn id<T>(x:T):T {return x} fn apply<T>(f:(T)=>T,x:T):T {return f(x)} fn main():i32 {let f:(R)=>R=id;let r=apply(f,R {value:9});return r.value}",Some(9)),
+        ("struct R {value:i32;destructor {}} fn id<T>(x:T):T {return x} fn apply<T>(f:(T)=>T,x:T):T {return f(x)} fn main():i32 {let f:(R)=>R=id;let t=R {value:9};let r=apply(f,t);return r.value}",Some(9)),
         ("class C {value:i32;constructor(n:i32) {value=n}} fn id(x:C):C {return x} fn main():i32 {let f:(C)=>C=id;let a=new C(7);let b=f(a);return b.value}",Some(7)),
 
         ("fn identity<T>(x:T):T {return x} fn main():i32 {let f:(i32)=>i32=identity;return f(9)}",Some(9)),

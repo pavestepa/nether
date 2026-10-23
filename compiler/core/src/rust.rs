@@ -346,7 +346,11 @@ impl Emitter {
                     .iter()
                     .enumerate()
                     .map(|(i, (_, ty))| {
-                        if contract.as_ref().is_some_and(|c| c.modes[i].is_some()) {
+                        // Without a known entry, non-Copy parameters are borrowed.
+                        if contract
+                            .as_ref()
+                            .map_or(!ty.copyable(), |c| c.modes[i].is_some())
+                        {
                             self.borrow_ty(ty)
                         } else {
                             self.ty(ty)

@@ -132,9 +132,10 @@ fn generated_borrowed_results_run_at_both_optimization_levels() {
 
 #[test]
 fn escape_and_readonly_errors_name_the_origin() {
-    let errors =
-        checked("struct R {value:i32} fn bad(x:R):R {let ref v=x;return v} fn main():() {}")
-            .unwrap_err();
+    let errors = checked(
+        "struct R {value:i32} fn bad():R {let x=R {value:1};let ref v=x;return v} fn main():() {}",
+    )
+    .unwrap_err();
     let error = errors.iter().find(|e| e.code == "E0395").unwrap();
     assert!(
         error

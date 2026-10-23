@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 mod classes;
 mod classes_init;
 mod constructors;
+mod consume;
 mod entries;
 mod enums;
 mod function_values;
@@ -25,6 +26,8 @@ mod uses;
 mod views;
 
 type Result<T> = std::result::Result<T, Diagnostic>;
+/// Parameters inferred as consuming, by declaration name (without entry suffix).
+type Consuming = std::rc::Rc<std::cell::RefCell<BTreeMap<String, Vec<bool>>>>;
 #[derive(Clone)]
 struct Signature {
     modes: Vec<Option<crate::mir::loans::Access>>,
@@ -51,8 +54,9 @@ enum Pass {
 pub fn check(module: &a::Module) -> std::result::Result<h::Program, Vec<Diagnostic>> {
     inheritance::validate(module).map_err(|e| vec![e])?;
     let mut contracts = ReturnContracts::new();
+    let consuming = Consuming::default();
     for _ in 0..64 {
-        match check_pass(module, &contracts)? {
+        match check_pass(module, &contracts, &consuming)? {
             Pass::Ready(program) => return Ok(program),
             Pass::Retry(next) => contracts = next,
         }
@@ -70,7 +74,9 @@ pub fn check(module: &a::Module) -> std::result::Result<h::Program, Vec<Diagnost
 fn check_pass(
     module: &a::Module,
     contracts: &ReturnContracts,
+    consuming: &Consuming,
 ) -> std::result::Result<Pass, Vec<Diagnostic>> {
+    let consuming_before = consuming.borrow().clone();
     let class_module = classes::prepare(module).map_err(|e| vec![e])?;
     let lifecycle_module = lifecycle::prepare(&class_module).map_err(|e| vec![e])?;
     let prepared = methods::collect(&lifecycle_module);
@@ -153,7 +159,7 @@ fn check_pass(
                 parameters.push(resolve_type_with(ty, &constants, &nominals)?);
             }
             Ok(Signature {
-                modes: methods::receiver_modes(function),
+                modes: methods::parameter_modes(function, &parameters),
                 id: declarations.len(),
                 parameters,
                 result: resolve_type_with(&function.result, &constants, &nominals)?,
@@ -186,6 +192,7 @@ fn check_pass(
         templates,
         result_contracts: contracts.clone(),
         next_id: declarations.len(),
+        consuming: consuming.clone(),
         ..Default::default()
     });
     let mut work: std::collections::VecDeque<_> = declarations
@@ -234,6 +241,11 @@ fn check_pass(
         }
         work.extend(deferred.into_iter().map(|(s, d, _)| (s, d)));
     }
+    // Newly inferred consuming parameters change entry modes: errors of this
+    // pass may be artifacts of the provisional borrowed entries.
+    if *consuming.borrow() != consuming_before {
+        return Ok(Pass::Retry(contracts.clone()));
+    }
     let functions = functions.into_values().collect::<Vec<_>>();
     if !mono.borrow().result_requests.is_empty() {
         let mut next = contracts.clone();
@@ -273,6 +285,7 @@ fn check_pass(
         let audit_mono = std::cell::RefCell::new(generics::Monomorphization {
             templates: mono.borrow().templates.clone(),
             result_contracts: contracts.clone(),
+            consuming: consuming.clone(),
             bodies: mono.borrow().bodies.clone(),
             next_id: mono.borrow().next_id,
             auditing: true,
@@ -602,13 +615,10 @@ impl Checker<'_> {
                             self.same_storage_mode(hint, &value.ty, value.span)?;
                         }
                     }
-                    if !value.ty.copyable()
-                        && (views::view_root(&value)
-                            || self.ownership_view_needed(match &statement.kind {
-                                a::StatementKind::Binding { value, .. } => value,
-                                _ => unreachable!(),
-                            }))
-                    {
+                    // NMM §7.1: a binding of an existing non-Copy place is an alias
+                    // (R, or W for `var`); it never becomes a move by absence of
+                    // later uses. Ownership transfers only in owning contexts.
+                    if !value.ty.copyable() && views::place(&value) {
                         let a::StatementKind::Binding {
                             value: source,
                             ty: annotation,
@@ -1772,6 +1782,8 @@ fn check_declaration_modes(
     let result = (|| {
         let mut parameters = Vec::new();
         let mut prelude = Vec::new();
+        // A plain parameter name is a view local bound to the parameter itself.
+        let mut parameter_names = BTreeMap::new();
         for (parameter_index, (parameter, ty)) in declaration
             .parameters
             .iter()
@@ -1836,6 +1848,9 @@ fn check_declaration_modes(
                     local.mutable = true;
                 }
             }
+            if checker.locals.len() == first + 1 {
+                parameter_names.insert(first, id);
+            }
         }
         let source_body = declaration
             .body
@@ -1865,7 +1880,7 @@ fn check_declaration_modes(
             .actual_result
             .clone()
             .unwrap_or_else(|| signature.result.clone());
-        Ok(h::Function {
+        let function = h::Function {
             storage_writes: Vec::new(),
             result_view: None,
             name: declaration.name.clone(),
@@ -1874,7 +1889,9 @@ fn check_declaration_modes(
             result,
             body,
             span: declaration.span,
-        })
+        };
+        consume::record(&function, declaration, mono, &parameter_names)?;
+        Ok(function)
     })();
     (result, checker.storage_requests)
 }

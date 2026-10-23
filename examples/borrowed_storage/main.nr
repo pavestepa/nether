@@ -26,7 +26,8 @@ fn main(): i32 {
     let holder = wrap(view)
     let array = {view, view}
     let tuple = (view, Resource {value: 3})
-    let choice = relay(Choice.Some(view))
+    let wrapped = Choice.Some(view)
+    let choice = relay(wrapped)
     let extracted = match choice {
         Choice.Some(value) => value.value,
         Choice.None => 0,

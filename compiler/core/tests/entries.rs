@@ -38,7 +38,7 @@ fn borrowed_entries_preserve_uniqueness_and_readonly_access() {
 
 #[test]
 fn consuming_calls_can_be_followed_by_definite_reinitialization() {
-    let prefix = "struct Cell {value:i32} fn take(x:Cell):i32 {var owned=x;owned.value+=1;return owned.value} ";
+    let prefix = "struct Cell {value:i32} struct Hold {cell:Cell} fn take(x:Cell):i32 {let held=Hold {cell:x};return held.cell.value+1} ";
     for (body, expected) in [
         ("fn main():i32 {var x=Cell {value:1};let n=take(x);x=Cell {value:4};return n+x.value}",6),
         ("fn main():i32 {var x=Cell {value:1};let n=take(x);if true {x=Cell {value:4}} else {x=Cell {value:5}};return n+x.value}",6),
@@ -56,7 +56,7 @@ fn consuming_calls_can_be_followed_by_definite_reinitialization() {
     }
     for body in [
         "fn main():i32 {var x=Cell {value:1};var n=0;while n<6 {n+=take(x)};return n}",
-        "fn main():i32 {var x=Cell {value:1};let n=take(x);if true {x=Cell {value:4}};return n+x.value}",
+        "fn main():i32 {var x=Cell {value:1};let n=take(x);if n>100 {x=Cell {value:4}};return n+x.value}",
         "fn main():i32 {var x=Cell {value:1};return take(x)+x.value}",
     ] {
         let source=format!("{prefix}{body}");

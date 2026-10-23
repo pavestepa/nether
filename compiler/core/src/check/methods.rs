@@ -108,12 +108,20 @@ pub(super) fn resolved_static_call(
     }
 }
 
-pub(super) fn receiver_modes(function: &a::Function) -> Vec<Option<crate::mir::loans::Access>> {
+/// NMM §11: a non-Copy parameter is a borrow of the caller's value (R, or W for
+/// `var`); receivers always borrow. Copy values are passed by value. Owned
+/// entries of consuming parameters are selected per call (see `entries`).
+pub(super) fn parameter_modes(
+    function: &a::Function,
+    types: &[Type],
+) -> Vec<Option<crate::mir::loans::Access>> {
     function
         .parameters
         .iter()
-        .map(|p| {
-            p.receiver.then_some(if p.mutable {
+        .enumerate()
+        .map(|(index, p)| {
+            let borrowed = p.receiver || types.get(index).is_some_and(|ty| !ty.copyable());
+            borrowed.then_some(if p.mutable {
                 crate::mir::loans::Access::Mutable
             } else {
                 crate::mir::loans::Access::Readonly

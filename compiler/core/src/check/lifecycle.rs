@@ -261,7 +261,7 @@ mod tests {
                 .iter()
                 .any(|e| e.code == "E0390"));
         }
-        let source="struct Cell {value:i32} struct R {cell:Cell;destructor {}} fn main():i32 {let r=R {cell:Cell {value:1}};let cell=r.cell;return cell.value}";
+        let source="struct Cell {value:i32} struct R {cell:Cell;destructor {}} struct H {c:Cell} fn main():i32 {let r=R {cell:Cell {value:1}};let h=H {c:r.cell};return h.c.value}";
         assert!(analyzed(source)
             .unwrap_err()
             .iter()
@@ -386,9 +386,9 @@ mod tests {
     fn generated_rust_executes_resource_cleanup() {
         use std::{fs, process::Command};
         let cases = [
-            "struct R {value:i32;destructor {}} fn id<T>(x:T):T {return x} fn apply<T>(f:(T)=>T,x:T):T {return f(x)} fn main():i32 {let f:(R)=>R=id;let r=apply(f,R {value:9});return r.value}",
+            "struct R {value:i32;destructor {}} fn id<T>(x:T):T {return x} fn apply<T>(f:(T)=>T,x:T):T {return f(x)} fn main():i32 {let f:(R)=>R=id;let t=R {value:9};let r=apply(f,t);return r.value}",
             "class C {value:i32;constructor(n:i32) {value=n};destructor {}} fn relay(x:C):C {return x} fn main():i32 {let f:(C)=>C=relay;let a=new C(7);let b=f(a);return b.value}",
-            "struct R {value:i32;destructor {}} fn fail(a:R,b:R):R {let n=1/0;return a} fn main():i32 {let f=fail;let a=f(R {value:1},R {value:2});return a.value}",
+            "struct R {value:i32;destructor {}} fn fail(a:R,b:R):R {let n=1/0;return a} fn main():i32 {let f=fail;let t1=R {value:1};let t2=R {value:2};let a=f(t1,t2);return a.value}",
             "struct R {value:i32;destructor {}} fn take(a:R,b:R):i32 {return a.value+b.value} fn bad():R {let n=1/0;return R {value:8}} fn main():i32 {let f=take;return f(R {value:1},bad())}",
 
             "class C {value:i32;constructor(n:i32) {value=n};destructor {}} fn id(x:C):C {return x} fn relay(x:C):C {return id(x)} fn main():i32 {let a=new C(7);let b=relay(a);return a.value+b.value}",
@@ -415,7 +415,7 @@ mod tests {
             "#[Copy] class C {value:i32;constructor(n:i32) {value=n}} fn id(x:C):C {return x} fn main():i32 {let a={new C(1),new C(2)};var b=a;b[0].value=7;let f:(C)=>C=id;var c=f(b[0]);c.value=9;return a[0].value*10+b[0].value+c.value}",
 
             "class C {value:i32;constructor(n:i32) {value=n};fn bump(var this):() {value+=1};destructor {value+=10}} fn main():i32 {var x=new C(3);x.bump();return x.value}",
-            "class C {value:i32;constructor(n:i32) {value=n};destructor {}} fn make(n:i32):C {return new C(n)} fn id(x:C):C {return x} fn main():i32 {var x=make(1);let y=id(x);x=make(3);return x.value+y.value}",
+            "class C {value:i32;constructor(n:i32) {value=n};destructor {}} fn make(n:i32):C {return new C(n)} fn id(x:C):C {return x} fn main():i32 {var x=make(1);let y=id(x);let n=y.value;x=make(3);return x.value+n}",
             "struct R {value:i32;destructor {}} class C {value:i32;a:R;b:R;constructor() {value=9;b=R {value:2};a=R {value:1};let fail=1/0};destructor {}} fn main():i32 {let outer=R {value:8};let x=new C();return 0}",
             "struct R {value:i32;destructor {}} class C {value:i32;a:R;b:R;constructor() {value=9;a=R {value:1};b=R {value:2}};destructor {a.value+=10}} fn main():i32 {let x=new C();return 0}",
             "class C {value:i32;constructor(n:i32) {value=n};destructor {}} fn main():i32 {var a=new C(1);let b=new C(2);a=new C(3);return a.value+b.value}",
@@ -440,7 +440,7 @@ mod tests {
             "struct R {value:i32;fn replace(var this):() {*this=R {value:3}};destructor {}} fn main():i32 {var a=R {value:1};let b=R {value:2};a.replace();return 0}",
             "struct R {value:i32;destructor {}} struct P {a:R;b:R;c:i32} fn main():i32 {let p=P {b:R {value:2},a:R {value:1},c:1/0};return 0}",
             "struct R {value:i32;destructor {}} fn main():i32 {var n=0;while n<3 {let x=R {value:n};n+=1;if n==2 {continue};if n==3 {break}};return 0}",
-            "struct R {value:i32;destructor {}} fn id(x:R):R {return x} fn main():i32 {let x=id(R {value:7});return 0}",
+            "struct R {value:i32;destructor {}} fn id(x:R):R {return x} fn main():i32 {let t=R {value:7};let x=id(t);return 0}",
             "struct R {value:i32;destructor {}} enum E {A(R,R),B} fn main():i32 {let x=E.A(R {value:1},R {value:2});let y={R {value:3},R {value:4}};return 0}",
             "struct R {value:i32;destructor {}} struct F {value:i32;destructor {let failure=1/value}} fn make():R {let fail=F {value:0};return R {value:7}} fn main():i32 {let x=make();return 0}",
             "struct R {value:i32;destructor {}} struct P {a:R;b:R} fn main():i32 {let p=P {a:R {value:1},b:R {value:2}};let x=p.a;return 0}",

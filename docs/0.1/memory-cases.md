@@ -2,6 +2,10 @@
 
 Архитектура: [Nether → Rust](rust-backend.md). Правила памяти сохраняются; прямой LLVM backend удалён.
 
+> **Заменено NMM.** Кейсы M01 (move по последнему использованию) и M05 (повышение
+> readonly) и все примеры с `var second = first` / consuming `var local = value`
+> описывают прежнюю модель. Актуальный oracle — [NMM](../core-memory-managment.md) §25–26.
+
 Это normative positive/negative cases, **не уже пройденные compiler tests**.
 Они задают oracle для этапов 2–8. Source checker, MIR interpreter и backend
 должны проверяться отдельно. Общая prelude для фрагментов:
