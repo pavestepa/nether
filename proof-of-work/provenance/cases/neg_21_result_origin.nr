@@ -11,6 +11,3 @@ fn bad(): i32 {
     return inspect(r)
 }
 
-$
-&
-^
