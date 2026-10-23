@@ -116,6 +116,7 @@ non-Copy значений, раздельные права владения, ч�
 | Owned result автоматически разрешает mutable binding | Для той же non-Copy цели учитывается access provenance; O не отмывает R в W |
 | Общая группа может решать ownership для циклического графа | Owning-рёбра ацикличны; region не легализует owning-cycle |
 | Weak сводится к проверке адреса или generation | Lookup должен обеспечить безопасный R-доступ на всё время использования результата |
+| Capturing closures вне профиля 0.1 ([main.md](main.md) §30, `E0104`) | Capturing closures входят в язык; захват выводится автоматически по §17 |
 | Вставленный план требует непосредственно генерировать LLVM IR | Проверки выполняются до Rust codegen; LLVM используется внутри rustc |
 
 ## 2. Краткая формулировка
@@ -483,7 +484,7 @@ O автоматически передаётся, когда это требу�
 1. Возврат локально принадлежащего объекта как owned result.
 2. Инициализация owning поля или owning элемента контейнера.
 3. Передача параметра в consuming entry.
-4. Захват в owning окружение, когда такие окружения поддержаны профилем.
+4. Захват O в окружение замыкания (§17.2).
 5. Успешная отправка transferable графа по каналу.
 6. Извлечение owned значения из поля/контейнера в новое owning место.
 
@@ -877,8 +878,8 @@ class Observer {
 на payload и не мешает последующему уничтожению User.
 
 В базовом профиле нет weak locals, weak параметров, weak struct/enum fields
-или weak элементов контейнера. Weak captures будущих замыканий требуют
-отдельного синтаксического расширения; semantic правила будут теми же.
+или weak элементов контейнера. Явный weak capture замыканий требует
+отдельного синтаксического расширения (§17.6); semantic правила будут теми же.
 
 `get()` возвращает readonly результат. Mutable Observer не выдаёт W к User.
 Weak не превращается в owner, не позволяет вызывать consuming API и не
@@ -1129,9 +1130,15 @@ Guard pattern только читает; consume/W начинается посл
 
 ## 17. Функциональные значения и замыкания
 
-### 17.1. Актуальный профиль
+### 17.1. Виды callable значений
 
-Доступны именованные функции, static function values и unbound methods:
+Функциональные значения бывают двух видов:
+
+1. **Static function** — именованная функция, unbound method или lambda без
+   captures. Runtime значение — один code pointer; окружения нет.
+2. **Capturing closure** — lambda, использующая локальные значения внешней
+   области. Значение состоит из кода и **окружения** (environment), которое
+   хранит captures.
 
 ```nether
 fn read_age(user: User): i32 {
@@ -1145,35 +1152,138 @@ fn example(): i32 {
 }
 ```
 
-Function pointer несёт выбранный compile-time entry contract; runtime значение
-может быть одним code pointer. Indirect call не стирает consumes, R/W,
-result origins и borrowed component dependencies.
+Захватывающее замыкание использует существующую форму lambda
+`(x) => expr` / `(var x) => { ... }`; отдельного синтаксиса captures нет.
+Capture выводится из тела автоматически, ключевое слово `move` не вводится.
 
-Актуальный профиль не утверждает синтаксис capturing lambda. Поэтому этот
-документ **не вводит лямбды своим примером** и не объявляет их реализованными.
-Явное состояние можно хранить в class/struct и передавать named function.
+```nether
+fn example(): i32 {
+    var counter = new Counter(0)
+    let base = 10
+    let add = (x: i32) => x + base          // base: Copy capture
+    let bump = () => { counter.increment() } // counter: W capture
+    bump()
+    bump()
+    return add(counter.read())               // 12
+}
+```
 
-### 17.2. Требования к будущим окружениям
+Индирект-вызов (function pointer или closure) не стирает consumes, R/W,
+origins результата и зависимости borrowed компонентов (§20.2). Выбранный
+callable contract фиксируется при компиляции вызова; runtime tag режима
+capture не используется.
 
-Вставленное ядро описывает автоматические captures R/W/O. Эти правила
-фиксируются как обязательный memory contract **если** поддержка замыканий
-вводится отдельным решением о синтаксисе/профиле:
+### 17.2. Окружение и виды захвата
 
-| Capture | Требование |
-| --- | --- |
-| R | Target жив до последнего использования окружения; запрещён конфликтующий W |
-| W | Unique borrow с приостановленным источником; окружение нельзя дублировать как независимое W |
-| O | Token передаётся окружению; оно отвечает за cleanup |
-| Weak | Не передаёт O; invocation выполняет проверенный lookup и обрабатывает отсутствие цели |
+Окружение — обычное owned значение с aggregate-правилами §12: у каждой captured
+позиции фиксированный static mode. Режим каждой captured переменной выводится
+по её использованию в теле (до fixed point §21.7) как **минимально достаточный**:
 
-Non-escaping окружение может заимствовать. Escaping окружение получает
-необходимые O либо доказывает достаточные внешние lifetimes. Хранение callback
-самим объектом и O capture этого объекта образует запрещённый owning-cycle.
-Weak capture не создаёт такого цикла.
+| Использование в теле | Capture | Требование |
+| --- | --- | --- |
+| Только чтение non-Copy | R | Target жив до последнего использования окружения; запрещён конфликтующий W |
+| Запись / вызов `var` метода / передача в `var` параметр | W | Unique borrow, источник приостановлен; источник должен давать W |
+| Передача в consuming sink (§9.1), возврат как owned | O | Token передаётся окружению; источник должен иметь ownership authority |
+| Copy значение | Copy | Независимая копия в момент создания замыкания |
 
-Автоматический вывод capture не получает права превратить R в W. Call effect
-должен различать чтение, изменение и потребление окружения; имена будущих
-callable traits и синтаксис capture пока не утверждаются.
+Правила:
+
+- Capture **не повышает права**: W capture из R источника — `NMM_READONLY_TO_WRITE`;
+  O capture через R/borrowed путь без token — `NMM_NO_OWNER_TOKEN`.
+- Capture O передаётся в момент **создания** замыкания (`TransferOwner`);
+  источник считается переданным по §16.1. Capture не происходит «лениво»
+  при вызове.
+- Capture R и W создают loans, живущие до последнего использования
+  замыкания и всех его копий/alias (§8.2), включая implicit cleanup read.
+- Captures упорядочены по первому упоминанию в теле. Этот порядок задаёт
+  порядок cleanup окружения (§15.3): owned captures завершаются в порядке
+  захвата; R/W captures и Copy ничего не уничтожают.
+- Capture поля `a.f` захватывает путь `a.f`, а не весь `a`, если disjointness
+  с остальными uses доказана (§8.3).
+
+### 17.3. Вид замыкания и эффекты вызова
+
+Из использования окружения в теле выводится вид замыкания:
+
+| Вид | Тело делает с окружением | Вызов требует | Повторные вызовы |
+| --- | --- | --- | --- |
+| `Read` | Только читает captures | R к замыканию | Сколько угодно |
+| `Write` | Изменяет W captures | W к замыканию (`var` binding/параметр) | Последовательно |
+| `Once` | Потребляет O capture | Передачу O замыкания | Один раз |
+
+Вид входит в callable contract и effects (§20.1) и не стирается через
+function type, generics, interface dispatch и переопределения. Вызов
+`Write`-замыкания через readonly путь — `NMM_READONLY_TO_WRITE`. Вызов `Once`
+потребляет само замыкание; последующий use — `NMM_USE_AFTER_TRANSFER`.
+
+Эффекты тела замыкания (`Read/Write/Consume` над captured origins,
+`MayPanic`, `MaySuspend`) становятся эффектами каждого call site. Тело
+замыкания анализируется как отдельный entry, но его captured origins
+символически связаны с окружением, а не с произвольными параметрами.
+
+### 17.4. Замыкание как значение
+
+- Замыкание — non-Copy значение с одним owner-token, подчиняется §6–§7:
+  `let g = f` создаёт R alias, `var g = f` требует W на `f`.
+- Замыкание, все captures которого Copy, не имеет деструктора и является Copy:
+  копирование создаёт независимое окружение.
+- Замыкание без captures эквивалентно static function и свободно преобразуется
+  к function type `(A) => B`.
+- Замыкание с captures передаётся в параметр функционального типа или generic
+  параметр по тем же правилам, что обычный non-Copy аргумент: borrowed R/W
+  entry или consuming entry, если callee сохраняет его в owning месте.
+  Преобразование к типу `(A) => B` не стирает вид замыкания и captures из
+  контракта; ABI представления (одиночный code pointer или пара code+env)
+  выбирается статически и должен совпадать у всех путей (§11.4).
+- Замыкание не может быть `weak` полем или weak элементом (§14.1).
+
+### 17.5. Escape и время жизни
+
+**Non-escaping** замыкание (вызывается в области и передаётся только в
+borrowing параметры) может держать R/W captures на локальные цели.
+
+**Escaping** замыкание (возвращается, сохраняется в поле/контейнер, передаётся
+в consuming sink, `spawn`, канал) обязано удовлетворять одному из условий для
+каждого capture:
+
+- capture — O, либо Copy;
+- capture — R/W на внешнюю цель с доказанным достаточным lifetime
+  (например, на `var`/R параметр, если escape не выходит за его область).
+
+Скрытого перевода captures в heap, клона или авто-O для «спасения» R/W
+capture компилятор не выполняет — это `NMM_CLOSURE_ESCAPE`.
+
+Запрещён owning-cycle: объект, который владеет замыканием (поле/элемент),
+не может быть O capture этого замыкания (§13). Для разрыва используется
+невладеющая связь: callback получает объект параметром, либо объект
+хранится в замыкании как weak, когда weak captures будут приняты (§17.6).
+
+### 17.6. Weak capture
+
+Weak capture не передаёт O и не удерживает R loan; вызов замыкания
+выполняет `get()` с guard по §14.3 и обязан обработать `None`. Weak
+остаётся модификатором class field (§14.1); синтаксис явного weak capture
+не утверждён. До его принятия сохранить связь без владения можно через
+class с `weak` полем, которое замыкание захватывает как обычный capture.
+
+### 17.7. Изоляция и async
+
+- Замыкание, отправляемое по каналу или в `spawn`, проверяется на
+  transferability (§18.2): все captures — O или Copy, без внешних
+  R/W/weak связей. Иначе — `NMM_TRANSFER_DOMAIN`.
+- Loan-capture, пересекающий `await`, требует доказанного lifetime
+  (§18.3); окружение, нужное после suspension, принадлежит task state.
+- Panic внутри тела замыкания проходит обычные cleanup/unwind правила §16;
+  `Once` замыкание, прерванное panic, очищает ещё не потреблённые captures
+  ровно один раз.
+
+### 17.8. Cleanup и backend
+
+Окружение очищается как обычный owned aggregate: в точке завершения
+owning lifetime замыкания. Недопустимо откладывать destructor O captures
+в closure/region ради оптимизации. Backend вправе инлайнить вызов и
+раскладывать окружение в регистры/стек при доказанном lifetime и
+идентичности; Rc/Arc/RefCell окружений и неявное клонирование запрещены (§23).
 
 ## 18. Изоляция, каналы и async
 
@@ -1301,6 +1411,7 @@ EntryContract {
 | `Consume(path)` | Передача O из места |
 | `StoreOwned(dst, src)` | Owning edge |
 | `StoreView(dst, origin)` | Сохранение descriptor и его lifetime |
+| `Capture(R/W/O, path)` | Захват пути в окружение замыкания |
 | `ReturnOwned/ReturnView` | Контракт результата |
 | `Invalidate(path)` | Завершение/перемещение target storage |
 | `WholeReplace(path)` | Замена целого target |
@@ -1489,6 +1600,7 @@ specialization. При widening теряется точность, а не бе�
 ```text
 CreateObject / InitializePlace
 BorrowRead / BorrowWrite / Reborrow
+MakeClosure(captures) / CallClosure / DropEnvironment
 EndLoan
 TransferOwner
 Read / Write / RebindDescriptor
@@ -1595,6 +1707,7 @@ runtime выбор режима owned/borrowed вместо фиксирован
 | `NMM_PARTIAL_INIT` | Чтение неинициализированной/переданной части |
 | `NMM_FINALIZING_REPLACE` | Whole replacement/resurrection завершаемого target |
 | `NMM_WEAK_GUARD_ESCAPE` | Weak result переживает guard или доказанный lifetime |
+| `NMM_CLOSURE_ESCAPE` | Escaping замыкание держит R/W capture без доказанного lifetime |
 | `NMM_TRANSFER_DOMAIN` | В сообщении остаются запрещённые внешние зависимости |
 | `NMM_EFFECT_MISMATCH` | Call/interface/metadata не соответствует effects |
 | `NMM_UNSUPPORTED` | Семантика определена, но ещё не реализована |
@@ -1711,6 +1824,14 @@ fn live_write(): () {
 | N32 | Readonly target через mutable оболочку | Не получает W |
 | N33 | Weak metadata OOM/slot exhaustion | Нет dangling handle, ABA и повторного cleanup |
 | N34 | Class Copy против ownership transfer | Разная identity при Copy; та же при transfer |
+| N35 | Замыкание с Copy / R / W captures, non-escaping | Pass; W capture приостанавливает источник до последнего использования замыкания |
+| N36 | W capture из readonly источника; вызов `Write`-замыкания через `let` | Compile-fail (`NMM_READONLY_TO_WRITE`) |
+| N37 | Возврат замыкания с R/W capture локальной цели | Compile-fail (`NMM_CLOSURE_ESCAPE`); с O capture — pass |
+| N38 | `Once` замыкание: повторный вызов; panic до потребления captures | Compile-fail на повторный вызов; captures очищены ровно один раз |
+| N39 | Объект хранит замыкание, захватывающее этот объект по O | Compile-fail (`NMM_OWNERSHIP_CYCLE`) |
+| N40 | Замыкание в канале/spawn с внешним R/W capture | Compile-fail (`NMM_TRANSFER_DOMAIN`); с O/Copy captures — pass |
+| N41 | Замыкание через function type, generic и indirect call | Тот же вид, effects и origins, что при прямом вызове |
+| N42 | Порядок cleanup O captures | Порядок первого упоминания; один destructor на capture |
 
 ### 25.4. Уровни тестирования
 
@@ -1760,6 +1881,7 @@ loan analysis, Rust backend, runtime и примеры предыдущей се
 | Storage | Сохранить static modes; согласовать access компонентов и mutation API |
 | Graphs | Проверять owning-cycle; не использовать groups как обход |
 | Weak | Реализовать metadata, lookup/guard и static conflict protocol |
+| Closures | Добавить вывод capture/вида замыкания, окружение как aggregate, callable contract; обновить [main.md](main.md) §29–30 и `E0104` профиля |
 | Concurrency | Добавить проверенный channel transfer и cancellation protocol |
 | Tests/docs | Перевести старые memory cases на oracle этого документа |
 
@@ -1782,10 +1904,10 @@ C0–C9 roadmap.
 | Этап | Объём | Условие завершения |
 | --- | --- | --- |
 | M0 | O/R/W, non-Copy aliases, readonly запреты, sequential reborrow, local transfer и deterministic drop | N01–N09 и базовые drop/branch cases согласованы в checker/MIR |
-| M1 | Effects, results, generics, modules, indirect calls и recursive fixed point | Контракты не стираются на границах; нет R → W обходов |
-| M2 | Static aggregate/storage modes, invalidation, construction/replacement/panic | Differential results/drop traces; exactly-once cleanup |
+| M1 | Effects, results, generics, modules, indirect calls и recursive fixed point; non-escaping замыкания (Copy/R/W captures) | Контракты не стираются на границах; нет R → W обходов; N35–N36, N41 |
+| M2 | Static aggregate/storage modes, invalidation, construction/replacement/panic; O captures и escaping замыкания | Differential results/drop traces; exactly-once cleanup; N37–N39, N42 |
 | M3 | Acyclic ownership, weak metadata/guards и destructor dependencies | Weak failure/reuse/unknown-origin tests; без strong ARC обычных objects |
-| M4 | Channel transfer, async state и cancellation; captures только при отдельном принятии профиля | Проверены commit/failure/escape paths и изоляция |
+| M4 | Channel transfer, async state и cancellation; замыкания через каналы/`spawn`, weak captures (N40) | Проверены commit/failure/escape paths и изоляция |
 | M5 | MIR verifier coverage, backend audit и performance acceptance | Корректность при O0/O3, опубликованные измерения и известные ограничения |
 
 ### 27.2. Детали, которые нельзя объявлять уже утверждёнными
@@ -1793,7 +1915,8 @@ C0–C9 roadmap.
 - Конкретный layout control block, registry, width generation и способ
   сопровождения weak handles/guards.
 - Конкретные числовые коды diagnostics и wire format новой metadata.
-- Точный синтаксис capturing closures/weak captures и сроки их появления.
+- Синтаксис явного weak capture и имена/поверхность callable типов (как вид замыкания `Read/Write/Once` виден в сигнатурах и function type).
+- Сроки обновления [main.md](main.md) §29–30, `E0104` и приёмочных тестов профиля.
 - Библиотечные сигнатуры каналов, send failure result и порядок cleanup очереди.
 - Поддержка transfer графа с внутренними weak связями между domains.
 - Полнота alias/escape solver и допустимая степень консерватизма.
