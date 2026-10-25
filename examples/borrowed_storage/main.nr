@@ -12,7 +12,8 @@ enum Choice {
     None,
 }
 
-fn wrap(value: Resource): Holder {
+fn wrap(source: Resource): Holder {
+    let value = source
     return Holder {value: value}
 }
 

@@ -32,7 +32,7 @@ impl Parser {
         if !private {
             self.eat_word("public");
         }
-        let kind = if self.word("fn") {
+        let kind = if self.word("fn") || self.word("unsafe") {
             ItemKind::Function(self.function(false, false, false)?)
         } else if self.word("struct") || self.word("class") {
             self.aggregate()?
@@ -147,7 +147,7 @@ impl Parser {
                 return Err(self.error("only extern C is supported"));
             }
             self.lines();
-            if self.word("fn") {
+            if self.word("fn") || self.word("unsafe") {
                 ItemKind::Function(self.function(false, false, true)?)
             } else {
                 self.expect("{")?;
@@ -229,11 +229,11 @@ impl Parser {
             } else {
                 MethodDispatch::Ordinary
             };
-            if dispatch != MethodDispatch::Ordinary && !self.word("fn") {
+            if dispatch != MethodDispatch::Ordinary && !self.word("fn") && !self.word("unsafe") {
                 return Err(self.error("virtual/override must precede a method declaration"));
             }
             self.unsupported()?;
-            let member = if self.word("fn") {
+            let member = if self.word("fn") || self.word("unsafe") {
                 Member::Method {
                     function: self.function(true, false, false)?,
                     private,
@@ -297,7 +297,9 @@ impl Parser {
         signature: bool,
         c_abi: bool,
     ) -> Result<Function> {
-        let start = self.expect_word("fn")?;
+        let start = self.current().span;
+        let unsafe_ = self.eat_word("unsafe");
+        self.expect_word("fn")?;
         let name = self.name()?;
         let generics = self.generics()?;
         if c_abi && !generics.is_empty() {
@@ -315,6 +317,7 @@ impl Parser {
             result,
             body,
             c_abi,
+            unsafe_,
             span: start.join(self.last),
         })
     }

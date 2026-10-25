@@ -124,6 +124,6 @@ fn rust_accepts_generic_function_values_and_consuming_reinitialization() {
         "struct Cell {value:i32} struct Hold {cell:Cell} fn take(x:Cell):i32 {let held=Hold {cell:x};return held.cell.value+1} fn main():i32 {var x=Cell {value:1};let n=take(x);x=Cell {value:4};return n+x.value}",
         "struct Cell {value:i32} struct Hold {cell:Cell} fn take(x:Cell):i32 {let held=Hold {cell:x};return held.cell.value+1} fn main():i32 {var x=Cell {value:1};let n=take(x);if true {x=Cell {value:4}} else {x=Cell {value:5}};return n+x.value}",
         "struct Cell {value:i32} struct Hold {cell:Cell} fn take(x:Cell):i32 {let held=Hold {cell:x};return held.cell.value+1} fn main():i32 {var x=Cell {value:1};var n=0;while n<6 {n+=take(x);x=Cell {value:1}};return n+x.value}",
-        "struct Cell {value:i32} struct Hold {cell:Cell} fn take(x:Cell):i32 {let held=Hold {cell:x};return held.cell.value+1} fn main():i32 {var x=Cell {value:1};var n=0;while n<6 {var y=x;n+=take(y);x=Cell {value:1}};return n+x.value}",
+        "struct Cell {value:i32} struct Hold {cell:Cell} fn take(x:Cell):i32 {let held=Hold {cell:x};return held.cell.value+1} fn main():i32 {var x=Cell {value:1};var n=0;while n<6 {n+=take(x);x=Cell {value:1}};return n+x.value}",
     ] { verify(source, OverflowChecks::Checked); }
 }

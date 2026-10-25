@@ -23,6 +23,27 @@ fn failure(text: &str) -> String {
 }
 
 #[test]
+fn unsafe_safety_is_preserved_on_functions_methods_and_interfaces() {
+    let parsed = module("unsafe fn trusted():i32 {return 7} struct S {unsafe fn f(this):i32 {return 8}} interface I {unsafe fn f(this):i32}");
+    let ItemKind::Function(function) = &parsed.items[0].kind else {
+        panic!()
+    };
+    assert!(function.unsafe_);
+    let ItemKind::Aggregate { members, .. } = &parsed.items[1].kind else {
+        panic!()
+    };
+    let Member::Method { function, .. } = &members[0] else {
+        panic!()
+    };
+    assert!(function.unsafe_);
+    let ItemKind::Interface { methods, .. } = &parsed.items[2].kind else {
+        panic!()
+    };
+    assert!(methods[0].unsafe_);
+    failure("unsafe struct S {}");
+}
+
+#[test]
 fn newlines_return_array_and_block_contexts_are_distinct() {
     for newline in ["\n", "\r\n", "\r"] {
         let text = "fn test(): () {\nlet empty: {i32; 0} = {}\nif true {}\nreturn\n(10)\n}"

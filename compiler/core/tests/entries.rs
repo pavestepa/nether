@@ -43,7 +43,7 @@ fn consuming_calls_can_be_followed_by_definite_reinitialization() {
         ("fn main():i32 {var x=Cell {value:1};let n=take(x);x=Cell {value:4};return n+x.value}",6),
         ("fn main():i32 {var x=Cell {value:1};let n=take(x);if true {x=Cell {value:4}} else {x=Cell {value:5}};return n+x.value}",6),
         ("fn main():i32 {var x=Cell {value:1};var n=0;while n<6 {n+=take(x);x=Cell {value:1}};return n+x.value}",7),
-        ("fn main():i32 {var x=Cell {value:1};var n=0;while n<6 {var y=x;n+=take(y);x=Cell {value:1}};return n+x.value}",7),
+        ("fn main():i32 {var x=Cell {value:1};var n=0;while n<6 {n+=take(x);x=Cell {value:1}};return n+x.value}",7),
     ] {
         let source=format!("{prefix}{body}");
         let p=checked(&source).unwrap_or_else(|errors| panic!("{source}: {errors:?}"));

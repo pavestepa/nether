@@ -159,7 +159,7 @@ fn check_pass(
                 parameters.push(resolve_type_with(ty, &constants, &nominals)?);
             }
             Ok(Signature {
-                modes: methods::parameter_modes(function, &parameters),
+                modes: consume::parameter_modes(function, &parameters, consuming),
                 id: declarations.len(),
                 parameters,
                 result: resolve_type_with(&function.result, &constants, &nominals)?,
@@ -246,6 +246,7 @@ fn check_pass(
     if *consuming.borrow() != consuming_before {
         return Ok(Pass::Retry(contracts.clone()));
     }
+    errors.extend(mono.borrow().ownership_errors.clone());
     let functions = functions.into_values().collect::<Vec<_>>();
     if !mono.borrow().result_requests.is_empty() {
         let mut next = contracts.clone();
@@ -340,13 +341,14 @@ fn check_pass(
             .find(|item| matches!(&item.kind,a::ItemKind::Function(f) if f.name=="main"))
             .unwrap();
         if declaration.private
+            || matches!(&declaration.kind, a::ItemKind::Function(f) if f.unsafe_)
             || !signature.parameters.is_empty()
             || !matches!(signature.result, Type::Unit | Type::Integer(I::I32))
         {
             errors.push(error(
                 declaration.span,
                 "E0303",
-                "main must be public, have no parameters and return () or i32",
+                "main must be safe and public, have no parameters and return () or i32",
             ));
         }
     }
@@ -516,6 +518,8 @@ fn check_pass(
 #[derive(Clone)]
 struct Checker<'a> {
     member_owner: Option<String>,
+    unsafe_depth: usize,
+    callable_parameters: std::collections::BTreeSet<usize>,
     storage_hints: storage::Modes,
     storage_requests: storage::Modes,
     storage_roots: std::collections::BTreeSet<usize>,
@@ -752,12 +756,17 @@ impl Checker<'_> {
                         h::Statement::Continue
                     }
                 }
-                a::StatementKind::Unsafe(_) => {
-                    return Err(error(
-                        statement.span,
-                        "E0900",
-                        "unsafe checking is not implemented yet",
-                    ))
+                a::StatementKind::Unsafe(source) => {
+                    self.unsafe_depth += 1;
+                    let checked = self.block(source, None, false);
+                    self.unsafe_depth -= 1;
+                    let block = checked?;
+                    diverges |= block.diverges;
+                    h::Statement::Evaluate(h::Expr {
+                        ty: block.result.clone(),
+                        span: statement.span,
+                        kind: h::ExprKind::Block(block),
+                    })
                 }
             };
             statements.push(checked);
@@ -1524,6 +1533,8 @@ pub(crate) fn constant_value(
 ) -> Result<Value> {
     let signatures = BTreeMap::new();
     let mut checker = Checker {
+        unsafe_depth: 0,
+        callable_parameters: Default::default(),
         member_owner: None,
         storage_hints: Default::default(),
         storage_requests: Default::default(),
@@ -1748,6 +1759,8 @@ fn check_declaration_modes(
     hints: storage::Modes,
 ) -> (Result<h::Function>, storage::Modes) {
     let mut checker = Checker {
+        unsafe_depth: 0,
+        callable_parameters: Default::default(),
         member_owner: declaration
             .name
             .rsplit_once('.')

@@ -93,6 +93,28 @@ fn private_member_context_survives_imports_reexports_and_code_pointers() {
 }
 
 #[test]
+fn unsafe_contract_survives_imports_and_reexports() {
+    let files = Fixture::new(&[
+        ("values.nr", "unsafe fn trusted():i32 {return 7}"),
+        ("api.nr", "export {trusted} from \"./values\""),
+        (
+            "main.nr",
+            "import {trusted} from \"./api\"\nfn main():i32 {unsafe {return trusted()}}",
+        ),
+    ]);
+    assert_eq!(files.code(), 7);
+    fs::write(
+        files.0.join("main.nr"),
+        "import {trusted} from \"./api\"\nfn main():i32 {return trusted()}",
+    )
+    .unwrap();
+    let loaded = load(&files.0.join("main.nr"), "app");
+    assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
+    let errors = check(&loaded.module.unwrap()).unwrap_err();
+    assert!(errors.iter().any(|e| e.code == "E0500"), "{errors:?}");
+}
+
+#[test]
 fn nominal_interface_constraints_survive_imports_and_reexports() {
     let files=Fixture::new(&[
         ("contracts.nr","interface Read {fn read(this):i32} interface Get<T> {fn get(this):T} struct U {} fn get<T:Get<U>,U:Copy>(x:T):U {return x.get()} fn read<T:Read>(x:T):i32 {return x.read()}"),
@@ -135,7 +157,7 @@ fn nominal_interface_constraints_survive_imports_and_reexports() {
 fn borrowed_classes_destructors_and_callable_contracts_survive_reexports() {
     let files=Fixture::new(&[
         ("api.nr","export {R, Cell, id, set} from \"./values\""),
-        ("values.nr","struct R {value:i32;destructor {}} class Cell<T> {value:T;constructor(x:T) {value=x};fn get(this):T {return value};destructor {}} fn id<T>(x:T):T {return x} fn set<T>(var h:Cell<T>,x:T):() {h.value=x}"),
+        ("values.nr","struct R {value:i32;destructor {}} class Cell<T> {value:T;constructor(_borrowed_x:T) {let x=_borrowed_x;value=x};fn get(this):T {return value};destructor {}} fn id<T>(x:T):T {return x} fn set<T>(var h:Cell<T>,_borrowed_x:T):() {let x=_borrowed_x;h.value=x}"),
         ("main.nr","import {R, Cell, id, set} from \"./api\"\nfn main():i32 {let a=R {value:7};let b=R {value:3};let ref v=a;let ref w=b;var c=new Cell<R>(v);let f:(var Cell<R>,R)=>()=set;f(c,w);let g:(R)=>R=id;let result=g(c.get());return result.value}"),
     ]);
     assert_eq!(files.code(), 3);
@@ -181,7 +203,7 @@ fn enum_refinement_survives_imported_storage_specialization() {
 fn mutable_storage_contracts_survive_imports_and_generic_reexports() {
     let files = Fixture::new(&[
         ("api.nr", "export {Holder, set} from \"./storage\""),
-        ("storage.nr", "struct Holder<T> {value:T} fn set<T>(var h:Holder<T>,x:T):() {h.value=x}"),
+        ("storage.nr", "struct Holder<T> {value:T} fn set<T>(var h:Holder<T>,_borrowed_x:T):() {let x=_borrowed_x;h.value=x}"),
         ("main.nr", "import {Holder, set} from \"./api\"\nstruct R {value:i32;destructor {}} fn main():i32 {let a=R {value:7};let b=R {value:3};let ref v=a;let ref w=b;var h=Holder<R> {value:v};set(h,w);return h.value.value}"),
     ]);
     assert_eq!(files.code(), 3);
@@ -201,7 +223,7 @@ fn mutable_storage_contracts_survive_imports_and_generic_reexports() {
 fn borrowed_aggregate_contracts_survive_generic_imports_and_reexports() {
     let files = Fixture::new(&[
         ("api.nr", "export {Holder, wrap, get} from \"./storage\""),
-        ("storage.nr", "struct Holder<T> {value:T} fn wrap<T>(x:T):Holder<T> {return Holder<T> {value:x}} fn get<T>(x:Holder<T>):T {return x.value}"),
+        ("storage.nr", "struct Holder<T> {value:T} fn wrap<T>(_borrowed_x:T):Holder<T> {let x=_borrowed_x;return Holder<T> {value:x}} fn get<T>(x:Holder<T>):T {return x.value}"),
         ("main.nr", "import {Holder, wrap, get} from \"./api\"\nstruct R {value:i32;destructor {}} fn main():i32 {let a=R {value:7};let ref va=a;let h=wrap(va);let result=get(h);return a.value+result.value}"),
     ]);
     assert_eq!(files.code(), 14);

@@ -144,27 +144,31 @@ impl Checker<'_> {
         }
         let parameters = arguments.iter().map(|a| a.ty.clone()).collect::<Vec<_>>();
         let declaration = self.mono.borrow().bodies.get(&signature.id).cloned();
+        if declaration.as_ref().is_some_and(|d| d.unsafe_) && self.unsafe_depth == 0 {
+            return Err(error(
+                span,
+                "E0500",
+                "calling an unsafe function requires an explicit unsafe block",
+            ));
+        }
         let mut modes = forced.map_or_else(|| signature.modes.clone(), |m| m.to_vec());
         let mut prelude = Vec::new();
         let mut storage = Vec::new();
         if let Some(declaration) = &declaration {
-            for (index, (argument, original)) in arguments.iter_mut().zip(source).enumerate() {
-                // NMM §11: a borrowed parameter takes a view of the caller's place
-                // (or of a temporary kept alive for the call). Owned entries are
-                // declared only for parameters the body can consume; they take
-                // ownership from an owner or a fresh value, and keep a view entry
-                // for an alias, which cannot supply an owner token.
-                let _ = original;
-                // An owner (or fresh value) passed to a consuming parameter hands
-                // over its token: select the owned entry and pass by value.
-                if forced.is_none()
-                    && modes[index].is_some()
-                    && !argument.ty.copyable()
-                    && !views::view_root(argument)
-                    && self.consuming_parameter(declaration, index)
-                {
-                    modes[index] = None;
-                    continue;
+            for (index, argument) in arguments.iter_mut().enumerate() {
+                if !argument.ty.copyable() && self.consuming_parameter(declaration, index) {
+                    if views::view_root(argument) {
+                        // Keep inference running: the caller parameter may itself
+                        // become consuming in the next whole-program pass.
+                        self.mono.borrow_mut().ownership_errors.push(error(
+                            argument.span,
+                            "NMM_NO_OWNER_TOKEN",
+                            "a consuming parameter requires an owner; a borrowed path cannot transfer ownership",
+                        ).with_note(declaration.parameters[index].span, "this parameter consumes ownership"));
+                    } else {
+                        modes[index] = None;
+                        continue;
+                    }
                 }
                 if modes[index].is_some() {
                     let access = if declaration.parameters[index].mutable {
@@ -260,6 +264,20 @@ impl Checker<'_> {
                     }
                     _ => (arguments[index].clone(), None),
                 };
+                // Function-value probes have no runtime storage. Refine their
+                // synthetic arguments to the entry's physical ABI instead of
+                // treating them as incompatible caller-owned allocations.
+                if let h::ExprKind::Local(id) | h::ExprKind::View(id) = place.kind {
+                    if self.callable_parameters.contains(&id) {
+                        self.locals[id].ty = required.clone();
+                        arguments[index].ty = required.clone();
+                        if let h::ExprKind::ArgumentView { place, .. } = &mut arguments[index].kind
+                        {
+                            place.ty = required.clone();
+                        }
+                        continue;
+                    }
+                }
                 if !self.request_storage_mode(&place, required)? {
                     let value = self.expr(&source[index], Some(required), true)?;
                     self.same_storage_mode(required, &value.ty, value.span)?;

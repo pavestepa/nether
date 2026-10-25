@@ -1,4 +1,4 @@
-# Nether
+# Nether 0.1
 
 > **Статус: proof of work.** Язык находится на стадии доказательства
 > концепции. Синтаксис, семантика и компилятор нестабильны и могут меняться
@@ -8,6 +8,9 @@ Nether — компилируемый язык со статической ти�
 производительность уровня Rust при простом синтаксисе. Компилятор
 (frontend, type/ownership checker, MIR) написан на Rust и генерирует Rust-код,
 который собирает обычный `rustc`.
+
+Версия 0.1 использует единственную модель памяти **NMM (`nmm-0.1`)** и
+[Rust-like unsafe](docs/unsafe.md). Старые альтернативные memory rules отменены.
 
 ## Основные идеи
 
@@ -84,7 +87,9 @@ fn main(): i32 {
 ## Состояние проекта
 
 Компилятор переведён на NMM в части привязок и параметров (alias вместо move,
-запрет `var` из readonly пути, borrowed-параметры по умолчанию, вывод consuming-параметров).
+запрет `var` из readonly пути, borrowed-параметры по умолчанию, consuming требует O).
+Добавлены `unsafe fn` и явные statement `unsafe` blocks; обычные NMM checks сохраняются.
+Raw pointers/storage/FFI ещё не реализованы; unsafe function values отклоняются.
 Weak, каналы, async, замыкания и MIR verifier ещё не реализованы; статус и открытые вопросы —
 [NMM](docs/core-memory-managment.md), раздел 26.1. Производительность уровня Rust — цель,
 а не доказанное свойство.
@@ -124,6 +129,7 @@ cargo test --workspace --locked --offline
 ## Документация
 
 [Модель памяти NMM](docs/core-memory-managment.md) ·
+[Unsafe](docs/unsafe.md) ·
 [Async runtime](docs/async-await-runtime.md) ·
 [Спецификация языка](docs/main.md) ·
 [Rust backend](docs/0.1/rust-backend.md) ·

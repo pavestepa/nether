@@ -75,13 +75,12 @@ fn n05_n06_results_carry_ownership_and_access() {
 }
 
 #[test]
-fn consuming_parameters_take_owners_and_views_by_argument_kind() {
+fn consuming_parameters_require_owners() {
     for (body, expected) in [
         // Fresh value and owner without later use: ownership is transferred.
         ("fn main():i32 {let h=store(Cell {value:3});return h.cell.value}", 3),
         ("fn main():i32 {let o=Cell {value:4};let h=store(o);return h.cell.value}", 4),
-        // An alias keeps the owner outside: a descriptor is stored.
-        ("fn main():i32 {let o=Cell {value:7};let ref v=o;let h=store(v);return h.cell.value+o.value}", 14),
+        ("fn wrap(x:Cell,n:i32):Hold {if n==0 {return store(x)};return relay(x,n-1)} fn relay(x:Cell,n:i32):Hold {return wrap(x,n)} fn main():i32 {let h=wrap(Cell {value:8},2);return h.cell.value}", 8),
         // Transitive consumption through a call chain.
         ("fn wrap(x:Cell):Hold {return store(x)} fn main():i32 {let h=wrap(Cell {value:6});return h.cell.value}", 6),
     ] {
@@ -105,10 +104,21 @@ fn n03_n09_access_and_ownership_violations_are_rejected() {
         // N08: use after the owner was consumed, or consumption under a live view.
         ("fn main():i32 {let o=Cell {value:1};let h=store(o);return o.value}", "E0384"),
         ("fn main():i32 {var o=Cell {value:1};let r=o;let h=store(o);return r.value}", "E0381"),
+        ("fn main():i32 {let o=Cell {value:7};let v=o;let h=store(v);return h.cell.value}", "NMM_NO_OWNER_TOKEN"),
+        ("fn main():i32 {let o=Cell {value:7};let ref v=o;let h=store(v);return h.cell.value}", "NMM_NO_OWNER_TOKEN"),
+        ("fn wrap(x:Cell):Hold {return store(x)} fn main():i32 {let o=Cell {value:7};let v=o;let h=wrap(v);return h.cell.value}", "NMM_NO_OWNER_TOKEN"),
+        ("fn main():i32 {let o=Cell {value:7};let v=o;let f=store;let h=f(v);return h.cell.value}", "NMM_NO_OWNER_TOKEN"),
+        ("fn wrap<T>(x:T):(T,) {return (x,)} fn main():i32 {let o=Cell {value:7};let v=o;let h=wrap(v);return h.0.value}", "NMM_NO_OWNER_TOKEN"),
+        ("fn borrow(x:Cell):Hold {let v=x;return Hold {cell:v}} fn main():i32 {let o=Cell {value:7};let h=borrow(o);let result=store(h.cell);return result.cell.value}", "NMM_NO_OWNER_TOKEN"),
         // N09: a `var` parameter is a mutable borrow and cannot be consumed.
         ("fn bad(var x:Cell):() {let h=Hold {cell:x}} fn main():i32 {return 0}", "E0398"),
     ] {
         let errors = check_source(body).expect_err(&format!("accepted {body}"));
         assert!(errors.iter().any(|c| c == code), "{body}: {errors:?}");
     }
+}
+
+#[test]
+fn borrowed_storage_is_non_consuming_and_keeps_the_original_owner() {
+    assert_eq!(run("fn borrow(x:Cell):Hold {let v=x;return Hold {cell:v}} fn main():i32 {let o=Cell {value:7};let h=borrow(o);return o.value+h.cell.value}"), 14);
 }

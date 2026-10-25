@@ -1,5 +1,8 @@
 # Nether → Rust: утверждённая концепция
 
+Редакция 2026-10-25. Единственная модель памяти — [NMM](../core-memory-managment.md)
+(`nmm-0.1`); unsafe boundary — [unsafe.md](../unsafe.md). Поддержка — [status](status.md).
+
 Решение от 2026-10-13. Nether — язык со своей проверкой типов, ownership, views,
 identity и deterministic cleanup, компилируемый в Rust source. Единственный
 основной pipeline: Nether → typed HIR → checked MIR → Rust → rustc → executable.
@@ -17,8 +20,8 @@ allocations, dispatch, арифметике, bounds checks и cleanup semantics.
 
 ## Модель памяти
 
-Все ранее принятые правила Nether сохраняются. Rust borrow checker не заменяет
-Nether ownership inference. Backend может генерировать проверенный unsafe,
+Backend сохраняет только действующий контракт NMM `nmm-0.1`. Rust borrow
+checker не заменяет Nether ownership inference. Backend может генерировать проверенный unsafe,
 raw pointers, MaybeUninit и ManuallyDrop. Для каждого такого применения нужны
 доказательства initialization, alignment, provenance, lifetime и uniqueness.
 Нельзя создавать &mut для более широкого/долгого доступа, чем доказывает Nether.
@@ -75,7 +78,7 @@ binary ABI не обещается. Foreign boundary использует extern
 field projections не создают новый &mut на весь aggregate. Это сохраняет
 совместимость одновременно живых disjoint field views с aliasing rules Rust.
 
-## Реализованный class lowering (C2, 2026-10-15)
+## Реализованный class lowering
 
 Concrete class имеет pointer handle и один Box с MaybeUninit payload,
 initialization flags для ресурсных полей и признаком завершения constructor.
@@ -87,10 +90,10 @@ Borrowed class descriptor хранит pointer на эту identity. Внутр�
 Copy class выделяет отдельный Box и копирует поля по правилам их типов;
 Move передаёт существующий pointer. Cleanup запускает class destructor только
 после успешного завершения constructor, затем поля и освобождение Box.
-Base payload и upcast добавляются в C4.2–C4.3; текущий C2 не заявляет upcast.
+Base payload и upcast ещё не реализованы в source execution.
 
 
-## Borrowed results и callable entries (C3)
+## Borrowed results и callable entries
 
 Function result contract хранится в HIR/MIR отдельно от логического типа.
 `CallView` возвращает typed descriptor; inline target использует raw place,
@@ -108,13 +111,13 @@ Function pointers поддерживают non-Copy owned/borrowed arguments/res
 receivers. Статическая metadata задаёт выбранный ABI, origins и effects. Indirect
 call использует обычный code pointer без environment или runtime ownership tags.
 
-Реализованный C3.2 использует отдельный внутренний `StoredView<T>` для readonly полей
+Backend использует отдельный внутренний `StoredView<T>` для readonly полей
 struct/tuple/array/enum. В Rust он становится descriptor target либо raw pointer
 для resource-free target; у class descriptor сохраняется heap identity. Тип
 оболочки статически отличается от owned representation. Store/load descriptor
 не копирует payload, не создаёт allocation и не запускает target destructor.
 Внутренний layout descriptor зависит от backend и lifecycle target и пока не
-экспортируется как source layout primitive (C5).
+экспортируется как source layout primitive .
 
 MIR provenance привязана к projected storage paths. Copy/move агрегата переносит
 зависимости его borrowed компонентов; rebind меняет descriptor. Liveness view
@@ -139,7 +142,7 @@ destructors оболочек учитывают implicit reads и согласо
 borrowed class payload имеет отдельный physical layout для constructor/method/drop.
 
 
-## Уточнение достижимости локальных enum (C3.2, 2026-10-20)
+## Уточнение достижимости локальных enum
 
 После lowering отдельный finite dataflow pass переносит known local discriminants
 и bool/integer constants. Join сохраняет только совпадающие факты; loops доходят
@@ -153,7 +156,7 @@ borrowed Rust ABI, а недостижимое чтение пустого paylo
 Пример: [enum_refinement](../../examples/enum_refinement/main.nr).
 
 
-## Локальный вывод storage modes (C3.2, 2026-10-20)
+## Локальный вывод storage modes
 
 Checker повторяет проверку тела при росте readonly требований к named local
 storage. Ключ hint — source span binding, а не номер HIR local: rechecks и
@@ -173,7 +176,7 @@ Array checking сохраняет numeric contextual typing, объединяе�
 Пример: [storage_modes](../../examples/storage_modes/main.nr).
 
 
-## Destructor dependencies и borrowed class layout (C3, 2026-10-20)
+## Destructor dependencies и borrowed class layout
 
 Class handle сохраняет nominal identity и содержит выбранный статически payload
 layout. Canonical recursive class edge остаётся непрозрачным; physical borrowed
@@ -184,23 +187,22 @@ Liveness включает implicit user-destructor reads. Loan holders отсл�
 транзитивно через stored descriptors. Cleanup допускается, если holder завершается
 раньше target: по scope, construction field order или доказанному root initialization
 order. May-before pairs объединяются на joins/loops; aliased root replacement
-учитывает provenance. Внутренние owning-group cycles остаются C7.
+учитывает provenance. Owning-cycle запрещён NMM; невладеющие циклы требуют доказанных lifetime/weak.
 
 
-## Статические interfaces (C4.1)
+## Статические interfaces
 
 Interface declarations, явные реализации class/struct и constraints существуют
 в checker. Abstract generic audit использует только объявленные методы constraints;
 при concrete specialization вызовы направляются в обычные method entries.
 Conjunction, generic methods, type/const arguments, static methods и function
-values сохраняют существующие physical storage/callable contracts C3.
+values сохраняют существующие physical storage/callable contracts NMM.
 Rust source получает конкретные специализации: interface сам по себе не добавляет
 trait object, vtable, Box, refcount, runtime tag или копирование payload.
-Runtime Rust traits и dyn dispatch относятся к C4.4; class inheritance и
-сохранение identity при upcast — к C4.2–C4.3.
+Runtime Rust traits/dyn dispatch, class inheritance и upcast ещё не завершены.
 
 
-## Private member access (C4.2a)
+## Private member access
 
 Checker проверяет access в lexical declaring type до выбора concrete entries.
 Generic/borrowed specialization и emitted code не получают runtime access tags.
@@ -210,7 +212,7 @@ Caller проверяется после instantiation producer возвраща
 порядок проверки не меняет function IDs и соответствие ABI/result/effect contracts.
 
 
-## Hierarchy declarations и static virtual entries (часть C4.2)
+## Hierarchy declarations и static virtual entries (пока только declarations)
 
 Declaration checker проверяет class graph и override signatures до выбора entries.
 При подстановке parent arguments method binders переименовываются, module constants
@@ -218,3 +220,11 @@ Declaration checker проверяет class graph и override signatures до �
 concrete entry lowering без vtable или новых allocations. Derived payload lowering,
 embedded base construction/super и cleanup ещё требуют реализации; правильная
 declaration hierarchy сама по себе не разрешает генерацию derived object.
+
+## Source unsafe boundary
+
+Source `unsafe fn` safety проверяется до HIR/MIR execution и codegen.
+Явный unsafe block сохраняется как обычный checked block; ordinary NMM checks
+не отключаются. Generated Rust может использовать внутренние unsafe функции
+и raw pointers независимо от source safety; это trusted backend implementation,
+не разрешение caller вызывать source unsafe fn без блока.

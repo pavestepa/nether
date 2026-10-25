@@ -1,11 +1,20 @@
 # Storage, provenance и эффекты 0.1
 
+Редакция 2026-10-25. Единственная модель памяти — [NMM](../core-memory-managment.md)
+(`nmm-0.1`); unsafe boundary — [unsafe.md](../unsafe.md). Поддержка — [status](status.md).
+
 Архитектура: [Nether → Rust](rust-backend.md). Правила памяти сохраняются; прямой LLVM backend удалён.
 
-Статус: нормативный контракт этапа 0; реализации intrinsics ещё нет.
+Статус: нормативный контракт новой 0.1; реализации intrinsics ещё нет.
 Основание — [утверждённые статические режимы](decisions/container-ownership.md).
-Сигнатуры ниже доступны из compiler-owned модуля `core/intrinsic` по symbol ID,
+При реализации сигнатуры ниже предоставляются compiler-owned модулем `core/intrinsic` по symbol ID,
 а не по совпадению имени Vec/String/пользовательской функции.
+
+Сигнатуры intrinsics нормативны для будущего trusted storage subset. Обычная
+source функция с consuming-effect не принимает borrowed аргумент через
+альтернативный entry. Static storage mode выбирается до вывода эффекта самого
+intrinsic: borrowed insertion не объявляет Consume. Unsafe admission не
+меняет это правило.
 
 ## 1. Представление и режим
 
@@ -45,7 +54,7 @@ queries требует `unsafe { ... }`; access/ownership проверки ос�
 | `allocate<T>(capacity: usize): RawStorage<T>` | Fresh owned allocation, все slots uninitialized; mode из использования |
 | `capacity<T>(storage: RawStorage<T>): usize` | Copy capacity, readonly borrow, не consuming |
 | `slot_address<T>(var storage: RawStorage<T>, index: usize): *var u8` | Address raw slot representation, `index <= capacity`; не safe view |
-| `initialize<T>(var storage: RawStorage<T>, index: usize, value: T): ()` | Index < capacity, slot uninitialized; Owned требует owned T, View сохраняет view |
+| `initialize<T>(var storage: RawStorage<T>, index: usize, value: T): ()` | Index < capacity, slot uninitialized; Owned specialization требует O/Consume(value); View specialization имеет только R/StoreView(value), без Consume |
 | `take<T>(var storage: RawStorage<T>, index: usize): T` | Slot initialized; после операции uninitialized; результат T@M |
 | `replace<T>(var storage: RawStorage<T>, index: usize, value: T): T` | Slot initialized; старое T@M передаётся caller, новое устанавливается; без implicit drop старого |
 | `drop_slot<T>(var storage: RawStorage<T>, index: usize): ()` | Slot initialized → uninitialized; Owned cleanup, View удаление descriptor |

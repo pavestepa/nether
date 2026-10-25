@@ -428,7 +428,8 @@ impl Keys<'_> {
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(format!(
-            "{generics:?}:{parameters:?}:{}",
+            "{}:{generics:?}:{parameters:?}:{}",
+            method.unsafe_,
             self.ty(&method.result)?
         ))
     }

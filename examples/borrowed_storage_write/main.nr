@@ -7,7 +7,8 @@ struct Holder<T> {
     value: T
 }
 
-fn set<T>(var holder: Holder<T>, value: T): () {
+fn set<T>(var holder: Holder<T>, source: T): () {
+    let value = source
     holder.value = value
 }
 

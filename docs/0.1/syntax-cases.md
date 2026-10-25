@@ -1,5 +1,8 @@
 # Проверяемые синтаксические примеры 0.1
 
+Редакция 2026-10-25. Единственная модель памяти — [NMM](../core-memory-managment.md)
+(`nmm-0.1`); unsafe boundary — [unsafe.md](../unsafe.md). Поддержка — [status](status.md).
+
 Архитектура: [Nether → Rust](rust-backend.md). Правила памяти сохраняются; прямой LLVM backend удалён.
 
 Контракт для будущих parser/typecheck tests по [профилю](profile.md).

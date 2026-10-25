@@ -51,6 +51,7 @@ pub(super) fn prepare(module: &a::Module) -> Result<a::Module> {
                     },
                     body: Some(body.clone()),
                     c_abi: false,
+                    unsafe_: false,
                     span,
                 },
             };

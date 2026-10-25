@@ -1,14 +1,17 @@
 # Metadata и вывод контрактов 0.1
 
+Редакция 2026-10-25. Единственная модель памяти — [NMM](../core-memory-managment.md)
+(`nmm-0.1`); unsafe boundary — [unsafe.md](../unsafe.md). Поддержка — [status](status.md).
+
 Архитектура: [Nether → Rust](rust-backend.md). Правила памяти сохраняются; прямой LLVM backend удалён.
 
-Контракт этапа 0. Schema/algorithm определены здесь; serializer и checker пока
+Контракт новой 0.1. Schema/algorithm определены здесь; serializer и checker пока
 не реализованы. Library artifact — native object/archive плюс UTF-8 JSON `.nmeta`.
 
-## Schema version 1
+## Schema version 1 / model_version nmm-0.1
 
 ```text
-format_version, compiler_contract, runtime_contract, target, abi_version,
+format_version, model_version, compiler_contract, runtime_contract, target, abi_version,
 package {name, source_id, content_id}, dependencies[], types[], functions[],
 constants[], imports[], generic_bodies[]
 ```
@@ -30,7 +33,7 @@ deref). Unknown index включает все возможные slots этог�
 provenance включает весь weak-addressable domain. Во внешних contracts нет
 ссылок на частные caller-local IDs.
 
-Function record: signature/access modes, available entry keys, reasons для
+Function record: signature/access modes, safety (safe/unsafe), consuming effects, available entry keys, reasons для
 недоступных entries, symbol, effects, result contract и generic body ID.
 Entry key — modes ordinary args + storage shapes. Receiver остаётся borrowed,
 Copy args материализуются owned. Function pointer фиксирует конкретный entry.

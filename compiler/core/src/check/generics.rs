@@ -5,6 +5,7 @@ use substitute::Substitution;
 pub(super) struct Monomorphization {
     pub result_contracts: ReturnContracts,
     pub consuming: Consuming,
+    pub ownership_errors: Vec<Diagnostic>,
     pub entry_keys: BTreeMap<usize, String>,
     pub result_requests: BTreeMap<String, Type>,
     pub pending_results: std::collections::BTreeSet<usize>,
@@ -297,7 +298,7 @@ impl Checker<'_> {
             mono.next_id += 1;
             function.name = format!("{name}$g{id}");
             let signature = Signature {
-                modes: methods::parameter_modes(&function, &parameters),
+                modes: consume::parameter_modes(&function, &parameters, &mono.consuming),
                 id,
                 parameters,
                 result,

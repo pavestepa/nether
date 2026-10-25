@@ -62,6 +62,19 @@ impl Checker<'_> {
         expected: Option<&Type>,
         span: Span,
     ) -> Result<h::Expr> {
+        if self
+            .mono
+            .borrow()
+            .bodies
+            .get(&signature.id)
+            .is_some_and(|d| d.unsafe_)
+        {
+            return Err(error(
+                span,
+                "E0501",
+                "unsafe function pointers are not supported; use a checked safe wrapper",
+            ));
+        }
         let wanted = match expected {
             Some(Type::Function {
                 parameters,
@@ -96,6 +109,7 @@ impl Checker<'_> {
             for (i, ty) in parameters.into_iter().enumerate() {
                 let name = format!("<pointer argument {i}>");
                 let id = self.local(name.clone(), ty.clone(), true, span)?;
+                self.callable_parameters.insert(id);
                 source.push(a::Expr {
                     kind: a::ExprKind::Name(name),
                     span,
@@ -135,6 +149,7 @@ impl Checker<'_> {
         })();
         self.scopes.pop();
         self.locals.truncate(start);
+        self.callable_parameters.retain(|id| *id < start);
         result
     }
     fn pointer_from_call(&self, call: h::Expr, span: Span) -> Result<h::Expr> {
@@ -204,6 +219,13 @@ impl Checker<'_> {
             ));
         };
         let template = self.mono.borrow().templates[name].clone();
+        if template.unsafe_ {
+            return Err(error(
+                span,
+                "E0501",
+                "unsafe function pointers are not supported; use a checked safe wrapper",
+            ));
+        }
         if template.parameters.len() != parameters.len()
             || template
                 .parameters
@@ -225,7 +247,8 @@ impl Checker<'_> {
             let mut arguments = Vec::new();
             for (index, (mutable, ty)) in parameters.iter().enumerate() {
                 let name = format!("<function value argument {index}>");
-                self.local(name.clone(), ty.clone(), *mutable, span)?;
+                let id = self.local(name.clone(), ty.clone(), *mutable, span)?;
+                self.callable_parameters.insert(id);
                 arguments.push(a::Expr {
                     kind: a::ExprKind::Name(name),
                     span,
@@ -235,6 +258,7 @@ impl Checker<'_> {
         })();
         self.scopes.pop();
         self.locals.truncate(start);
+        self.callable_parameters.retain(|id| *id < start);
         let call = resolved?;
         same(result, &call.ty, span)?;
         let pointer = self.pointer_from_call(call, span)?;

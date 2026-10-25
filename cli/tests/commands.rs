@@ -5,6 +5,28 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 static NEXT: AtomicUsize = AtomicUsize::new(0);
+
+#[test]
+fn published_examples_follow_the_current_memory_profile() {
+    let examples = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../examples");
+    for entry in fs::read_dir(examples).unwrap() {
+        let source = entry.unwrap().path().join("main.nr");
+        if !source.is_file() {
+            continue;
+        }
+        let output = Command::new(env!("CARGO_BIN_EXE_nether"))
+            .arg("check")
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}: {}",
+            source.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
 struct Project(PathBuf);
 impl Project {
     fn new(source: &str) -> Self {

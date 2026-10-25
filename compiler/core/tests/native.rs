@@ -16,7 +16,7 @@ fn rust_native_matches_reference_at_both_optimization_levels() {
         "struct Cell {value:i32} struct Hold {cell:Cell} fn take(x:Cell):i32 {let held=Hold {cell:x};return held.cell.value+1} fn main():i32 {var x=Cell {value:1};let n=take(x);x=Cell {value:4};return n+x.value}",
         "struct Cell {value:i32} struct Hold {cell:Cell} fn take(x:Cell):i32 {let held=Hold {cell:x};return held.cell.value+1} fn main():i32 {var x=Cell {value:1};let n=take(x);if true {x=Cell {value:4}} else {x=Cell {value:5}};return n+x.value}",
         "struct Cell {value:i32} struct Hold {cell:Cell} fn take(x:Cell):i32 {let held=Hold {cell:x};return held.cell.value+1} fn main():i32 {var x=Cell {value:1};var n=0;while n<6 {n+=take(x);x=Cell {value:1}};return n+x.value}",
-        "struct Cell {value:i32} struct Hold {cell:Cell} fn take(x:Cell):i32 {let held=Hold {cell:x};return held.cell.value+1} fn main():i32 {var x=Cell {value:1};var n=0;while n<6 {var y=x;n+=take(y);x=Cell {value:1}};return n+x.value}",
+        "struct Cell {value:i32} struct Hold {cell:Cell} fn take(x:Cell):i32 {let held=Hold {cell:x};return held.cell.value+1} fn main():i32 {var x=Cell {value:1};var n=0;while n<6 {n+=take(x);x=Cell {value:1}};return n+x.value}",
         "struct Math {fn add(n:i32):i32 {return n+2}} fn main():i32 {let f=Math.add;return f(3)}",
         "struct Handler {run:(i32)=>i32;fn invoke(this):i32 {return run(4)}} fn add(n:i32):i32 {return n+2} fn main():i32 {let h=Handler {run:add};return h.invoke()}",
         "fn add(n:i32):i32 {return n+2} fn main():i32 {let f:(i32)=>i32=add;return f(3)}",
@@ -72,6 +72,7 @@ fn rust_native_matches_reference_at_both_optimization_levels() {
         "fn main():i32 {var a=1;let ref var x=a;var n=0;while n<3 {*x+=1;n+=1};return a}",
 
         include_str!("../../../examples/arithmetic/main.nr"),
+        include_str!("../../../examples/unsafe/main.nr"),
         "#[Copy] struct Box<T:Copy> {value:T;fn create(value:T):Box<T> {return Box<T> {value:value}};fn extract(value:Box<T>):T {return value.value}} fn main():i32 {let boxed=Box<i32>.create(17);return Box.extract(boxed)}",
         "fn predicate(var x:i32):bool {x+=1;return x==4} fn main():i32 {let n=3;return match n {x if predicate(x)=>x,_=>0}}",
 

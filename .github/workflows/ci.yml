@@ -16,6 +16,8 @@ jobs:
         run: rustup toolchain install 1.86.0 --profile minimal --component rustfmt --component clippy
       - name: Check formatting
         run: cargo +1.86.0 fmt --all -- --check
+      - name: Check documentation links
+        run: python3 scripts/check_docs.py
       - name: Check lints
         run: cargo +1.86.0 clippy --workspace --all-targets --locked --offline -- -D warnings
       - name: Test debug contracts

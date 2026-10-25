@@ -4,7 +4,7 @@ use nether_semantics::OverflowChecks;
 
 const PREFIX: &str = "struct R {value:i32;destructor {}} struct D {value:R;fn get(this):R {return value};destructor {let valid=1/(value.value-6)}} ";
 const CASES: &[(&str, i32)] = &[
-    ("class C {value:R;constructor(x:R) {value=x}} fn wrap(x:R):C {return new C(x)} fn main():i32 {let a=R {value:7};let b=R {value:3};let ref w=b;var c=wrap(a);c.value=w;return c.value.value}",3),
+    ("class C {value:R;constructor(_borrowed_x:R) {let x=_borrowed_x;value=x}} fn wrap(_borrowed_x:R):C {let x=_borrowed_x;return new C(x)} fn main():i32 {let a=R {value:7};let b=R {value:3};let ref w=b;var c=wrap(a);c.value=w;return c.value.value}",3),
 
     ("fn first(x:R,y:R):R {return x} fn second(x:R,y:R):R {return y} fn main():i32 {let a=R {value:7};let b=R {value:3};let f=if false {first} else {second};let result=f(a,b);return a.value+b.value+result.value}",13),
 
@@ -16,22 +16,22 @@ const CASES: &[(&str, i32)] = &[
 
     ("fn id(x:R):R {return x} fn main():i32 {let a=R {value:7};let f=id;let b=f(a);return a.value+b.value}",14),
     ("fn id(x:R):R {return x} fn apply(f:(R)=>R,x:R):R {return f(x)} fn main():i32 {let a=R {value:7};let f=id;let b=apply(f,a);return a.value+b.value}",14),
-    ("struct H {value:R} fn wrap(x:R):H {return H {value:x}} fn main():i32 {let a=R {value:7};let f=wrap;let ref v=a;let h=f(v);return a.value+h.value.value}",14),
-    ("struct H {value:R} fn set(var h:H,x:R):() {h.value=x} fn main():i32 {let a=R {value:7};let b=R {value:3};let ref w=b;var h=H {value:a};let f=set;f(h,w);return h.value.value}",3),
+    ("struct H {value:R} fn wrap(_borrowed_x:R):H {let x=_borrowed_x;return H {value:x}} fn main():i32 {let a=R {value:7};let f=wrap;let ref v=a;let h=f(v);return a.value+h.value.value}",14),
+    ("struct H {value:R} fn set(var h:H,_borrowed_x:R):() {let x=_borrowed_x;h.value=x} fn main():i32 {let a=R {value:7};let b=R {value:3};let ref w=b;var h=H {value:a};let f=set;f(h,w);return h.value.value}",3),
     ("struct S {value:R;fn get(this):R {return value}} fn main():i32 {let a=R {value:7};let ref v=a;let s=S {value:v};let f=S.get;let b=f(s);return b.value}",7),
     ("fn one(x:R):R {return x} fn two(x:R):R {return x} fn main():i32 {let a=R {value:7};let f=if false {one} else {two};let b=f(a);return a.value+b.value}",14),
     ("fn id<T>(x:T):T {return x} fn main():i32 {let a=R {value:7};let f:(R)=>R=id;let b=f(a);return a.value+b.value}",14),
 
-    ("class C {value:R;constructor(x:R) {value=x};destructor {let valid=1/(value.value-6)}} fn main():i32 {let a=R {value:7};let ref v=a;let c=new C(v);return 3}",3),
-    ("class C {value:R;constructor(x:R) {value=x};fn get(this):R {return value}} fn main():i32 {let a=R {value:7};let ref v=a;let c=new C(v);let r=c.get();return r.value}",7),
-    ("class C {value:R;constructor(x:R) {value=x}} fn wrap(x:R):C {return new C(x)} fn main():i32 {let a=R {value:7};let ref v=a;let c=wrap(v);return a.value+c.value.value}",14),
-    ("class C {value:R;constructor(x:R) {value=x};destructor {let valid=1/(value.value-6)}} fn main():i32 {let a=R {value:7};let ref v=a;let c=new C(v);return 1/0}",101),
-    ("class C {value:R;constructor(x:R) {value=x};destructor {let valid=1/(value.value-6)}} fn main():i32 {let a=R {value:6};let ref v=a;let c=new C(v);return 3}",101),
+    ("class C {value:R;constructor(_borrowed_x:R) {let x=_borrowed_x;value=x};destructor {let valid=1/(value.value-6)}} fn main():i32 {let a=R {value:7};let ref v=a;let c=new C(v);return 3}",3),
+    ("class C {value:R;constructor(_borrowed_x:R) {let x=_borrowed_x;value=x};fn get(this):R {return value}} fn main():i32 {let a=R {value:7};let ref v=a;let c=new C(v);let r=c.get();return r.value}",7),
+    ("class C {value:R;constructor(_borrowed_x:R) {let x=_borrowed_x;value=x}} fn wrap(_borrowed_x:R):C {let x=_borrowed_x;return new C(x)} fn main():i32 {let a=R {value:7};let ref v=a;let c=wrap(v);return a.value+c.value.value}",14),
+    ("class C {value:R;constructor(_borrowed_x:R) {let x=_borrowed_x;value=x};destructor {let valid=1/(value.value-6)}} fn main():i32 {let a=R {value:7};let ref v=a;let c=new C(v);return 1/0}",101),
+    ("class C {value:R;constructor(_borrowed_x:R) {let x=_borrowed_x;value=x};destructor {let valid=1/(value.value-6)}} fn main():i32 {let a=R {value:6};let ref v=a;let c=new C(v);return 3}",101),
     ("fn main():i32 {let a=R {value:7};let ref v=a;let d=D {value:v};return d.value.value}",7),
     ("fn main():i32 {let a=R {value:7};let ref v=a;let d=D {value:v};return 3}",3),
     ("fn main():i32 {let a=R {value:7};if true {let ref v=a;let d=D {value:v}};return a.value}",7),
     ("fn consume(d:D):i32 {return d.value.value} fn main():i32 {let a=R {value:7};let ref v=a;let d=D {value:v};return consume(d)}",7),
-    ("fn wrap(x:R):D {return D {value:x}} fn main():i32 {let a=R {value:7};let ref v=a;let d=wrap(v);return a.value+d.value.value}",14),
+    ("fn wrap(_borrowed_x:R):D {let x=_borrowed_x;return D {value:x}} fn main():i32 {let a=R {value:7};let ref v=a;let d=wrap(v);return a.value+d.value.value}",14),
     ("fn id<T>(x:T):T {return x} fn main():i32 {let a=R {value:7};let ref v=a;let d=D {value:v};let moved=id(d);return moved.value.value}",7),
     ("struct G<T> {tag:T;value:R;destructor {let valid=1/(value.value-6)}} fn main():i32 {let a=R {value:7};let ref v=a;let d=G<i32> {tag:0,value:v};return 3}",3),
     ("struct Outer {d:D} fn main():i32 {let a=R {value:7};let ref v=a;let outer=Outer {d:D {value:v}};return 3}",3),
@@ -82,13 +82,13 @@ fn destructor_keeps_stored_views_alive_through_cleanup() {
 #[test]
 fn destructor_dependencies_reject_early_target_invalidation() {
     for body in [
-        "fn set(var d:D,x:R):() {d.value=x} fn main():i32 {let a=R {value:7};let ref v=a;var d=D {value:v};let b=R {value:7};let ref w=b;let ref var alias=d;set(alias,w);return 0}",
+        "fn set(var d:D,_borrowed_x:R):() {let x=_borrowed_x;d.value=x} fn main():i32 {let a=R {value:7};let ref v=a;var d=D {value:v};let b=R {value:7};let ref w=b;let ref var alias=d;set(alias,w);return 0}",
         "fn first(x:R,y:R):R {return x} fn second(x:R,y:R):R {return y} fn main():i32 {var a=R {value:7};let b=R {value:3};let ref v=a;let ref w=b;let f=if false {first} else {second};let result=f(v,w);a=R {value:2};return result.value}",
         "fn one(x:R):R {return x} fn two(x:R):R {return R {value:3}} fn main():i32 {let a=R {value:7};let f=if false {one} else {two};let b=f(a);return a.value+b.value}",
         "fn id(x:R):R {return x} fn bad():R {let a=R {value:7};let ref v=a;let f=id;return f(v)} fn main():i32 {return 0}",
-        "struct H {value:R} fn set(var h:H,x:R):() {h.value=x} fn main():i32 {let a=R {value:7};var b=R {value:3};let ref v=a;let ref w=b;var h=H {value:v};let f=set;f(h,w);b=R {value:2};return h.value.value}",
-        "class C {value:R;constructor(x:R) {value=x}} fn bad():C {let a=R {value:7};let ref v=a;return new C(v)} fn main():i32 {return 0}",
-        "class C {value:R;constructor(x:R) {value=x};destructor {let n=value.value}} fn main():i32 {var a=R {value:7};let ref v=a;let c=new C(v);a=R {value:3};return 0}",
+        "struct H {value:R} fn set(var h:H,_borrowed_x:R):() {let x=_borrowed_x;h.value=x} fn main():i32 {let a=R {value:7};var b=R {value:3};let ref v=a;let ref w=b;var h=H {value:v};let f=set;f(h,w);b=R {value:2};return h.value.value}",
+        "class C {value:R;constructor(_borrowed_x:R) {let x=_borrowed_x;value=x}} fn bad():C {let a=R {value:7};let ref v=a;return new C(v)} fn main():i32 {return 0}",
+        "class C {value:R;constructor(_borrowed_x:R) {let x=_borrowed_x;value=x};destructor {let n=value.value}} fn main():i32 {var a=R {value:7};let ref v=a;let c=new C(v);a=R {value:3};return 0}",
         "fn main():i32 {var a=R {value:7};let ref v=a;let d=D {value:v};a=R {value:3};return 0}",
         "fn main():i32 {var a=R {value:7};let ref v=a;let d=D {value:v};a.value=3;return 0}",
         "fn main():i32 {let a=R {value:7};let ref v=a;var d=D {value:v};let b=R {value:7};let ref w=b;d.value=w;return 0}",

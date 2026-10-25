@@ -1,11 +1,12 @@
 use super::*;
-type MethodShape = (Vec<(bool, bool, Type)>, Type);
+type MethodShape = (bool, Vec<(bool, bool, Type)>, Type);
 pub(super) fn signature(
     f: &a::Function,
     constants: &crate::constants::Constants,
     nominals: &records::Nominals,
 ) -> Result<MethodShape> {
     Ok((
+        f.unsafe_,
         f.parameters
             .iter()
             .map(|p| {

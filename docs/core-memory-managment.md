@@ -1,6 +1,6 @@
 # Nether Memory Model — основополагающая модель управления памятью
 
-**NMM 0.1 · редакция от 2026-10-21 · нормативное ядро проекта**
+**NMM 0.1 · редакция от 2026-10-25 · нормативное ядро проекта**
 
 Этот документ фиксирует выбранную модель памяти Nether: ссылочную семантику
 non-Copy значений, раздельные права владения, чтения и записи, автоматически
@@ -14,10 +14,11 @@ non-Copy значений, раздельные права владения, ч�
 явного решения владельца языка, новой редакции документа и обновления
 приёмочных примеров.
 
-Это спецификация целевого поведения, **не заявление о завершённой реализации
-или математическом доказательстве soundness**. Текущий компилятор частично
-реализует предыдущую модель. Успешная компиляция старого примера не доказывает
-его допустимость в NMM; отказ текущего checker не опровергает новый контракт.
+Это единственная модель памяти Nether 0.1 (`nmm-0.1`), редакция 2026-10-25.
+Нормативный контракт и завершённая реализация различаются: поддержанный subset
+указан в [status](0.1/status.md). Неподдержанный случай отклоняется явно.
+[Unsafe](unsafe.md) задаёт обязательства автора, не вторую модель памяти.
+Математическое доказательство soundness не заявлено.
 
 ## Содержание
 
@@ -46,78 +47,38 @@ non-Copy значений, раздельные права владения, ч�
 23. [Rust backend и оптимизации](#23-rust-backend-и-оптимизации)
 24. [Диагностика](#24-диагностика)
 25. [Приёмочные сценарии](#25-приёмочные-сценарии)
-26. [Переход от существующей реализации](#26-переход-от-существующей-реализации)
+26. [Состояние реализации 0.1](#26-состояние-реализации-01)
 27. [Порядок реализации и открытые детали](#27-порядок-реализации-и-открытые-детали)
 
 ## 1. Основание, приоритет и границы
 
-### 1.1. Источники решения
+### 1.1. Единственный контракт
 
-Основанием служат последние сообщения пользователя в чате «Напомнить отказ
-от лямбд» и переданный вместе с задачей текст «Nether Memory Model v0.1».
-В них выбраны:
+NMM принята как единственная модель управления памятью новой версии 0.1.
+Все compiler/runtime/backend layers и safe библиотеки обязаны сохранять O/R/W,
+origins, lifetime и cleanup. Успешная компиляция не делает противоречащее
+контракту поведение допустимым; такой случай является дефектом реализации.
 
-- ссылки вместо неявного копирования всех non-Copy значений;
-- отсутствие пользовательского `move`;
-- передача ответственности за уничтожение по выводимому lifetime;
-- `var` как эксклюзивный изменяемый доступ;
-- запрет получения `var` из readonly non-Copy пути;
-- разделение `O`, `R`, `W`;
-- `weak` для невладеющих связей;
-- передача изменяемых объектов между изолированными контекстами через каналы.
+### 1.2. Состав спецификации
 
-Вложение содержит краткое нормативное ядро и описание состава полного документа,
-а не сам упомянутый в нём файл из 22 разделов. Ответы ассистента в доступной
-истории представлены ссылками на содержимое, а сообщения пользователя доступны
-текстом. Поэтому настоящая спецификация не выдаёт недоступный полный файл
-за прочитанный источник и не приписывает ему конкретные алгоритмы.
+Этот документ определяет память. [Основная спецификация](main.md) определяет
+остальные правила, [профиль](0.1/profile.md) — поддержанный source subset,
+[unsafe](unsafe.md) — границу обязательств. Эти документы не вводят
+альтернативных memory rules. Планы и статус описывают работу, не меняя NMM.
 
-Здесь различаются три уровня:
+Совместимые частные contracts: [storage](0.1/storage-contracts.md),
+[layout](0.1/layout.md), [metadata](0.1/metadata.md),
+[Rust backend](0.1/rust-backend.md). Они конкретизируют NMM и проверяются
+по её инвариантам. Псевдокод, предлагаемые названия MIR operations и layout
+metadata могут заменяться эквивалентной реализацией после приёмки.
 
-| Уровень | Значение |
-| --- | --- |
-| Нормативное ядро | Выбранные пользователем свойства и необходимые следствия их совместного выполнения |
-| Сохранённые решения | Совместимые правила актуального репозитория: синтаксис, identity, cleanup, static storage, Rust backend |
-| Референсный алгоритм | Предлагаемый способ реализации инвариантов; допускает эквивалентную замену после проверки |
+### 1.3. Обязательная граница
 
-Псевдокод, устройство control block, названия MIR операций и обозначения
-диагностик ниже относятся к третьему уровню. Они не являются утверждением,
-что такие сущности уже существуют в коде.
-
-### 1.2. Приоритет
-
-При противоречии **этот документ имеет приоритет в вопросах памяти** над
-[main.md](main.md), [профилем 0.1](0.1/profile.md),
-[roadmap](0.1/roadmap.md), прежними memory cases и деталями реализации.
-Синтаксис, числовые правила, модули и остальные вопросы берутся из актуального
-профиля, если здесь явно не указан переход.
-
-Сохраняются совместимые решения:
-
-- [статические режимы owned/readonly storage](0.1/decisions/container-ownership.md);
-- [запись в inline target через safe view](0.1/decisions/mutable-view-write.md);
-- [запрет замены class identity через object view](0.1/decisions/class-view-replacement.md);
-- [запрет замены finalizing target](0.1/decisions/destructor-self-replacement.md);
-- [порядок cleanup после замены root](0.1/decisions/root-cleanup-order.md);
-- [Nether → Rust](0.1/rust-backend.md).
-
-Старые примеры этих документов могут требовать переписывания: сохранение
-конкретного решения не сохраняет отменённое повышение readonly → mutable
-или прежний выбор move по отсутствию будущего use.
-
-### 1.3. Что действительно изменено
-
-| Прежнее правило или формулировка | Правило NMM |
-| --- | --- |
-| `let b = a` может становиться move только потому, что `a` больше не читается | Для существующего non-Copy объекта это R alias; перенос O требует lifetime/owning контекста |
-| `let a = new T(); var b = a` разрешается через consuming move | Ошибка: O не выдаёт W через readonly путь |
-| Обычный параметр может получить mutable local при owned entry | Ошибка: ordinary non-Copy parameter остаётся R даже при consuming-effect |
-| `var`-параметр имеет owned или borrowed вариант | Для non-Copy `var` задаёт W borrow; сам по себе не получает и не потребляет O |
-| Owned result автоматически разрешает mutable binding | Для той же non-Copy цели учитывается access provenance; O не отмывает R в W |
-| Общая группа может решать ownership для циклического графа | Owning-рёбра ацикличны; region не легализует owning-cycle |
-| Weak сводится к проверке адреса или generation | Lookup должен обеспечить безопасный R-доступ на всё время использования результата |
-| Capturing closures вне профиля 0.1 ([main.md](main.md) §30, `E0104`) | Capturing closures входят в язык; захват выводится автоматически по §17 |
-| Вставленный план требует непосредственно генерировать LLVM IR | Проверки выполняются до Rust codegen; LLVM используется внутри rustc |
+Non-Copy binding не превращается в move по последнему use. O не выдаёт W.
+Consuming API требует owner-token; borrowed ABI не подменяет consuming-effect.
+Owning-рёбра ацикличны; regions/groups не являются обходом этого ограничения.
+Unsafe допускает только явно определённые операции с дополнительными
+обязательствами автора; обычные safe loans и ownership checks сохраняются.
 
 ## 2. Краткая формулировка
 
@@ -1348,8 +1309,12 @@ task не переживает владельца; detached task получае�
 
 ## 19. Unsafe, FFI и raw storage
 
-`unsafe` позволяет операции с дополнительными обязательствами автора,
-но не отключает проверки обычного ownership и safe loans.
+Полный Rust-like контракт — [unsafe.md](unsafe.md). `unsafe fn` объявляет
+обязательства caller; явный `unsafe { ... }` подтверждает их выполнение.
+Unsafe операции требуют такого блока даже в теле unsafe fn. Типы, обычные
+ownership и safe loans продолжают проверяться. Safety сохраняется в public
+contracts; её нельзя стереть преобразованием к safe callable. Raw operations
+ниже — нормативный контракт до завершения source implementation.
 
 `*T`/`*var T` — raw pointer, не owner-token. Copy pointer копирует адрес
 и provenance, не объект. Получение mutable адреса требует допустимого W пути.
@@ -1371,9 +1336,11 @@ invalidation от caller. Его контракты описывают `Initiali
 - ZST имеют логические slots/cleanup даже без физических bytes;
 - borrowed descriptors сохраняют origins внешних targets.
 
-Сигнатуры и access effects этих intrinsics подлежат согласованию с NMM:
-старый owned mutable entry не может обходить запрет потребления самого
-non-Copy `var` параметра.
+Сигнатуры intrinsics разделяют storage mode до выбора consuming-effect:
+owned insertion требует O, borrowed insertion сохраняет descriptor без Consume.
+Non-Copy `var` параметр не потребляет самого себя. Mutable receiver может
+потреблять принадлежащий ему initialized slot только через проверенный intrinsic
+с явным Take/Invalidate/cleanup effect, не через promotion W в O.
 
 FFI адаптер отдельно задаёт, кто выделяет/освобождает память, может ли callee
 сохранять pointer, вызывать callback или инвалидировать объект. Неизвестный
@@ -1386,6 +1353,7 @@ foreign call не считается pure/readonly. Через обычную C 
 
 ```text
 EntryContract {
+    safety: Safe | Unsafe
     parameters: [
         logical_type,
         physical_storage_shape,
@@ -1693,8 +1661,9 @@ runtime выбор режима owned/borrowed вместо фиксирован
 
 ## 24. Диагностика
 
-Следующие имена — **предлагаемые стабильные категории NMM**, не уже занятые
-числовые коды frontend. Отображение в `E....` назначается при реализации.
+Таблица задаёт семантические категории NMM. Большинство пока отображается
+в E-коды; `NMM_NO_OWNER_TOKEN` уже используется непосредственно. Unsafe
+call вне блока — E0500; неподдержанный unsafe callable — E0501.
 
 | Категория | Причина |
 | --- | --- |
@@ -1854,107 +1823,40 @@ fn live_write(): () {
 Нельзя засчитывать parser success или старые тесты readonly-to-owned-mutable
 как доказательство выполнения NMM.
 
-## 26. Переход от существующей реализации
+## 26. Состояние реализации 0.1
 
-На момент этой редакции репозиторий содержит действующие frontend, HIR/MIR,
-loan analysis, Rust backend, runtime и примеры предыдущей семантики.
-[status.md](0.1/status.md) описывает именно их готовность; его числа тестов
-не являются результатами новой модели.
+Редакция 2026-10-25. Новая базовая линия заменяет прежнюю модель;
+параллельного legacy memory mode нет. [Эксперимент](../proof-of-work/provenance-inference.md)
+остаётся ограниченной проверкой алгоритма, не вторым источником семантики.
 
-Полезная основа уже есть:
+### 26.1. Синхронное ядро и unsafe boundary
 
-- [loan domain](../compiler/core/src/mir/loans.rs): origins, R/W, parent loans;
-- [MIR](../compiler/core/src/mir.rs): places, control flow и memory операции;
-- [initialization](../compiler/core/src/mir/initialization.rs);
-- [drop plan](../compiler/core/src/mir/drop_plan.rs) и
-  [drop state](../compiler/core/src/mir/drop_state.rs);
-- [storage writes](../compiler/core/src/mir/storage_writes.rs);
-- [frontend grammar](../compiler/frontend/src/parser.rs);
-- [runtime](../runtime/src/lib.rs).
+Реализованы aliases, sequential reborrow, R → W запреты, borrowed ordinary
+параметры и consuming fixed point. Все consuming entries требуют O;
+alias отклоняется `NMM_NO_OWNER_TOKEN`. Для borrowed storage непотребляющее
+тело сохраняет локальный alias параметра и экспортирует его provenance.
 
-Обязательные изменения:
+Добавлены unsafe fn и явные statement unsafe blocks; calling unsafe требует
+лексического блока даже внутри unsafe fn. Safe NMM checks сохраняются.
+Safety проверяется в interface/override signatures. Unsafe function pointers
+пока отклоняются, чтобы не стирать safety в callable type.
 
-| Область | Работа |
-| --- | --- |
-| Binding inference | Убрать превращение обычного non-Copy alias в move по последнему use |
-| Access | Запретить readonly-owned → mutable, в том числе через return/aggregate/entry |
-| Parameters | Разделить ordinary consuming R и non-Copy `var` W borrow |
-| Ownership | Сделать O transitions явными и независимыми от access; уточнить owning sink inference |
-| Results/metadata | Сохранять access provenance наряду с ownership и origins |
-| Loans | Проверять последовательные reborrows и транзитивные uses без второго O |
-| Storage | Сохранить static modes; согласовать access компонентов и mutation API |
-| Graphs | Проверять owning-cycle; не использовать groups как обход |
-| Weak | Реализовать metadata, lookup/guard и static conflict protocol |
-| Closures | Добавить вывод capture/вида замыкания, окружение как aggregate, callable contract; обновить [main.md](main.md) §29–30 и `E0104` профиля |
-| Concurrency | Добавить проверенный channel transfer и cancellation protocol |
-| Tests/docs | Перевести старые memory cases на oracle этого документа |
-
-Прежние примеры `var local = readonly_parameter` и `var editable = readonly_owner`
-должны стать отрицательными. Примеры function identity не должны автоматически
-выдавать W только потому, что выбран owned result. `ref`-зависимые примеры
-можно сохранять как совместимость синтаксиса, но основную NMM семантику нужно
-проверять простыми `let`/`var`.
-
-Перенос документации не выполняет эти изменения автоматически. Эта редакция
-задаёт контракт для следующих изменений компилятора.
-
-### 26.1. Состояние перехода на 2026-10-23
-
-Часть обязательных изменений выполнена в `compiler/core`; остальное остаётся
-контрактом. Опорный результат — [proof-of-work](../proof-of-work/provenance-inference.md).
-
-Реализовано (M0 и часть M1):
-
-- **Привязки.** `let`/`var` от существующего non-Copy места — alias (R, для `var` — W).
-  Move «по отсутствию будущего use» убран ([check.rs](../compiler/core/src/check.rs)).
-  `var` из readonly пути отклоняется (E0317); partial move в owning-позиции
-  из типа с деструктором по-прежнему отклоняется (E0392).
-- **Параметры.** Обычный non-Copy параметр — R borrow, `var` — W borrow
-  ([methods.rs](../compiler/core/src/check/methods.rs), `parameter_modes`). Копируемые
-  значения и receivers не менялись.
-- **Consuming-параметры.** Параметр, корень которого попадает в owning-позицию
-  (aggregate/enum payload, сохранение через присваивание, consuming-параметр
-  вызываемой функции), выводится как consuming до неподвижной точки
-  ([consume.rs](../compiler/core/src/check/consume.rs)). `var`-параметр не может
-  быть consuming (E0398, N09).
-- **Выбор entry по виду аргумента, не по будущему use.** Владелец или свежее
-  значение в consuming-параметр — owned entry и передача O (последующее
-  использование — E0384). Alias — view entry: сохраняется readonly descriptor,
-  O остаётся у владельца. Остальные параметры — borrowed entry.
-- **Временные значения.** Свежее значение для borrowed-параметра живёт до конца
-  вызова; привязать к нему возвращённый view нельзя (E0381, §11.5).
-- **Указатели на функции** без известного entry используют ABI по умолчанию:
-  non-Copy параметры заимствуются; Rust backend следует тому же правилу.
-- Права доступа результата и origins ([returns.rs](../compiler/core/src/mir/returns.rs))
-  и совместный fixed point entries ([effects.rs](../compiler/core/src/mir/effects.rs))
-  уже существовали и сохранены.
-
-Отклонения от текста NMM и нерешённое:
-
-- Alias, переданный в consuming-параметр, не отклоняется как `NMM_NO_OWNER_TOKEN`, а
-  выбирает view entry (хранение descriptor). Это сохраняет borrowed storage и
-  требует решения владельца языка.
-- Имена `NMM_*` не заведены; используются прежние коды `E....`.
-- Не реализованы: weak, каналы и async, замыкания, MIR verifier (§22),
-  замена `Local.view`/`mutable` на явные O/R/W токены.
-- Старые приёмочные кейсы [memory-cases.md](0.1/memory-cases.md) M01 и M05 требуют
-  переписывания: они допускают move по последнему использованию.
+Полный [статус](0.1/status.md) содержит реализованный subset и ограничения.
+Raw pointers/storage/FFI, weak, closures, channels/async и отдельный MIR verifier
+не завершены. Названия большинства диагностик остаются E-кодами;
+семантическим NMM именам соответствует матрица приёмки, а не обещание всех кодов.
 
 ## 27. Порядок реализации и открытые детали
 
-### 27.1. Этапы NMM
+### 27.1. Приоритет новой 0.1
 
-Это отдельный план миграции модели; его M0–M5 не означают закрытие старых
-C0–C9 roadmap.
+Основной исполняемый план — [mvp_plan.md](0.1/mvp_plan.md).
+Сначала согласуются и проверяются синхронное ядро NMM, unsafe boundary,
+MIR verifier и Rust backend/runtime. Расширения языка не заменяют эту приёмку.
 
-| Этап | Объём | Условие завершения |
-| --- | --- | --- |
-| M0 | O/R/W, non-Copy aliases, readonly запреты, sequential reborrow, local transfer и deterministic drop | N01–N09 и базовые drop/branch cases согласованы в checker/MIR |
-| M1 | Effects, results, generics, modules, indirect calls и recursive fixed point; non-escaping замыкания (Copy/R/W captures) | Контракты не стираются на границах; нет R → W обходов; N35–N36, N41 |
-| M2 | Static aggregate/storage modes, invalidation, construction/replacement/panic; O captures и escaping замыкания | Differential results/drop traces; exactly-once cleanup; N37–N39, N42 |
-| M3 | Acyclic ownership, weak metadata/guards и destructor dependencies | Weak failure/reuse/unknown-origin tests; без strong ARC обычных objects |
-| M4 | Channel transfer, async state и cancellation (детали и этапы S0–S4 — [async-await-runtime.md](async-await-runtime.md)); замыкания через каналы/`spawn`, weak captures (N40) | Проверены commit/failure/escape paths и изоляция |
-| M5 | MIR verifier coverage, backend audit и performance acceptance | Корректность при O0/O3, опубликованные измерения и известные ограничения |
+После неё: raw storage и safe adapters; затем weak/ацикличные структуры,
+closures и channel/async state. Для каждого расширения нужны compile-pass,
+compile-fail, HIR/MIR/native O0/O3 и observable cleanup cases по §25.
 
 ### 27.2. Детали, которые нельзя объявлять уже утверждёнными
 
@@ -1962,7 +1864,8 @@ C0–C9 roadmap.
   сопровождения weak handles/guards.
 - Конкретные числовые коды diagnostics и wire format новой metadata.
 - Синтаксис явного weak capture и имена/поверхность callable типов (как вид замыкания `Read/Write/Once` виден в сигнатурах и function type).
-- Сроки обновления [main.md](main.md) §29–30, `E0104` и приёмочных тестов профиля.
+- Полнота source реализации closures и её приёмки; синтаксис unsupported
+  остаётся явно диагностируемым до готовности lowering.
 - Библиотечные сигнатуры каналов, send failure result и порядок cleanup очереди.
 - Поддержка transfer графа с внутренними weak связями между domains.
 - Полнота alias/escape solver и допустимая степень консерватизма.

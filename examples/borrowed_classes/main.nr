@@ -1,7 +1,7 @@
 struct Item {value:i32;destructor {}}
 class Holder<T> {
     value:T
-    constructor(value:T) {this.value=value}
+    constructor(source:T) {let value=source;this.value=value}
     fn get(this):T {return value}
     destructor {}
 }

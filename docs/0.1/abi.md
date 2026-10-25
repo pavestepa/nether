@@ -1,5 +1,8 @@
 # Rust code generation и границы ABI
 
+Редакция 2026-10-25. Единственная модель памяти — [NMM](../core-memory-managment.md)
+(`nmm-0.1`); unsafe boundary — [unsafe.md](../unsafe.md). Поддержка — [status](status.md).
+
 Актуальная архитектура: [Nether → Rust](rust-backend.md). Прямой LLVM backend и
 старый C linking protocol удалены из основного pipeline. Внутренний ABI не является
 стабильным Rust или C binary ABI; совместимость требует одного toolchain/profile.
@@ -25,7 +28,7 @@ Function value указывает на фиксированный entry с из�
 view этот pointer отсутствует: запись поля не переставляет root. Lifecycle flags
 фиксируют initialization, а не выбирают ownership динамически. Resource-free
 программы сохраняют простую схему выше без Context. Этот внутренний ABI пока
-не заявляется как оптимальный по размеру views; performance acceptance — C9.
+не заявляется как оптимальный по размеру views; performance acceptance остаётся открытой.
 
 Локальные места используют MaybeUninit; payload types не получают произвольный
 Rust Drop. Нельзя читать неинициализированные или moved части; перед emission
@@ -85,7 +88,7 @@ aligned sentinel. Нужны проверяемые deallocation layout, exactly
 OOM и diagnostic allocation accounting. Shared owners/refcounts не вводятся.
 
 
-## Borrowed aggregate ABI: реализованный C3.2
+## Borrowed aggregate ABI: статические режимы NMM
 
 Readonly descriptors могут находиться внутри struct/tuple/array/enum и class payload.
 Concrete entry получает и возвращает выбранное статически представление. Owned
@@ -97,7 +100,7 @@ parameter/component paths и input origins для возможных новых 
 normal и panic edges caller объединяет эти зависимости с прежними. Контракт
 специализируется вместе с ABI, не добавляя runtime ownership tags. Публиковать
 view callee-local/owned target запрещено. Экспорт metadata для отдельной компиляции
-остаётся C6.3/C6.4. User destructors имеют отдельный entry на каждый physical layout;
+остаётся незавершённым. User destructors имеют отдельный entry на каждый physical layout;
 их implicit reads участвуют в lifetime и cleanup-order checks.
 
 Function pointer остаётся одним адресом кода. Статическая signature фиксирует

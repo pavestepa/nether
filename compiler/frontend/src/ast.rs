@@ -79,6 +79,7 @@ pub struct Function {
     pub result: Type,
     pub body: Option<Block>,
     pub c_abi: bool,
+    pub unsafe_: bool,
     pub span: Span,
 }
 
