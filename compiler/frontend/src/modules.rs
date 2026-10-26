@@ -40,6 +40,8 @@ pub fn load(entry: &Path, package: &str) -> Loaded {
         }
     };
     let root = entry.parent().unwrap().to_path_buf();
+    // A virtual path is an internal module identity, never read from disk.
+    let intrinsic_path = root.join("\0core-intrinsic");
     let mut pending = vec![entry.clone()];
     let mut modules = BTreeMap::new();
     let mut paths = BTreeSet::new();
@@ -47,7 +49,11 @@ pub fn load(entry: &Path, package: &str) -> Loaded {
     paths.insert(entry.clone());
     while let Some(path) = pending.pop() {
         let id = SourceId(sources.len());
-        let text = match fs::read_to_string(&path) {
+        let text = match if path == intrinsic_path {
+            Ok(crate::intrinsics::SOURCE.to_owned())
+        } else {
+            fs::read_to_string(&path)
+        } {
             Ok(text) => text,
             Err(e) => {
                 sources.push(Source::new(path.to_string_lossy(), ""));
@@ -63,7 +69,14 @@ pub fn load(entry: &Path, package: &str) -> Loaded {
                 continue;
             }
         };
-        let source = Source::new(path.to_string_lossy(), text);
+        let source = Source::new(
+            if path == intrinsic_path {
+                crate::intrinsics::MODULE.to_owned()
+            } else {
+                path.to_string_lossy().into_owned()
+            },
+            text,
+        );
         let parsed = parse(id, &source.text);
         sources.push(source);
         diagnostics.extend(parsed.diagnostics);
@@ -72,6 +85,13 @@ pub fn load(entry: &Path, package: &str) -> Loaded {
         };
         for item in &module.items {
             if let ItemKind::Import { from, .. } = &item.kind {
+                if from == crate::intrinsics::MODULE {
+                    imports.insert((path.clone(), from.clone()), intrinsic_path.clone());
+                    if paths.insert(intrinsic_path.clone()) {
+                        pending.push(intrinsic_path.clone());
+                    }
+                    continue;
+                }
                 match import_path(&root, &path, from, package)
                     .and_then(|p| p.canonicalize().map_err(|e| e.to_string()))
                 {
@@ -99,7 +119,7 @@ pub fn load(entry: &Path, package: &str) -> Loaded {
             diagnostics,
         };
     }
-    match link(&entry, modules, imports) {
+    match link(&entry, &intrinsic_path, modules, imports) {
         Ok(module) => Loaded {
             sources,
             module: Some(module),
@@ -157,12 +177,24 @@ type Symbols = BTreeMap<String, Symbol>;
 
 fn link(
     entry: &Path,
+    intrinsic_path: &Path,
     modules: BTreeMap<PathBuf, Module>,
     imports: BTreeMap<(PathBuf, String), PathBuf>,
 ) -> Result<Module, Diagnostic> {
     let mut visible: BTreeMap<PathBuf, Symbols> = BTreeMap::new();
     for (index, (path, module)) in modules.iter().enumerate() {
         let mut names = Symbols::new();
+        if path == intrinsic_path {
+            for intrinsic in crate::intrinsics::Intrinsic::ALL {
+                names.insert(
+                    intrinsic.name().into(),
+                    Symbol {
+                        canonical: intrinsic.symbol().into(),
+                        private: true,
+                    },
+                );
+            }
+        }
         for item in &module.items {
             let Some(name) = item_name(&item.kind) else {
                 continue;
@@ -480,7 +512,9 @@ impl Rewrite<'_> {
                 self.expr(length);
             }
             TypeKind::Pointer { pointee, .. } => self.ty(pointee),
-            TypeKind::Function { parameters, result } => {
+            TypeKind::Function {
+                parameters, result, ..
+            } => {
                 for (_, ty) in parameters {
                     self.ty(ty);
                 }

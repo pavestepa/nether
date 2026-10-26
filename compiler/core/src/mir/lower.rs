@@ -508,6 +508,9 @@ impl Builder {
                 Operation::Enum(*variant, self.aggregate_fields(fields))
             }
             ExprKind::Tag(value) => Operation::TagPlace(self.place(value)),
+            ExprKind::Unary(operator @ ("raw_addr" | "raw_addr_mut"), value) => {
+                Operation::Unary(operator, Operand::Address(self.place(value)))
+            }
             ExprKind::Unary(operator, value) => Operation::Unary(operator, self.expr(value)),
             ExprKind::Cast(value) => Operation::Cast(self.expr(value), expr.ty.clone()),
             ExprKind::Binary(operator, left, right) if ["&&", "||"].contains(operator) => {

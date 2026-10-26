@@ -72,8 +72,11 @@ Null и неинициализированная память не являют�
 | NMM aliases, reborrow, readonly, consuming O | Реализовано для поддержанного subset; приёмка в memory-cases |
 | Cleanup, borrowed storage/results, generics, function values | Реализованы; консервативные отказы допустимы |
 | `unsafe fn`, statement `unsafe` block, direct/generic/method calls | Реализованы; safe NMM проверки сохраняются |
-| Unsafe function pointers | Отклоняются E0501 до появления safety в callable type |
-| Raw dereference/storage, FFI | Контракт определён; реализация не завершена |
+| Unsafe function pointers | `unsafe (T) => R`, safety сохраняется; indirect call требует unsafe block |
+| Statement `loop` | break/continue, nested loops и cleanup; `break value` пока не поддержан |
+| Raw pointers | Scalar address/read/write, element offset и writable → readonly cast; явный unsafe для операций с целью |
+| Allocation/storage | Owned scalar/Unit subset через `core/intrinsic`; arbitrary T и borrowed mode не завершены |
+| FFI | Контракт определён; реализация не завершена |
 | Inheritance/upcast/dyn | Проверка части declarations; исполнение derived objects не завершено |
 | Weak, capturing closures, channels/async | Целевой NMM контракт; source implementation не завершена |
 | Пользовательские Vec/String | Не завершены |

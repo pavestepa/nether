@@ -9,6 +9,35 @@ use std::{fs, process::Command};
 #[test]
 fn rust_native_matches_reference_at_both_optimization_levels() {
     let cases=[
+        "fn main():i32 {let a={1,7};let n:isize=1;unsafe {return *(&a[0]+n)}}",
+        "fn main():i32 {let n=7;let p=&n;let ref v=p;let q:*i32=*v;unsafe {return *q}}",
+        "unsafe fn read(p:*i32):i32 {unsafe {return *p}} fn main():i32 {let n=7;let f:unsafe (*i32)=>i32=read;unsafe {return f(&n)}}",
+
+        include_str!("../../../examples/raw_pointers/main.nr"),
+        "fn main():i32 {var n=2;let p=&var n;let q=p;unsafe {*q=7;return *p}}",
+        "fn identity<T:Copy>(p:*T):*T {return p} fn main():i32 {let n=7;let p=identity(&n);unsafe {return *p}}",
+        "struct S {p:*i32} fn main():i32 {let n=7;let s=S {p:&n};unsafe {return *s.p}}",
+        "fn main():i32 {let a={7,3};let p=&a[0];unsafe {let end=p+2;let first=end+(-2);return *first}}",
+        "struct S {n:i32} fn main():i32 {var s=S {n:1};let p=&var s.n;unsafe {*p=7};return s.n}",
+        "class C {n:i32;constructor() {n=1}} fn main():i32 {var c=new C();let p=&var c.n;unsafe {*p=7};return c.n}",
+        "fn main():i32 {var n=1;let ref var v=n;let p=&var v;unsafe {*p=7};return n}",
+        "fn main():i32 {var b=false;let p=&var b;unsafe {*p=true;if *p {return 7}};return 0}",
+        include_str!("../../../examples/unsafe_callable/main.nr"),
+        "fn main():i32 {loop {loop {break};return 7}}",
+        "struct R {v:i32;destructor {}} fn main():i32 {var n=0;loop {let r=R {v:n};n+=1;if n<7 {continue};break};return n}",
+        "struct R {v:i32} unsafe fn view(x:R):R {return x} fn main():i32 {let r=R {v:7};let f:unsafe (R)=>R=view;unsafe {let a=f(r);return a.v}}",
+        "fn fib(n:i32):i32 {if n<2 {return n};return fib(n-1)+fib(n-2)} fn main():i32 {return fib(12)}",
+        "fn main():i32 {var n:u64=27;var steps=0;while n!=1 {if n%2==0 {n=n/2} else {n=n*3+1};steps+=1};return steps}",
+        "fn odd(n:i32):bool {if n==0 {return false};return even(n-1)} fn even(n:i32):bool {if n==0 {return true};return odd(n-1)} fn main():i32 {if odd(13) {return 7};return 0}",
+        "fn main():i32 {var n:i8=127;n+=1;return n as i32}",
+        "fn main():i32 {let n:u128=340282366920938463463374607431768211455;return (n+1) as i32}",
+        "class C {value:i32;constructor(n:i32) {value=n}} fn main():i32 {var c=new C(1);var n=0;while n<3 {c=new C(n);n+=1};return c.value}",
+        "class C {value:i32;constructor(n:i32) {value=n}} fn main():i32 {var n=0;var sum=0;while n<9 {let c=new C(n);n+=1;if n==2 {continue};sum+=c.value;if n==7 {break}};return sum}",
+        "class C {value:i32;constructor(n:i32) {value=12/n}} fn main():i32 {let c=new C(0);return c.value}",
+        // NMM §25.1: sequential class reborrows restore each parent.
+        "class Counter {value:i32;constructor(initial:i32) {this.value=initial};fn read(this):i32 {return this.value};fn increment(var this):() {this.value+=1}} fn advance(var counter:Counter):() {counter.increment()} fn main():i32 {var owner=new Counter(10);let initial=owner.read();var first=owner;first.increment();var second=first;advance(second);first.increment();owner.increment();let result=owner;return result.read()-initial}",
+        // N13: rebinding a view must not destroy its previous target.
+        "struct R {value:i32;destructor {}} fn main():i32 {var a=R {value:1};var b=R {value:2};var alias=a;alias=b;alias.value+=1;return a.value+b.value}",
         "fn identity<T>(x:T):T {return x} fn main():i32 {let f:(i32)=>i32=identity;return f(9)}",
         "fn identity<T>(x:T):T {return x} fn main():i32 {let f:(i32)=>i32=identity<i32>;return f(9)}",
         "fn first<T:Copy,const N:usize>(xs:{T;N}):T {return xs[0]} fn main():i32 {let f:({i32;2})=>i32=first;return f({8,9})}",

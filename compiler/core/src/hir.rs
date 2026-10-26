@@ -8,6 +8,11 @@ pub type LocalId = usize;
 pub enum Type {
     /// Static readonly descriptor stored as an aggregate component.
     StoredView(Box<Type>),
+    /// Non-owning address. Validity and aliasing are obligations of unsafe code.
+    Pointer {
+        mutable: bool,
+        pointee: Box<Type>,
+    },
     Unit,
     Bool,
     Char,
@@ -16,6 +21,7 @@ pub enum Type {
     F64,
     Str,
     Function {
+        unsafe_: bool,
         parameters: Vec<(bool, Type)>,
         result: Box<Type>,
         contract: Option<Box<FunctionContract>>,
@@ -134,6 +140,7 @@ impl Type {
                 parameters,
                 result,
                 contract,
+                ..
             } => {
                 *contract = None;
                 for (_, ty) in parameters {
@@ -173,6 +180,12 @@ impl Type {
             name.clone()
         }
     }
+    pub fn raw_scalar(&self) -> bool {
+        matches!(
+            self,
+            Self::Bool | Self::Char | Self::Integer(_) | Self::F32 | Self::F64
+        )
+    }
     pub fn numeric(&self) -> bool {
         matches!(self, Self::Integer(_) | Self::F32 | Self::F64)
     }
@@ -188,6 +201,7 @@ pub type Classes = std::collections::BTreeMap<String, ClassDefinition>;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     View(crate::reference_memory::ViewValue),
+    Pointer(crate::reference_memory::RawPointer),
     Class(crate::reference_memory::ClassValue),
     Unit,
     Bool(bool),

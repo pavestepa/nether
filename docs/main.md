@@ -2065,7 +2065,7 @@ return (
 | 18 | `=`, compound assignments | Справа налево |
 | 19 | `return`, `break`, lambda | — |
 
-Принятие таблицы не вводит автоматически отсутствующий в Nether синтаксис raw pointers, borrow operators или Rust closures. Prefix `await` разбирается как unary form Nether; его операнд включает call/index/member access. Например, `await load_user(id)` ожидает результат вызова. `var` является модификатором declaration/parameter/pattern/receiver, а не unary expression и не prefix call argument. `this` является receiver expression внутри instance method; формы `this` / `var this` в parameter list разбираются по §34.
+Принятие таблицы не вводит автоматически ещё не реализованные операции raw storage или Rust closures. Prefix `await` разбирается как unary form Nether; его операнд включает call/index/member access. Например, `await load_user(id)` ожидает результат вызова. `var` является модификатором declaration/parameter/pattern/receiver, а не unary expression и не prefix call argument. `this` является receiver expression внутри instance method; формы `this` / `var this` в parameter list разбираются по §34.
 
 Основа таблицы и порядка вычисления: [Rust Reference: expressions](https://doc.rust-lang.org/reference/expressions.html#expression-precedence). Операнды обычных операций вычисляются слева направо; `&&`/`||` используют short-circuit evaluation.
 
@@ -2357,3 +2357,25 @@ FFI/raw storage требуют явных ABI, layout, provenance и release con
 unwind не пересекает обычную C ABI boundary. Source FFI пока не реализован.
 
 ---
+
+
+## Текущее расширение 0.1: unsafe callable и statement loop
+
+Реализован `unsafe (T) => R` с сохранением safety в generics, aggregates,
+results и imports. Получение pointer не требует блока; вызов требует explicit
+unsafe. Safe/unsafe types различны и пока не имеют implicit coercion.
+
+`loop { ... }` реализован как цикл с истинным условием с обычными break/continue,
+return и deterministic cleanup. Loop без break текущего уровня считается
+непродолжающим выполнение. `break value` и value-result loop из целевого
+синтаксиса выше ещё не реализованы; такой синтаксис отвергается.
+
+
+## Текущее расширение 0.1: scalar raw pointers
+
+`*T` / `*var T` — невладеющие Copy addresses. Реализованы `&place` / `&var place`
+для scalar places, unsafe `*pointer`, `*pointer = value`, `pointer + isize` и
+writable → readonly cast с неизменным pointee. Адресуемые scalar types:
+integer/bool/char/f32/f64, в том числе поля и элементы fixed arrays.
+Остальные raw/storage operations остаются открытыми; точные границы,
+caller obligations и пример safe wrapper — в [unsafe.md](unsafe.md).

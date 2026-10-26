@@ -5,12 +5,12 @@
 
 Архитектура: [Nether → Rust](rust-backend.md). Правила памяти сохраняются; прямой LLVM backend удалён.
 
-Статус: нормативный контракт новой 0.1; реализации intrinsics ещё нет.
+Статус: нормативный контракт новой 0.1; реализован первый owned scalar subset (см. §6).
 Основание — [утверждённые статические режимы](decisions/container-ownership.md).
-При реализации сигнатуры ниже предоставляются compiler-owned модулем `core/intrinsic` по symbol ID,
+Реализованные сигнатуры предоставляются compiler-owned модулем `core/intrinsic` по symbol ID,
 а не по совпадению имени Vec/String/пользовательской функции.
 
-Сигнатуры intrinsics нормативны для будущего trusted storage subset. Обычная
+Полная таблица сигнатур нормативна; готовность отдельных операций отмечена в §6. Обычная
 source функция с consuming-effect не принимает borrowed аргумент через
 альтернативный entry. Static storage mode выбирается до вывода эффекта самого
 intrinsic: borrowed insertion не объявляет Consume. Unsafe admission не
@@ -174,3 +174,51 @@ unsafe кодом, а safe views возвращаются из RawStorage, бе�
 Backend baseline не навешивает noalias/inbounds/alignment assumptions из
 одного наличия raw pointer. Сначала должны быть доказаны нужные premises;
 unsafe source contract не разрешает вводить более сильные Rust aliasing/provenance assumptions.
+
+
+## 6. Реализованный owned scalar subset
+
+`import {RawStorage, allocate, initialize, take, replace, drop_slot, release}
+from "core/intrinsic"` подключает встроенный модуль из compiler distribution,
+без поиска одноимённого файла в проекте. Private intrinsics получают закрытые
+symbol IDs при module linking. Пользовательские функции `allocate`,
+`heap_allocate` или тип `RawStorage` вне этого модуля остаются обычными именами.
+Reexports сохраняют привязку; private intrinsic нельзя импортировать напрямую.
+
+Поддержаны T = integer, bool, char, f32, f64 и `()`:
+
+- `allocate`, `initialize`, `take`, `replace`, `drop_slot`, `release`;
+- safe queries `capacity`, `size_of`, `align_of`, `slot_size`, `slot_align`.
+
+Layout queries работают и для остальных уже поддержанных layout типов.
+RawStorage реализован закрытым non-Copy record с allocation address и capacity,
+проверенным destructor и обычным NMM cleanup. Его поля недоступны caller;
+создать capability из произвольного pointer нельзя. `release` требует O:
+передача alias отклоняется даже внутри unsafe. Изменение slots требует W на
+storage. Функции записи/переноса пока ограничены scalar/Unit и не являются
+реализацией переноса произвольных non-Copy payloads.
+
+Native backend проверяет layout/object-size до allocation, преобразует null/OOM
+в обычную Nether panic и использует aligned sentinel при zero capacity или ZST.
+Он не выделяет initialization bitmap. Диагностические интерпретаторы хранят
+разреженную карту initialized logical slots и отвергают повторный initialize,
+take/drop пустого slot, выход за capacity и release непустого storage.
+Native unsafe preconditions по-прежнему обеспечивает caller.
+
+Default cleanup освобождает allocation, не уничтожая её содержимое. Библиотечный
+владелец должен очистить initialized slots перед этим, в том числе при panic.
+[Пример безопасного fixed-capacity buffer](../../examples/scalar_buffer/main.nr)
+хранит initialized length, допускает только запись в свободный slot и очищает
+заполненный prefix в destructor; underlying storage освобождается после него.
+[Низкоуровневый пример](../../examples/raw_storage/main.nr) показывает явный release.
+
+Не реализованы: non-scalar/owning elements и их generated drop glue, readonly-view
+storage mode, safe `view`/`view_mut` с provenance, `slot_address`, range moves,
+raw `drop_in_place`, allocator adoption и FFI. Эти ограничения не закрывают
+приёмку полного Vec/String/storage контракта из §§1–5.
+
+Проверки: `compiler/core/tests/raw_storage.rs` — HIR/MIR equivalence, негативная
+приёмка ownership/privacy/unsafe, reexports, MIR mutations; native O0/O3 с
+счётчиком allocations, проверкой normal/panic cleanup и отказом allocator
+до первой и после первой успешной allocation. Invalid unsafe protocols
+исполняются только диагностическими интерпретаторами.

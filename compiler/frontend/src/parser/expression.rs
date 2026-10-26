@@ -293,6 +293,13 @@ impl Parser {
                 then_block,
                 else_branch,
             }
+        } else if self.eat_word("loop") {
+            let condition = Box::new(Expr {
+                kind: ExprKind::Literal(Literal::Bool(true)),
+                span: self.last,
+            });
+            let body = self.block()?;
+            ExprKind::While { condition, body }
         } else if self.eat_word("while") {
             if self.word("let") {
                 return Err(Diagnostic::new(

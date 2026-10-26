@@ -142,6 +142,7 @@ impl Parser {
                 "if",
                 "else",
                 "while",
+                "loop",
                 "match",
                 "class",
                 "struct",
@@ -211,7 +212,7 @@ impl Parser {
                 "dyn" | "super" | "virtual" | "override" => {
                     ("E0102", "runtime polymorphism or inheritance")
                 }
-                "for" | "loop" => ("E0103", "iteration syntax; use while"),
+                "for" => ("E0103", "iteration syntax; use while"),
                 "owns" | "type" => ("E0106", "ownership annotations or associated types"),
                 _ => return Ok(()),
             },

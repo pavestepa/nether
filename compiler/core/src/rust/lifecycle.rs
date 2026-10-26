@@ -117,14 +117,14 @@ impl Emitter {
                 } else {
                     ("()".into(), "()".into())
                 };
-                out.push_str(&format!("struct H{id} {{data:MaybeUninit<{data}>,state:{state_ty},complete:bool}}\nunsafe fn new{id}()->*mut H{id} {{let heap=Box::into_raw(Box::new(H{id} {{data:MaybeUninit::uninit(),state:{state_init},complete:false}}));\n// class-allocation\nheap}}\n#[derive(Clone,Copy)] struct S{id} {{live:bool}}\nimpl S{id} {{const VACANT:Self=Self {{live:false}};const LIVE:Self=Self {{live:true}};}}\n#[derive(Clone,Copy)] struct V{id} {{data:*mut H{id}}}\n#[derive(Clone,Copy)] struct W{id} {{data:*mut *mut H{id},state:*mut S{id},stamp:*mut u64}}\nunsafe fn drop{id}(ctx:&mut Context,p:*mut *mut H{id},s:*mut S{id},fault:Fault)->Result<(),Fault> {{if !(*s).live {{return Ok(());}}(*s).live=false;let heap=p.read();let mut pending=None;\n"));
+                out.push_str(&format!("struct H{id} {{data:MaybeUninit<{data}>,state:{state_ty},complete:bool,heap_owned:bool}}\nfn empty{id}()->H{id} {{H{id} {{data:MaybeUninit::uninit(),state:{state_init},complete:false,heap_owned:false}}}}\nunsafe fn new{id}()->*mut H{id} {{let heap=Box::into_raw(Box::new(H{id} {{data:MaybeUninit::uninit(),state:{state_init},complete:false,heap_owned:true}}));\n// class-allocation\nheap}}\n#[derive(Clone,Copy)] struct S{id} {{live:bool}}\nimpl S{id} {{const VACANT:Self=Self {{live:false}};const LIVE:Self=Self {{live:true}};}}\n#[derive(Clone,Copy)] struct V{id} {{data:*mut H{id}}}\n#[derive(Clone,Copy)] struct W{id} {{data:*mut *mut H{id},state:*mut S{id},stamp:*mut u64}}\nunsafe fn drop{id}(ctx:&mut Context,p:*mut *mut H{id},s:*mut S{id},fault:Fault)->Result<(),Fault> {{if !(*s).live {{return Ok(());}}(*s).live=false;let heap=p.read();let mut pending=None;\n"));
                 if let Some(entry) = self.destructors.entry(ty) {
                     out.push_str(&format!("if (*heap).complete {{\n// class-destructor-entry {entry}\nif let Err(e)=f{entry}(ctx,V{id} {{data:heap}}) {{pending=Some(e);}}}}\n"));
                 }
                 if self.resource(&payload) {
                     out.push_str(&format!("if let Err(e)=drop{payload_id}(ctx,std::ptr::addr_of_mut!((*heap).data).cast(),std::ptr::addr_of_mut!((*heap).state),fault) {{if pending.is_none() {{pending=Some(e);}}}}\n"));
                 }
-                out.push_str("// class-deallocation\ndrop(Box::from_raw(heap));match pending {Some(e)=>Err(e),None=>Ok(())}}\n");
+                out.push_str("if (*heap).heap_owned {\n// class-deallocation\ndrop(Box::from_raw(heap));}match pending {Some(e)=>Err(e),None=>Ok(())}}\n");
                 continue;
             }
             let mut members = Vec::new();
@@ -264,7 +264,15 @@ impl Emitter {
         unwind: usize,
     ) -> String {
         let (dest, ty) = self.place(destination, f);
-        let expression = self.operation(operation, &ty, f);
+        let expression = if matches!(operation, Operation::AllocateClass(_))
+            && self.stack_slots.contains(&destination.local)
+        {
+            let id = self.type_id(&ty);
+            let local = destination.local;
+            format!("{{ frame{local}.write(empty{id}()); frame{local}.as_mut_ptr() }}")
+        } else {
+            self.operation(operation, &ty, f)
+        };
         if matches!(
             operation,
             Operation::Borrow(..) | Operation::CapturePlace(..)

@@ -380,3 +380,24 @@ fn imported_generic_borrowed_results_preserve_lifetime_contracts() {
     let errors = check(&loaded.module.unwrap()).unwrap_err();
     assert!(errors.iter().any(|e| e.code == "E0381"), "{errors:?}");
 }
+
+#[test]
+fn unsafe_callback_annotations_survive_module_qualification() {
+    let files=Fixture::new(&[
+        ("values.nr", "unsafe fn trusted(n:i32):i32 {return n} fn callback():unsafe (i32)=>i32 {return trusted}"),
+        ("api.nr", "export {callback} from \"./values\""),
+        ("main.nr", "import {callback} from \"./api\"\nfn main():i32 {let p=callback();unsafe {return p(7)}}"),
+    ]);
+    assert_eq!(files.code(), 7);
+    fs::write(
+        files.0.join("main.nr"),
+        "import {callback} from \"./api\"\nfn main():i32 {let p=callback();return p(7)}",
+    )
+    .unwrap();
+    let loaded = load(&files.0.join("main.nr"), "app");
+    assert!(loaded.diagnostics.is_empty());
+    assert!(check(&loaded.module.unwrap())
+        .unwrap_err()
+        .iter()
+        .any(|e| e.code == "E0500"));
+}

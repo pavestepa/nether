@@ -228,3 +228,38 @@ Source `unsafe fn` safety проверяется до HIR/MIR execution и codeg
 не отключаются. Generated Rust может использовать внутренние unsafe функции
 и raw pointers независимо от source safety; это trusted backend implementation,
 не разрешение caller вызывать source unsafe fn без блока.
+
+## Консервативные оптимизации 2026-10-25
+
+При `overflow-checks=off` после полной проверки MIR выделяется замкнутое
+множество infallible scalar functions. Для него codegen использует structured
+HIR: обычные Rust locals, if/while и прямые value-returning вызовы. Множество
+вычисляется до fixed point, включая рекурсию. Поддержаны Unit/Bool/Integer,
+wrapping arithmetic и деление/остаток на положительный literal. Dynamic divisor,
+MIN / -1, views, indirect calls, сложные value blocks и прочие неподдержанные
+формы оставляют функцию на проверенном MIR fallback. Checked arithmetic
+сохраняет прежний путь. Result ABI wrappers остаются для внешних/indirect callers;
+внутри scalar subset вызовы не передают Fault. Public MIR-only emission сохраняет
+MIR dispatcher: structured HIR доступен через обычный source pipeline.
+
+Для closed programs с простыми non-Copy классами допускается frame allocation.
+Условия консервативны для всей программы: только scalar fields (не более 16),
+нет destructors, class results, owned class parameters, aggregate storage,
+indirect calls или identity observations. May-live анализ CFG разрешает
+allocation site лишь при отсутствии живых class owners на входе; это исключает
+перезапись места ещё живого объекта при следующей итерации/replacement. На функцию
+не более 16 frame slots; остальные sites используют heap. Существующие NMM
+loans/initialization/cleanup checks исполняются до этого выбора.
+
+Heap и frame handles имеют одинаковые operations/cleanup; внутренний `heap_owned`
+бит определяет только освобождение backing storage, не право владения или
+borrow mode. Frame storage живёт до выхода из функции, а логическая жизнь owner
+по-прежнему заканчивается на исходной cleanup boundary. Copy classes, escaping
+objects, destructors и наблюдаемая identity оставлены на прежнем heap пути.
+Обе оптимизации сейчас включаются только в wrapping arithmetic mode.
+
+`compiler/core/tests/optimizations.rs` проверяет eligibility/fallback и нулевое
+число heap allocations через counting allocator при O0/O3. Native differential
+suite сравнивает с HIR/MIR рекурсию, unsigned limits, overflow, panic конструктора,
+loop-carried owner, break и continue. Это ограниченный subset, не общий escape
+analysis или устранение всех Result/allocations.

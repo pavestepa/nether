@@ -1663,7 +1663,8 @@ runtime выбор режима owned/borrowed вместо фиксирован
 
 Таблица задаёт семантические категории NMM. Большинство пока отображается
 в E-коды; `NMM_NO_OWNER_TOKEN` уже используется непосредственно. Unsafe
-call вне блока — E0500; неподдержанный unsafe callable — E0501.
+call вне блока, включая indirect unsafe call, — E0500; safety mismatch
+callable types — обычная ошибка несовпадения типов.
 
 | Категория | Причина |
 | --- | --- |
@@ -1838,12 +1839,16 @@ alias отклоняется `NMM_NO_OWNER_TOKEN`. Для borrowed storage не�
 
 Добавлены unsafe fn и явные statement unsafe blocks; calling unsafe требует
 лексического блока даже внутри unsafe fn. Safe NMM checks сохраняются.
-Safety проверяется в interface/override signatures. Unsafe function pointers
-пока отклоняются, чтобы не стирать safety в callable type.
+Safety проверяется в interface/override signatures и unsafe callable types.
+Function pointer сохраняет safety при specialization/storage/imports; indirect
+unsafe call требует явного unsafe block.
 
 Полный [статус](0.1/status.md) содержит реализованный subset и ограничения.
-Raw pointers/storage/FFI, weak, closures, channels/async и отдельный MIR verifier
-не завершены. Названия большинства диагностик остаются E-кодами;
+Scalar raw pointers поддерживают адреса, unsafe read/write, element offset и
+writable → readonly cast. Allocation/storage/FFI, weak, closures и channels/async
+не завершены; raw pointer lifetime и отсутствие конфликтующего доступа —
+обязательства автора unsafe.
+Добавлен [MIR verifier синхронного subset](0.1/nmm-verification.md). Названия большинства диагностик остаются E-кодами;
 семантическим NMM именам соответствует матрица приёмки, а не обещание всех кодов.
 
 ## 27. Порядок реализации и открытые детали

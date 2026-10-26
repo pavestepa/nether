@@ -16,6 +16,7 @@ mod lower;
 mod reachability;
 pub mod returns;
 pub mod storage_writes;
+pub mod verify;
 pub use lower::lower;
 pub type BlockId = usize;
 pub type LocalId = usize;

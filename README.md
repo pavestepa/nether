@@ -89,8 +89,12 @@ fn main(): i32 {
 Компилятор переведён на NMM в части привязок и параметров (alias вместо move,
 запрет `var` из readonly пути, borrowed-параметры по умолчанию, consuming требует O).
 Добавлены `unsafe fn` и явные statement `unsafe` blocks; обычные NMM checks сохраняются.
-Raw pointers/storage/FFI ещё не реализованы; unsafe function values отклоняются.
-Weak, каналы, async, замыкания и MIR verifier ещё не реализованы; статус и открытые вопросы —
+Unsafe function values поддержаны как `unsafe (T) => R`; вызов требует unsafe block.
+Raw pointers поддерживают scalar address/read/write, element offset и writable → readonly cast.
+`core/intrinsic` предоставляет owned scalar/Unit storage: allocation, initialize/take/replace/drop_slot/release.
+Non-scalar storage и FFI ещё не реализованы. Statement `loop` поддерживает break/continue.
+MIR verifier проверяет синхронное ядро перед генерацией Rust.
+Weak, каналы, async и замыкания ещё не реализованы; статус и открытые вопросы —
 [NMM](docs/core-memory-managment.md), раздел 26.1. Производительность уровня Rust — цель,
 а не доказанное свойство.
 

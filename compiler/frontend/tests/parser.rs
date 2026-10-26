@@ -275,3 +275,25 @@ fn class_method_dispatch_modifiers_are_preserved() {
         failure(source);
     }
 }
+
+#[test]
+fn unsafe_callable_annotation_and_loop_parse_without_erasing_safety() {
+    let parsed = nether_frontend::parser::parse(
+        nether_frontend::source::SourceId(0),
+        "fn invoke(callback:unsafe (i32)=>i32):i32 {loop {unsafe {return callback(7)}}}",
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let module = parsed.module.unwrap();
+    let nether_frontend::ast::ItemKind::Function(f) = &module.items[0].kind else {
+        panic!()
+    };
+    assert!(matches!(
+        f.parameters[0].ty.as_ref().unwrap().kind,
+        nether_frontend::ast::TypeKind::Function { unsafe_: true, .. }
+    ));
+    let parsed = nether_frontend::parser::parse(
+        nether_frontend::source::SourceId(0),
+        "fn f(x:unsafe i32):() {}",
+    );
+    assert!(!parsed.diagnostics.is_empty());
+}

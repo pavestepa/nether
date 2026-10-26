@@ -31,6 +31,47 @@ impl Emitter {
             Operation::Use(Operand::Constant(v)) => self.typed_constant(v, target),
             Operation::Use(v) => operand(v),
             Operation::Cast(v, ty) => format!("({} as {})", operand(v), self.ty(ty)),
+            Operation::Unary("storage_allocate", count) => {
+                let Type::Pointer { pointee, .. } = target else {
+                    unreachable!()
+                };
+                let ty = self.ty(pointee);
+                let count = operand(count);
+                format!("{{let count={count};let layout=std::alloc::Layout::array::<{ty}>(count).map_err(|_|fault)?;if layout.size()==0 {{std::ptr::NonNull::<{ty}>::dangling().as_ptr()}} else {{let p=std::alloc::alloc(layout).cast::<{ty}>();if p.is_null() {{return Err(fault);}}p}}}}")
+            }
+            Operation::Unary(
+                op @ ("storage_initialize" | "storage_replace" | "storage_take" | "storage_drop"
+                | "storage_release"),
+                args,
+            ) => {
+                let Type::Tuple(fields) = self.operand_ty(args, f) else {
+                    unreachable!()
+                };
+                let Type::Pointer { pointee, .. } = &fields[0] else {
+                    unreachable!()
+                };
+                let args = operand(args);
+                let ty = self.ty(pointee);
+                let body=match *op {
+                    "storage_initialize"=>"a.f0.add(a.f1).write(a.f2)".into(),
+                    "storage_replace"=>"a.f0.add(a.f1).replace(a.f2)".into(),
+                    "storage_take"=>"a.f0.add(a.f1).read()".into(),
+                    "storage_drop"=>"std::ptr::drop_in_place(a.f0.add(a.f1))".into(),
+                    "storage_release"=>format!("let layout=std::alloc::Layout::array::<{ty}>(a.f1).map_err(|_|fault)?;if layout.size()!=0 {{std::alloc::dealloc(a.f0.cast(),layout);}}"),
+                    _=>unreachable!(),
+                };
+                format!("{{let a={args};{body}}}")
+            }
+            Operation::Unary("raw_addr" | "raw_addr_mut", Operand::Address(p)) => {
+                format!("({} as {})", self.place(p, f).0, self.ty(target))
+            }
+            Operation::Unary("raw_read", p) => format!("({}).read()", operand(p)),
+            Operation::Binary("raw_write", p, v) => {
+                format!("({}).write({})", operand(p), operand(v))
+            }
+            Operation::Binary("raw_offset", p, n) => {
+                format!("({}).offset({})", operand(p), operand(n))
+            }
             Operation::Unary(op, v) => {
                 let value = operand(v);
                 if *op == "-" && matches!(target, Type::Integer(_)) {

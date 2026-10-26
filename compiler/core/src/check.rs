@@ -16,6 +16,7 @@ mod future;
 mod generics;
 mod inheritance;
 mod interfaces;
+mod intrinsics;
 mod lifecycle;
 mod methods;
 mod patterns;
@@ -505,6 +506,7 @@ fn check_pass(
             }
             if errors.is_empty() {
                 lifecycle::validate(&program).map_err(|e| vec![e])?;
+                crate::mir::verify::verify(&mir).map_err(|e| vec![e])?;
                 Ok(Pass::Ready(program))
             } else {
                 Err(errors)
@@ -878,12 +880,69 @@ impl Checker<'_> {
                         _ => false,
                     }
                 }
+                if ["&", "&var"].contains(operator) {
+                    let value = self.expr(value, None, true)?;
+                    if !views::place(&value) || !value.ty.raw_scalar() {
+                        return Err(error(
+                            span,
+                            "E0502",
+                            "raw address requires an existing scalar place",
+                        ));
+                    }
+                    if *operator == "&var" {
+                        self.mutable_place(&value)?;
+                    }
+                    let ty = Type::Pointer {
+                        mutable: *operator == "&var",
+                        pointee: Box::new(value.ty.clone()),
+                    };
+                    if let Some(expected) = expected {
+                        same(expected, &ty, span)?;
+                    }
+                    return Ok(h::Expr {
+                        kind: h::ExprKind::Unary(
+                            if *operator == "&var" {
+                                "raw_addr_mut"
+                            } else {
+                                "raw_addr"
+                            },
+                            Box::new(value),
+                        ),
+                        ty,
+                        span,
+                    });
+                }
                 let named_view = view_name(value);
-                let value = self.expr(value, expected, true)?;
-                let ty = value.ty.clone();
+                let value =
+                    self.expr(value, if *operator == "*" { None } else { expected }, true)?;
                 if *operator == "*" && named_view && matches!(value.kind, h::ExprKind::View(_)) {
+                    if let Some(expected) = expected {
+                        same(expected, &value.ty, span)?;
+                    }
                     return Ok(value);
                 }
+                if let Type::Pointer { pointee, .. } = &value.ty {
+                    if *operator == "*" {
+                        self.require_raw_unsafe(span)?;
+                        if !pointee.raw_scalar() {
+                            return Err(error(
+                                span,
+                                "E0900",
+                                "raw dereference currently requires a scalar pointee",
+                            ));
+                        }
+                        let ty = (**pointee).clone();
+                        if let Some(expected) = expected {
+                            same(expected, &ty, span)?;
+                        }
+                        return Ok(h::Expr {
+                            kind: h::ExprKind::Unary("raw_read", Box::new(value)),
+                            ty,
+                            span,
+                        });
+                    }
+                }
+                let ty = value.ty.clone();
                 let valid = match *operator {
                     "-" => {
                         matches!(ty,Type::Integer(i) if i.is_signed())
@@ -916,13 +975,36 @@ impl Checker<'_> {
                 } else {
                     expected
                 };
-                let inferred = if hint.is_none() && !shift {
+                let inferred = if hint.is_none()
+                    && !shift
+                    && !matches!(self.known_type(left), Some(Type::Pointer { .. }))
+                {
                     self.known_type(right)
                 } else {
                     None
                 };
                 let hint = hint.or(inferred.as_ref());
                 let left = self.expr(left, hint, true)?;
+                if matches!(left.ty, Type::Pointer { .. }) && *operator == "+" {
+                    self.require_raw_unsafe(span)?;
+                    if !matches!(&left.ty, Type::Pointer { pointee, .. } if pointee.raw_scalar()) {
+                        return Err(error(
+                            span,
+                            "E0900",
+                            "pointer arithmetic currently requires a scalar pointee",
+                        ));
+                    }
+                    let right = self.expr(right, Some(&Type::Integer(I::Isize)), true)?;
+                    let ty = left.ty.clone();
+                    if let Some(expected) = expected {
+                        same(expected, &ty, span)?;
+                    }
+                    return Ok(h::Expr {
+                        kind: h::ExprKind::Binary("raw_offset", Box::new(left), Box::new(right)),
+                        ty,
+                        span,
+                    });
+                }
                 let right = self.expr(right, if shift { None } else { Some(&left.ty) }, true)?;
                 if matches!(left.ty, Type::Class { .. }) && ["==", "!="].contains(operator) {
                     if let Some(expected) = expected {
@@ -974,6 +1056,34 @@ impl Checker<'_> {
             a::ExprKind::Cast { value, ty } => {
                 let target = resolve_type_with(ty, self.constants, self.nominals)?;
                 let value = self.expr(value, None, true)?;
+                if let (
+                    Type::Pointer {
+                        mutable: from_mut,
+                        pointee: from,
+                    },
+                    Type::Pointer {
+                        mutable: to_mut,
+                        pointee: to,
+                    },
+                ) = (&value.ty, &target)
+                {
+                    self.require_raw_unsafe(span)?;
+                    if from != to || (*to_mut && !*from_mut) || !from.raw_scalar() {
+                        return Err(error(
+                            span,
+                            "E0503",
+                            "pointer cast cannot change pointee type or upgrade readonly access",
+                        ));
+                    }
+                    if let Some(expected) = expected {
+                        same(expected, &target, span)?;
+                    }
+                    return Ok(h::Expr {
+                        kind: h::ExprKind::Cast(Box::new(value)),
+                        ty: target,
+                        span,
+                    });
+                }
                 let valid = value.ty.numeric() && target.numeric()
                     || matches!(value.ty, Type::Bool | Type::Char)
                         && matches!(target, Type::Integer(_))
@@ -988,6 +1098,11 @@ impl Checker<'_> {
                 types,
                 arguments,
             } => {
+                if let a::ExprKind::Name(name) = &callee.kind {
+                    if let Some(id) = nether_frontend::intrinsics::Intrinsic::resolve(name) {
+                        return self.intrinsic(id, types, arguments, expected, span);
+                    }
+                }
                 if matches!(&callee.kind, a::ExprKind::Name(name) if name=="same_identity" && self.lookup(name).is_none() && !self.signatures.contains_key(name) && !self.mono.borrow().templates.contains_key(name))
                 {
                     if !types.is_empty() || arguments.len() != 2 {
@@ -1170,6 +1285,31 @@ impl Checker<'_> {
                 value,
             } => {
                 let place = self.expr(place, None, true)?;
+                if let h::ExprKind::Unary("raw_read", pointer) = &place.kind {
+                    if !matches!(pointer.ty, Type::Pointer { mutable: true, .. }) {
+                        return Err(error(
+                            span,
+                            "E0503",
+                            "raw write requires a writable pointer",
+                        ));
+                    }
+                    if *operator != "=" {
+                        return Err(error(
+                            span,
+                            "E0900",
+                            "raw compound assignment is not implemented",
+                        ));
+                    }
+                    let value = self.expr(value, Some(&place.ty), true)?;
+                    if let Some(expected) = expected {
+                        same(expected, &Type::Unit, span)?;
+                    }
+                    return Ok(h::Expr {
+                        kind: h::ExprKind::Binary("raw_write", pointer.clone(), Box::new(value)),
+                        ty: Type::Unit,
+                        span,
+                    });
+                }
                 if let h::ExprKind::StoredView(slot) = &place.kind {
                     if *operator != "=" {
                         return Err(error(
@@ -1374,7 +1514,44 @@ impl Checker<'_> {
                 .lookup(name)
                 .map(|id| self.locals[id].ty.clone())
                 .or_else(|| self.constants.get(name).map(|(_, ty)| ty.clone())),
-            a::ExprKind::Group(value) | a::ExprKind::Unary { value, .. } => self.known_type(value),
+            a::ExprKind::Group(value) => self.known_type(value),
+            a::ExprKind::Unary { operator, value } => {
+                let ty = self.known_type(value)?;
+                match *operator {
+                    "&" | "&var" => Some(Type::Pointer {
+                        mutable: *operator == "&var",
+                        pointee: Box::new(ty),
+                    }),
+                    "*" if {
+                        let mut source = &**value;
+                        while let a::ExprKind::Group(inner) = &source.kind {
+                            source = inner;
+                        }
+                        matches!(&source.kind, a::ExprKind::Name(name) if self.lookup(name).is_some_and(|id| self.locals[id].view.is_some()))
+                    } =>
+                    {
+                        Some(ty)
+                    }
+                    "*" => match ty {
+                        Type::Pointer { pointee, .. } => Some(*pointee),
+                        other => Some(other),
+                    },
+                    _ => Some(ty),
+                }
+            }
+            a::ExprKind::Index { value, .. } => match self.known_type(value)? {
+                Type::Array(element, _) => Some(*element),
+                _ => None,
+            },
+            a::ExprKind::Member { value, name } => match self.known_type(value)? {
+                Type::Tuple(fields) => fields.get(name.parse::<usize>().ok()?).cloned(),
+                ty => self
+                    .nominals
+                    .fields(&ty)?
+                    .iter()
+                    .find(|f| f.name == *name)
+                    .map(|f| f.ty.clone()),
+            },
             a::ExprKind::Cast { ty, .. } => {
                 resolve_type_with(ty, self.constants, self.nominals).ok()
             }
@@ -1389,6 +1566,17 @@ impl Checker<'_> {
         }
     }
 
+    fn require_raw_unsafe(&self, span: Span) -> Result<()> {
+        if self.unsafe_depth == 0 {
+            Err(error(
+                span,
+                "E0500",
+                "raw operation requires an explicit unsafe block",
+            ))
+        } else {
+            Ok(())
+        }
+    }
     fn mutable_place(&self, place: &h::Expr) -> Result<()> {
         if self.pending_result_place(place) {
             return Ok(());
@@ -1489,16 +1677,28 @@ fn resolve_type_with(
                 )
             }
         }
-        a::TypeKind::Function { parameters, result } => {
+        a::TypeKind::Function {
+            unsafe_,
+            parameters,
+            result,
+        } => {
             let parameters = parameters
                 .iter()
                 .map(|(mutable, ty)| Ok((*mutable, resolve_type_with(ty, constants, nominals)?)))
                 .collect::<Result<Vec<_>>>()?;
             let result = resolve_type_with(result, constants, nominals)?;
             Type::Function {
+                unsafe_: *unsafe_,
                 parameters,
                 result: Box::new(result),
                 contract: None,
+            }
+        }
+        a::TypeKind::Pointer { mutable, pointee } => {
+            let pointee = resolve_type_with(pointee, constants, nominals)?;
+            Type::Pointer {
+                mutable: *mutable,
+                pointee: Box::new(pointee),
             }
         }
         a::TypeKind::Array { element, length } => {
@@ -1662,12 +1862,73 @@ fn magnitude(text: &str, span: Span) -> Result<u128> {
 }
 fn expression_diverges(expr: &h::Expr) -> bool {
     match &expr.kind {
+        h::ExprKind::While { condition, body } => {
+            matches!(condition.kind, h::ExprKind::Value(Value::Bool(true))) && !block_breaks(body)
+        }
         h::ExprKind::Block(block) => block.diverges,
         h::ExprKind::Match(arms) => arms.iter().all(|arm| arm.body.diverges),
         h::ExprKind::If {
             yes, no: Some(no), ..
         } => yes.diverges && no.diverges,
         _ => false,
+    }
+}
+// A break belonging to a nested loop does not exit the current loop. Walk
+// expression blocks too: a break can occur while evaluating an argument.
+fn block_breaks(block: &h::Block) -> bool {
+    block.statements.iter().any(|s| match s {
+        h::Statement::Break => true,
+        h::Statement::Initialize(_, e)
+        | h::Statement::Evaluate(e)
+        | h::Statement::Return(Some(e)) => expr_breaks(e),
+        _ => false,
+    })
+}
+fn expr_breaks(e: &h::Expr) -> bool {
+    use h::ExprKind as E;
+    match &e.kind {
+        E::While { condition, .. } => expr_breaks(condition),
+        E::Block(b) => block_breaks(b),
+        E::If { condition, yes, no } => {
+            expr_breaks(condition) || block_breaks(yes) || no.as_ref().is_some_and(block_breaks)
+        }
+        E::Match(arms) => arms.iter().any(|a| {
+            expr_breaks(&a.condition)
+                || a.guard.as_ref().is_some_and(expr_breaks)
+                || block_breaks(&a.body)
+                || a.bindings.iter().chain(&a.guard_bindings).any(|s| match s {
+                    h::Statement::Evaluate(e) | h::Statement::Initialize(_, e) => expr_breaks(e),
+                    h::Statement::Break => true,
+                    _ => false,
+                })
+        }),
+        E::StoreView(e)
+        | E::StoredView(e)
+        | E::Take(e)
+        | E::Unary(_, e)
+        | E::Cast(e)
+        | E::Tag(e)
+        | E::Payload(e, _)
+        | E::Field(e, _)
+        | E::ArgumentView { place: e, .. }
+        | E::Borrow { place: e, .. } => expr_breaks(e),
+        E::Identity(a, b)
+        | E::Binary(_, a, b)
+        | E::Index(a, b)
+        | E::Assign {
+            place: a, value: b, ..
+        } => expr_breaks(a) || expr_breaks(b),
+        E::StorageCall { arguments, .. }
+        | E::BorrowedCall { arguments, .. }
+        | E::New { arguments, .. }
+        | E::Call(_, arguments)
+        | E::Tuple(arguments)
+        | E::Array(arguments)
+        | E::Enum {
+            fields: arguments, ..
+        } => arguments.iter().any(expr_breaks),
+        E::CallIndirect(c, args, _) => expr_breaks(c) || args.iter().any(expr_breaks),
+        E::Value(_) | E::Local(_) | E::View(_) => false,
     }
 }
 fn same(expected: &Type, actual: &Type, span: Span) -> Result<()> {

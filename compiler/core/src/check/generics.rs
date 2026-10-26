@@ -331,14 +331,39 @@ fn infer(
 ) -> Result<()> {
     match (&pattern.kind, actual) {
         (
-            a::TypeKind::Function { parameters, result },
+            a::TypeKind::Pointer { mutable, pointee },
+            Type::Pointer {
+                mutable: actual_mut,
+                pointee: actual_pointee,
+            },
+        ) => {
+            if mutable != actual_mut {
+                return Err(error(span, "E0371", "pointer access mismatch"));
+            }
+            infer(
+                pointee,
+                actual_pointee,
+                type_names,
+                const_names,
+                output,
+                nominals,
+                span,
+            )?;
+        }
+        (
+            a::TypeKind::Function {
+                unsafe_,
+                parameters,
+                result,
+            },
             Type::Function {
+                unsafe_: actual_unsafe,
                 parameters: actual_parameters,
                 result: actual_result,
                 ..
             },
         ) => {
-            if parameters.len() != actual_parameters.len() {
+            if unsafe_ != actual_unsafe || parameters.len() != actual_parameters.len() {
                 return Err(error(
                     span,
                     "E0371",
@@ -476,7 +501,10 @@ fn validate_complexity(ty: &Type, span: Span) -> Result<()> {
                 pending.push((result, depth + 1));
             }
             Type::Tuple(fields) => pending.extend(fields.iter().map(|ty| (ty, depth + 1))),
-            Type::Array(element, _) => pending.push((element, depth + 1)),
+            Type::Array(element, _)
+            | Type::Pointer {
+                pointee: element, ..
+            } => pending.push((element, depth + 1)),
             Type::Record { fields, .. } => {
                 pending.extend(fields.iter().map(|f| (&f.ty, depth + 1)))
             }

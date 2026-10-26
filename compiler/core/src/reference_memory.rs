@@ -336,3 +336,205 @@ fn write(target: &mut Value, path: &[Projection], value: Value) -> Result<(), Tr
         _ => Err(TrapKind::InvalidIr),
     }
 }
+
+/// Non-owning interpreter address. Weak storage cannot keep a returned local alive.
+#[derive(Clone)]
+pub struct RawPointer {
+    heap: Option<std::rc::Weak<RawHeap>>,
+    storage: std::rc::Weak<Storage>,
+    prefix: Vec<Projection>,
+    index: i128,
+    length: i128,
+    array: bool,
+}
+impl std::fmt::Debug for RawPointer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RawPointer")
+            .field("index", &self.index)
+            .field("length", &self.length)
+            .finish_non_exhaustive()
+    }
+}
+impl PartialEq for RawPointer {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.heap, &other.heap) {
+            (Some(a), Some(b)) => return a.ptr_eq(b) && self.index == other.index,
+            (None, None) => (),
+            _ => return false,
+        }
+        self.storage.ptr_eq(&other.storage)
+            && self.prefix == other.prefix
+            && self.index == other.index
+    }
+}
+impl RawPointer {
+    pub(crate) fn new(reference: Reference) -> Result<Self, TrapKind> {
+        let reference = reference.normalized()?;
+        reference.read()?;
+        let mut ty = reference.slot.ty().clone();
+        let mut array = None;
+        for (depth, projection) in reference.projections.iter().enumerate() {
+            ty = match (projection, ty) {
+                (Projection::Field(i), Type::Array(element, count)) => {
+                    if depth + 1 == reference.projections.len() {
+                        array = Some((*i as i128, count as i128));
+                    }
+                    *element
+                }
+                (Projection::Field(i), Type::Record { fields, .. }) => fields[*i].ty.clone(),
+                (Projection::Field(i), Type::Tuple(fields)) => fields[*i].clone(),
+                (Projection::Variant(i), Type::Enum { variants, .. }) => {
+                    Type::Tuple(variants[*i].fields.clone())
+                }
+                _ => return Err(TrapKind::InvalidIr),
+            };
+        }
+        let mut prefix = reference.projections;
+        if array.is_some() {
+            prefix.pop();
+        }
+        let (index, length) = array.unwrap_or((0, 1));
+        Ok(Self {
+            heap: None,
+            storage: std::rc::Rc::downgrade(&reference.slot.0),
+            prefix,
+            index,
+            length,
+            array: array.is_some(),
+        })
+    }
+    pub(crate) fn offset(mut self, amount: i128) -> Result<Self, TrapKind> {
+        self.index = self.index.checked_add(amount).ok_or(TrapKind::Bounds)?;
+        if self.index < 0 || self.index > self.length {
+            return Err(TrapKind::Bounds);
+        }
+        Ok(self)
+    }
+    fn reference(&self) -> Result<Reference, TrapKind> {
+        if self.index < 0 || self.index >= self.length {
+            return Err(TrapKind::Bounds);
+        }
+        let slot = Slot(self.storage.upgrade().ok_or(TrapKind::InvalidIr)?);
+        let mut projections = self.prefix.clone();
+        if self.array {
+            projections.push(Projection::Field(self.index as usize));
+        }
+        Ok(Reference { slot, projections })
+    }
+    pub(crate) fn read(&self) -> Result<Value, TrapKind> {
+        if let Some(heap) = &self.heap {
+            let heap = heap.upgrade().ok_or(TrapKind::InvalidIr)?;
+            return heap
+                .slots
+                .borrow()
+                .get(&(self.index as u64))
+                .cloned()
+                .ok_or(TrapKind::InvalidIr);
+        }
+        self.reference()?.read()
+    }
+    pub(crate) fn write(&self, value: Value) -> Result<Value, TrapKind> {
+        if let Some(heap) = &self.heap {
+            let heap = heap.upgrade().ok_or(TrapKind::InvalidIr)?;
+            let mut slots = heap.slots.borrow_mut();
+            let slot = slots
+                .get_mut(&(self.index as u64))
+                .ok_or(TrapKind::InvalidIr)?;
+            *slot = value;
+            return Ok(Value::Unit);
+        }
+        let reference = self.reference()?;
+        reference.read()?; // This operation replaces initialized scalar storage only.
+        write(
+            reference
+                .slot
+                .borrow_mut()
+                .as_mut()
+                .ok_or(TrapKind::InvalidIr)?,
+            &reference.projections,
+            value,
+        )?;
+        Ok(Value::Unit)
+    }
+}
+
+struct RawHeap {
+    capacity: u64,
+    slots: RefCell<std::collections::BTreeMap<u64, Value>>,
+}
+#[derive(Default)]
+pub(crate) struct RawAllocations(Vec<Rc<RawHeap>>);
+impl RawAllocations {
+    pub(crate) fn allocate(&mut self, ty: &Type, capacity: u64) -> Result<Value, TrapKind> {
+        crate::layout::layout(ty)
+            .map_err(|_| TrapKind::InvalidIr)?
+            .array(capacity)
+            .map_err(|_| TrapKind::Allocation)?;
+        let heap = Rc::new(RawHeap {
+            capacity,
+            slots: RefCell::new(Default::default()),
+        });
+        let pointer = RawPointer {
+            heap: Some(Rc::downgrade(&heap)),
+            storage: Default::default(),
+            prefix: vec![],
+            index: 0,
+            length: capacity as i128,
+            array: true,
+        };
+        self.0.push(heap);
+        Ok(Value::Pointer(pointer))
+    }
+    pub(crate) fn operation(&mut self, op: &str, argument: Value) -> Result<Value, TrapKind> {
+        let Value::Aggregate(mut args) = argument else {
+            return Err(TrapKind::InvalidIr);
+        };
+        let (Some(Value::Pointer(pointer)), Some(Value::Integer(index))) =
+            (args.first(), args.get(1))
+        else {
+            return Err(TrapKind::InvalidIr);
+        };
+        let heap = pointer
+            .heap
+            .as_ref()
+            .and_then(|h| h.upgrade())
+            .ok_or(TrapKind::InvalidIr)?;
+        if pointer.index != 0 {
+            return Err(TrapKind::InvalidIr);
+        }
+        let index = u64::try_from(index.bits()).map_err(|_| TrapKind::Bounds)?;
+        if op == "storage_release" {
+            if index != heap.capacity || !heap.slots.borrow().is_empty() {
+                return Err(TrapKind::InvalidIr);
+            }
+            self.0.retain(|h| !Rc::ptr_eq(h, &heap));
+            return Ok(Value::Unit);
+        }
+        if index >= heap.capacity {
+            return Err(TrapKind::Bounds);
+        }
+        let mut slots = heap.slots.borrow_mut();
+        match op {
+            "storage_initialize" => {
+                if slots.contains_key(&index) || args.len() != 3 {
+                    return Err(TrapKind::InvalidIr);
+                }
+                slots.insert(index, args.pop().unwrap());
+                Ok(Value::Unit)
+            }
+            "storage_replace" => {
+                let target = slots.get_mut(&index).ok_or(TrapKind::InvalidIr)?;
+                if args.len() != 3 {
+                    return Err(TrapKind::InvalidIr);
+                }
+                Ok(std::mem::replace(target, args.pop().unwrap()))
+            }
+            "storage_take" => slots.remove(&index).ok_or(TrapKind::InvalidIr),
+            "storage_drop" => {
+                slots.remove(&index).ok_or(TrapKind::InvalidIr)?;
+                Ok(Value::Unit)
+            }
+            _ => Err(TrapKind::InvalidIr),
+        }
+    }
+}

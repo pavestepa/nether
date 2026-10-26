@@ -79,6 +79,13 @@ pub fn infer(program: &Program) -> Vec<Summary> {
                     );
                 }
                 match operation {
+                    Operation::Unary("raw_addr_mut", Operand::Address(place)) => record(
+                        place,
+                        TargetEffects {
+                            replace: true,
+                            write_fields: false,
+                        },
+                    ),
                     Operation::Call(callee, arguments)
                     | Operation::CallStorage {
                         function: callee,

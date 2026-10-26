@@ -122,3 +122,45 @@ fn n03_n09_access_and_ownership_violations_are_rejected() {
 fn borrowed_storage_is_non_consuming_and_keeps_the_original_owner() {
     assert_eq!(run("fn borrow(x:Cell):Hold {let v=x;return Hold {cell:v}} fn main():i32 {let o=Cell {value:7};let h=borrow(o);return o.value+h.cell.value}"), 14);
 }
+
+#[test]
+fn normative_counter_example_and_copy_independence() {
+    assert_eq!(run("class Counter {value:i32;constructor(initial:i32) {this.value=initial};fn read(this):i32 {return this.value};fn increment(var this):() {this.value+=1}} fn advance(var counter:Counter):() {counter.increment()} fn main():i32 {var owner=new Counter(10);let initial=owner.read();var first=owner;first.increment();var second=first;advance(second);first.increment();owner.increment();let result=owner;return result.read()-initial}"), 4);
+    assert_eq!(run("fn main():i32 {let original=7;var independent=original;independent+=2;return original*10+independent}"), 79);
+}
+
+#[test]
+fn n30_transfer_requires_reinitialization_on_every_reachable_path() {
+    assert_eq!(run("fn main():i32 {var o=Cell {value:1};var i=0;while i<4 {let h=store(o);if i==2 {o=Cell {value:5}} else {o=Cell {value:2}};i+=1};return o.value}"), 2);
+    for body in [
+        "fn flag():bool {return true} fn main():i32 {var o=Cell {value:1};let h=store(o);if flag() {o=Cell {value:2}};return o.value}",
+        "fn main():i32 {var o=Cell {value:1};var i=0;while i<3 {let h=store(o);i+=1;if i==2 {continue};o=Cell {value:2}};return 0}",
+    ] {
+        let errors = check_source(body).expect_err(body);
+        assert!(errors.iter().any(|c| c == "E0384"), "{errors:?}");
+    }
+}
+
+#[test]
+fn n12_n13_replacement_and_alias_rebinding_have_exact_cleanup() {
+    for (source, expected) in [
+        ("struct R {value:i32;destructor {}} fn main():i32 {var a=R {value:1};let b=R {value:2};a=R {value:3};return 0}", vec![1,3,2]),
+        ("struct R {value:i32;destructor {}} fn main():i32 {var a=R {value:1};var b=R {value:2};var alias=a;alias=b;alias.value+=1;return a.value}", vec![3,1]),
+    ] {
+        let parsed = parse(SourceId(0), source);
+        assert!(parsed.diagnostics.is_empty());
+        let p = check(&parsed.module.unwrap()).unwrap();
+        let m = mir::lower(&p);
+        mir::verify::verify(&m).unwrap();
+        let h = interpret::execute_traced(&p,p.main.unwrap(),vec![],OverflowChecks::Checked,10_000);
+        let r = mir::interpret::execute_traced(&m,m.main.unwrap(),vec![],OverflowChecks::Checked,10_000);
+        assert_eq!(h,r,"{source}");
+        assert!(h.0.is_ok());
+        let values: Vec<_> = h.1.iter().map(|event| {
+            let Value::Aggregate(fields) = &event.value else { panic!() };
+            let Value::Integer(n) = fields[0] else { panic!() };
+            n.signed_value().unwrap()
+        }).collect();
+        assert_eq!(values,expected,"{source}");
+    }
+}

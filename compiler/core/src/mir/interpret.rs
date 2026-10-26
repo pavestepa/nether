@@ -42,6 +42,7 @@ pub fn execute_traced(
         depth: 0,
         active_panic: false,
         clock: Default::default(),
+        allocations: Default::default(),
         events: Vec::new(),
     };
     let result = engine.call(
@@ -58,6 +59,7 @@ struct Engine<'a> {
     depth: usize,
     active_panic: bool,
     clock: memory::Clock,
+    allocations: memory::RawAllocations,
     events: Vec<DropEvent>,
 }
 impl Engine<'_> {
@@ -252,7 +254,13 @@ impl Engine<'_> {
                             })?;
                         }
                     }
-                    match self.operation(operation, locals, views, span) {
+                    match self.operation(
+                        operation,
+                        locals,
+                        views,
+                        span,
+                        &super::verify::place_type(function, destination).unwrap_or(Type::Unit),
+                    ) {
                         Ok(value) => {
                             if !is_call {
                                 for source in consumed {
@@ -373,6 +381,7 @@ impl Engine<'_> {
         locals: &[Slot],
         views: &Views,
         span: Span,
+        result_type: &Type,
     ) -> Result<Value, Trap> {
         let value = |value: &Operand| operand(value, locals).map_err(|kind| Trap { kind, span });
         let values = |values: &[Operand]| values.iter().map(value).collect::<Result<Vec<_>, _>>();
@@ -407,7 +416,33 @@ impl Engine<'_> {
                 .and_then(|v| memory::copy_value(&v, self.clock.clone())),
             Operation::Move(place) => resolve(place, views, locals).and_then(|p| p.read()),
             Operation::Use(v) => return value(v),
+            Operation::Unary("storage_allocate", count) => {
+                let Value::Integer(count) = value(count)? else {
+                    return Err(Trap {
+                        kind: TrapKind::InvalidIr,
+                        span,
+                    });
+                };
+                let Type::Pointer { pointee, .. } = result_type else {
+                    return Err(Trap {
+                        kind: TrapKind::InvalidIr,
+                        span,
+                    });
+                };
+                self.allocations.allocate(pointee, count.bits() as u64)
+            }
+            Operation::Unary(
+                op @ ("storage_initialize" | "storage_replace" | "storage_take" | "storage_drop"
+                | "storage_release"),
+                args,
+            ) => self.allocations.operation(op, value(args)?),
+            Operation::Unary("raw_addr" | "raw_addr_mut", Operand::Address(p)) => {
+                resolve(p, views, locals)
+                    .and_then(memory::RawPointer::new)
+                    .map(Value::Pointer)
+            }
             Operation::Unary(operator, v) => match (*operator, value(v)?) {
+                ("raw_read", Value::Pointer(p)) => p.read(),
                 ("-", Value::Integer(v)) => v
                     .negate(self.checks)
                     .map(Value::Integer)

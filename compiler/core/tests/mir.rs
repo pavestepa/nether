@@ -129,7 +129,7 @@ fn explicit_moves_invalidate_only_the_selected_path_and_backend_rejects_later_re
         projections: vec![Projection::Field(n)],
     };
     let function = Function {
-        storage_writes: Default::default(),
+        storage_writes: std::sync::Arc::new(vec![vec![]]),
         drop_reads: Default::default(),
         result_view: None,
         classes: Default::default(),

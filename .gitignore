@@ -2,3 +2,5 @@
 /.claude/
 .DS_Store
 *.o
+
+/performance/out/

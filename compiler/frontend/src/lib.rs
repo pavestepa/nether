@@ -4,3 +4,5 @@ pub mod lexer;
 pub mod modules;
 pub mod parser;
 pub mod source;
+
+pub mod intrinsics;

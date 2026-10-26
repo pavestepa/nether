@@ -31,11 +31,13 @@ fn callable_mode(ty: &Type) -> bool {
 pub(super) fn same_mode(expected: &Type, actual: &Type, span: Span) -> Result<()> {
     if let (
         Type::Function {
+            unsafe_: a_unsafe,
             parameters: a,
             result: ar,
             contract: Some(ac),
         },
         Type::Function {
+            unsafe_: b_unsafe,
             parameters: b,
             result: br,
             contract: Some(bc),
@@ -47,7 +49,7 @@ pub(super) fn same_mode(expected: &Type, actual: &Type, span: Span) -> Result<()
             (None, None) => true,
             _ => false,
         };
-        if a == b && ar == br && ac.modes == bc.modes && view {
+        if a_unsafe == b_unsafe && a == b && ar == br && ac.modes == bc.modes && view {
             return Ok(());
         }
     }
@@ -186,16 +188,19 @@ pub(super) fn union(a: &Type, b: &Type, span: Span) -> Result<Type> {
         ) => a.clone(),
         (
             Type::Function {
+                unsafe_: a_unsafe,
                 parameters: a,
                 result: ar,
                 contract: Some(ac),
             },
             Type::Function {
+                unsafe_: b_unsafe,
                 parameters: b,
                 result: br,
                 contract: Some(bc),
             },
         ) => {
+            debug_assert_eq!(a_unsafe, b_unsafe);
             let mut c = (**ac).clone();
             for source in &bc.sources {
                 if !c.sources.contains(source) {
@@ -237,6 +242,7 @@ pub(super) fn union(a: &Type, b: &Type, span: Span) -> Result<Type> {
                 }
             }
             Type::Function {
+                unsafe_: *a_unsafe,
                 parameters: a
                     .iter()
                     .zip(b)

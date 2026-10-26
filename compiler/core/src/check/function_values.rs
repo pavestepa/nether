@@ -62,19 +62,6 @@ impl Checker<'_> {
         expected: Option<&Type>,
         span: Span,
     ) -> Result<h::Expr> {
-        if self
-            .mono
-            .borrow()
-            .bodies
-            .get(&signature.id)
-            .is_some_and(|d| d.unsafe_)
-        {
-            return Err(error(
-                span,
-                "E0501",
-                "unsafe function pointers are not supported; use a checked safe wrapper",
-            ));
-        }
         let wanted = match expected {
             Some(Type::Function {
                 parameters,
@@ -103,6 +90,7 @@ impl Checker<'_> {
         let modes = wanted.map_or_else(|| signature.modes.clone(), |(_, c)| c.modes.clone());
         let start = self.locals.len();
         self.scopes.push(BTreeMap::new());
+        self.unsafe_depth += 1;
         let result = (|| {
             let mut source = Vec::new();
             let mut args = Vec::new();
@@ -147,6 +135,7 @@ impl Checker<'_> {
             }
             Ok(pointer)
         })();
+        self.unsafe_depth -= 1;
         self.scopes.pop();
         self.locals.truncate(start);
         self.callable_parameters.retain(|id| *id < start);
@@ -194,6 +183,7 @@ impl Checker<'_> {
         Ok(h::Expr {
             kind: h::ExprKind::Value(Value::Function(id)),
             ty: Type::Function {
+                unsafe_: d.unsafe_,
                 parameters,
                 result: Box::new(call.ty),
                 contract: Some(Box::new(contract)),
@@ -219,13 +209,6 @@ impl Checker<'_> {
             ));
         };
         let template = self.mono.borrow().templates[name].clone();
-        if template.unsafe_ {
-            return Err(error(
-                span,
-                "E0501",
-                "unsafe function pointers are not supported; use a checked safe wrapper",
-            ));
-        }
         if template.parameters.len() != parameters.len()
             || template
                 .parameters
@@ -243,6 +226,7 @@ impl Checker<'_> {
         // body auditing, but never enter the resulting HIR.
         let start = self.locals.len();
         self.scopes.push(BTreeMap::new());
+        self.unsafe_depth += 1;
         let resolved = (|| {
             let mut arguments = Vec::new();
             for (index, (mutable, ty)) in parameters.iter().enumerate() {
@@ -259,6 +243,7 @@ impl Checker<'_> {
         self.scopes.pop();
         self.locals.truncate(start);
         self.callable_parameters.retain(|id| *id < start);
+        self.unsafe_depth -= 1;
         let call = resolved?;
         same(result, &call.ty, span)?;
         let pointer = self.pointer_from_call(call, span)?;
@@ -311,6 +296,7 @@ impl Checker<'_> {
         }
         let callee = self.expr(callee, None, true)?;
         let Type::Function {
+            unsafe_,
             parameters,
             result,
             contract,
@@ -322,6 +308,13 @@ impl Checker<'_> {
                 "called value is not a function pointer",
             ));
         };
+        if *unsafe_ && self.unsafe_depth == 0 {
+            return Err(error(
+                span,
+                "E0500",
+                "unsafe function pointer call requires an explicit unsafe block",
+            ));
+        }
         if parameters.len() != arguments.len() {
             return Err(error(span, "E0313", "wrong number of arguments"));
         }

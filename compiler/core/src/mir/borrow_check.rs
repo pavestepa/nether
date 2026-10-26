@@ -591,6 +591,12 @@ pub fn check(function: &Function) -> Vec<Error> {
                     access(source, Access::Readonly, false)
                 }
                 Operation::Move(source) => access(source, Access::Mutable, false),
+                Operation::Unary("raw_addr", Operand::Address(source)) => {
+                    access(source, Access::Readonly, false)
+                }
+                Operation::Unary("raw_addr_mut", Operand::Address(source)) => {
+                    access(source, Access::Mutable, true)
+                }
                 _ => (),
             }
             if matches!(operation, Operation::Move(Place { projections, .. }) if projections.first() == Some(&Projection::Dereference))

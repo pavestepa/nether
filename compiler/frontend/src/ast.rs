@@ -162,6 +162,7 @@ pub enum TypeKind {
         pointee: Box<Type>,
     },
     Function {
+        unsafe_: bool,
         parameters: Vec<(bool, Type)>,
         result: Box<Type>,
     },

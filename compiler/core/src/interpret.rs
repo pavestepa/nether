@@ -14,6 +14,7 @@ pub enum TrapKind {
     StepLimit,
     CallDepth,
     InvalidIr,
+    Allocation,
     DoublePanic,
 }
 #[derive(Clone, Debug, PartialEq)]
@@ -52,6 +53,7 @@ pub fn execute_traced(
         fuel,
         depth: 0,
         clock: Default::default(),
+        allocations: Default::default(),
         destructors: crate::mir::drop_plan::Destructors::from_functions(&program.functions)
             .expect("checked destructors"),
         active_panic: false,
@@ -87,6 +89,7 @@ struct Engine<'a> {
     fuel: u64,
     depth: usize,
     clock: memory::Clock,
+    allocations: memory::RawAllocations,
     destructors: crate::mir::drop_plan::Destructors,
     active_panic: bool,
     events: Vec<DropEvent>,
@@ -433,9 +436,36 @@ impl Engine<'_> {
             ExprKind::Tuple(values) | ExprKind::Array(values) => {
                 Ok(Value::Aggregate(self.aggregate(values, frame, span)?))
             }
+            ExprKind::Unary("storage_allocate", count) => {
+                let Value::Integer(count) = self.expr(count, frame)? else {
+                    return Err(trap(TrapKind::InvalidIr, span));
+                };
+                let Type::Pointer { pointee, .. } = &expr.ty else {
+                    return Err(trap(TrapKind::InvalidIr, span));
+                };
+                self.allocations
+                    .allocate(pointee, count.bits() as u64)
+                    .map_err(|kind| trap(kind, span))
+            }
+            ExprKind::Unary(
+                op @ ("storage_initialize" | "storage_replace" | "storage_take" | "storage_drop"
+                | "storage_release"),
+                args,
+            ) => {
+                let args = self.expr(args, frame)?;
+                self.allocations
+                    .operation(op, args)
+                    .map_err(|kind| trap(kind, span))
+            }
+            ExprKind::Unary("raw_addr" | "raw_addr_mut", value) => {
+                memory::RawPointer::new(self.place(value, frame)?)
+                    .map(Value::Pointer)
+                    .map_err(|kind| trap(kind, span))
+            }
             ExprKind::Unary(operator, value) => {
                 let value = self.expr(value, frame)?;
                 match (*operator, value) {
+                    ("raw_read", Value::Pointer(p)) => p.read().map_err(|kind| trap(kind, span)),
                     ("-", Value::Integer(value)) => value
                         .negate(self.checks)
                         .map(Value::Integer)
@@ -694,6 +724,16 @@ pub fn binary(
     right: Value,
     checks: OverflowChecks,
 ) -> std::result::Result<Value, TrapKind> {
+    match (operator, &left, &right) {
+        ("raw_write", Value::Pointer(p), value) => return p.write(value.clone()),
+        ("raw_offset", Value::Pointer(p), Value::Integer(n)) => {
+            return p
+                .clone()
+                .offset(n.signed_value().ok_or(TrapKind::InvalidIr)?)
+                .map(Value::Pointer)
+        }
+        _ => (),
+    }
     if let (Value::Integer(a), Value::Integer(b)) = (&left, &right) {
         let operation = match operator {
             "+" => Some(BinaryOp::Add),
@@ -762,6 +802,13 @@ fn comparison(operator: &str, ordering: Option<std::cmp::Ordering>) -> Option<bo
 }
 pub fn cast(value: Value, target: &Type) -> Option<Value> {
     match target {
+        Type::Pointer { .. } => {
+            if matches!(value, Value::Pointer(_)) {
+                Some(value)
+            } else {
+                None
+            }
+        }
         Type::Integer(ty) => Some(Value::Integer(match value {
             Value::Integer(value) => value.cast(*ty),
             Value::F32(value) => Integer::from_float(*ty, f64::from(value)),

@@ -27,7 +27,9 @@ impl Substitution {
                 self.expr(length);
             }
             a::TypeKind::Pointer { pointee, .. } => self.ty(pointee),
-            a::TypeKind::Function { parameters, result } => {
+            a::TypeKind::Function {
+                parameters, result, ..
+            } => {
                 for (_, ty) in parameters {
                     self.ty(ty);
                 }
@@ -244,10 +246,14 @@ fn number(value: u64, span: Span) -> a::Expr {
 pub(crate) fn ast_type(ty: &Type, span: Span) -> a::Type {
     let name = match ty {
         Type::Function {
-            parameters, result, ..
+            unsafe_,
+            parameters,
+            result,
+            ..
         } => {
             return a::Type {
                 kind: a::TypeKind::Function {
+                    unsafe_: *unsafe_,
                     parameters: parameters
                         .iter()
                         .map(|(mutable, ty)| (*mutable, ast_type(ty, span)))
@@ -260,6 +266,15 @@ pub(crate) fn ast_type(ty: &Type, span: Span) -> a::Type {
         Type::Unit => {
             return a::Type {
                 kind: a::TypeKind::Tuple(vec![]),
+                span,
+            }
+        }
+        Type::Pointer { mutable, pointee } => {
+            return a::Type {
+                kind: a::TypeKind::Pointer {
+                    mutable: *mutable,
+                    pointee: Box::new(ast_type(pointee, span)),
+                },
                 span,
             }
         }

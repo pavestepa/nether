@@ -9,6 +9,8 @@ use nether_semantics::OverflowChecks;
 mod classes;
 mod lifecycle;
 mod operations;
+mod stack;
+mod structured;
 
 pub fn emit(program: &hir::Program, checks: OverflowChecks) -> Result<String, Diagnostic> {
     emit_with_sources(program, checks, &[])
@@ -18,7 +20,13 @@ pub fn emit_with_sources(
     checks: OverflowChecks,
     sources: &[Source],
 ) -> Result<String, Diagnostic> {
-    emit_mir_with_sources(&mir::lower(program), checks, sources)
+    let active = structured::candidates(program, checks);
+    emit_internal(
+        &mir::lower(program),
+        checks,
+        sources,
+        Some((program, &active)),
+    )
 }
 pub fn emit_mir(program: &Program, checks: OverflowChecks) -> Result<String, Diagnostic> {
     emit_mir_with_sources(program, checks, &[])
@@ -28,23 +36,21 @@ pub fn emit_mir_with_sources(
     checks: OverflowChecks,
     sources: &[Source],
 ) -> Result<String, Diagnostic> {
-    for f in &program.functions {
-        if let Some((block, _)) = mir::dataflow::place_initialization_errors(f).first() {
-            return Err(Diagnostic::new(
-                "E0401",
-                "uninitialized MIR place",
-                f.blocks[*block].span,
-            ));
-        }
-        if let Some(error) = mir::borrow_check::check(f).into_iter().next() {
-            return Err(mir::borrow_check::diagnostic(f, error, "E0401"));
-        }
-    }
+    emit_internal(program, checks, sources, None)
+}
+fn emit_internal(
+    program: &Program,
+    checks: OverflowChecks,
+    sources: &[Source],
+    structured: Option<(&hir::Program, &std::collections::BTreeSet<usize>)>,
+) -> Result<String, Diagnostic> {
+    mir::verify::verify(program)?;
     let mut emitter = Emitter {
         types: Vec::new(),
         checks,
         destructors: program.destructors.clone(),
         resources: false,
+        stack_slots: Default::default(),
         classes: program.classes.clone(),
     };
     for f in &program.functions {
@@ -92,7 +98,13 @@ pub fn emit_mir_with_sources(
         out.push_str(&emitter.lifecycle_types());
         out.push_str(&emitter.class_copies());
     }
+    let stack_eligible = checks == OverflowChecks::Wrapping && stack::eligible(program);
     for (id, f) in program.functions.iter().enumerate() {
+        emitter.stack_slots = if stack_eligible {
+            stack::slots(f)
+        } else {
+            Default::default()
+        };
         out.push_str(&format!("unsafe fn f{id}("));
         if emitter.resources {
             out.push_str("ctx:&mut Context,");
@@ -107,11 +119,23 @@ pub fn emit_mir_with_sources(
             ") -> Result<{}, Fault> {{\n",
             emitter.return_ty(f)
         ));
+        if structured.is_some_and(|(_, active)| active.contains(&id)) {
+            let args = (0..f.parameters.len())
+                .map(|i| format!("a{i}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            out.push_str(&format!("Ok(fast{id}({args})) }}\n"));
+            continue;
+        }
         for (i, local) in f.locals.iter().enumerate() {
             out.push_str(&format!(
                 "let mut storage{i} = MaybeUninit::<{}>::uninit();\nlet l{i} = std::ptr::addr_of_mut!(storage{i}).cast::<{}>();\n",
                 emitter.local_ty(local, emitter.captured_slot(f, i)), emitter.local_ty(local, emitter.captured_slot(f, i))
             ));
+        }
+        for local in &emitter.stack_slots {
+            let ty = emitter.type_id(&f.locals[*local].ty);
+            out.push_str(&format!("// nonescaping frame allocation\nlet mut frame{local}=MaybeUninit::<H{ty}>::uninit();\n"));
         }
         for (i, local) in f.parameters.iter().enumerate() {
             out.push_str(&format!("l{local}.write(a{i});\n"));
@@ -248,6 +272,9 @@ pub fn emit_mir_with_sources(
         }
         out.push_str("_ => unreachable!(\"invalid Nether block\"),\n} } }\n");
     }
+    if let Some((hir, active)) = structured {
+        out.push_str(&structured::emit(hir, active));
+    }
     if let Some(id) = program.main {
         let result = if program.functions[id].result == Type::Unit {
             "0"
@@ -268,6 +295,7 @@ struct Emitter {
     checks: OverflowChecks,
     destructors: mir::drop_plan::Destructors,
     resources: bool,
+    stack_slots: std::collections::BTreeSet<usize>,
     classes: hir::Classes,
 }
 impl Emitter {
@@ -300,7 +328,9 @@ impl Emitter {
                     self.register(t);
                 }
             }
-            Type::Array(t, _) | Type::StoredView(t) => self.register(t),
+            Type::Array(t, _) | Type::StoredView(t) | Type::Pointer { pointee: t, .. } => {
+                self.register(t)
+            }
             Type::Function {
                 parameters, result, ..
             } => {
@@ -314,6 +344,11 @@ impl Emitter {
     }
     fn ty(&self, ty: &Type) -> String {
         match ty {
+            Type::Pointer { mutable, pointee } => format!(
+                "*{} {}",
+                if *mutable { "mut" } else { "const" },
+                self.ty(pointee)
+            ),
             Type::StoredView(target) => {
                 if self.resource(target) {
                     format!("V{}", self.type_id(target))
@@ -339,6 +374,7 @@ impl Emitter {
                 parameters,
                 result,
                 contract,
+                ..
             } => format!(
                 "unsafe fn({}{}) -> Result<{}, Fault>",
                 if self.resources { "&mut Context," } else { "" },

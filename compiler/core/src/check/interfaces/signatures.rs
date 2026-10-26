@@ -103,7 +103,9 @@ fn symbolic_constants(f: &a::Function) -> Vec<(String, String)> {
                     ty(t, format!("{path}.{i}"), names, out)
                 }
             }
-            a::TypeKind::Function { parameters, result } => {
+            a::TypeKind::Function {
+                parameters, result, ..
+            } => {
                 for (i, (_, t)) in parameters.iter().enumerate() {
                     ty(t, format!("{path}.parameter{i}"), names, out)
                 }

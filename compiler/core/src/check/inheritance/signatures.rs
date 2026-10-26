@@ -129,7 +129,9 @@ impl Bindings {
                 self.expr(length);
             }
             a::TypeKind::Pointer { pointee, .. } => self.ty(pointee),
-            a::TypeKind::Function { parameters, result } => {
+            a::TypeKind::Function {
+                parameters, result, ..
+            } => {
                 for (_, ty) in parameters {
                     self.ty(ty);
                 }
@@ -352,8 +354,12 @@ impl Keys<'_> {
             a::TypeKind::Pointer { mutable, pointee } => {
                 format!("ptr({mutable},{})", self.ty(pointee)?)
             }
-            a::TypeKind::Function { parameters, result } => format!(
-                "fn({})->{}",
+            a::TypeKind::Function {
+                unsafe_,
+                parameters,
+                result,
+            } => format!(
+                "fn(unsafe={unsafe_};{})->{}",
                 parameters
                     .iter()
                     .map(|(m, t)| Ok(format!("{m}:{}", self.ty(t)?)))

@@ -8,7 +8,15 @@ impl Parser {
     fn type_inner(&mut self) -> Result<Type> {
         self.unsupported()?;
         let start = self.current().span;
-        let kind = if self.eat("*") {
+        let kind = if self.eat_word("unsafe") {
+            let mut ty = self.ty()?;
+            let TypeKind::Function { unsafe_, .. } = &mut ty.kind else {
+                return Err(self.error("unsafe type requires a function signature"));
+            };
+            *unsafe_ = true;
+            ty.span = start.join(self.last);
+            return Ok(ty);
+        } else if self.eat("*") {
             let mutable = self.eat_word("var");
             self.lines();
             TypeKind::Pointer {
@@ -43,6 +51,7 @@ impl Parser {
             if self.eat("=>") {
                 self.lines();
                 TypeKind::Function {
+                    unsafe_: false,
                     parameters,
                     result: Box::new(self.ty()?),
                 }

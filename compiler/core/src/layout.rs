@@ -4,7 +4,7 @@ use nether_semantics::{AggregateLayout, EnumLayout, Layout};
 pub fn layout(kind: &Type) -> Result<Layout, String> {
     Ok(match kind {
         Type::Enum { .. } => enum_layout(kind)?.layout,
-        Type::Function { .. } | Type::Class { .. } => Layout::POINTER,
+        Type::Pointer { .. } | Type::Function { .. } | Type::Class { .. } => Layout::POINTER,
         Type::StoredView(_) => {
             return Err("borrowed descriptor layout requires backend context".into())
         }
