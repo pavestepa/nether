@@ -105,7 +105,10 @@ pub fn uses(terminator: &Terminator) -> Locals {
                         operand_uses(value, &mut result);
                     }
                 }
-                Operation::Aggregate(values)
+                Operation::StorageView {
+                    arguments: values, ..
+                }
+                | Operation::Aggregate(values)
                 | Operation::Enum(_, values)
                 | Operation::Call(_, values)
                 | Operation::CallStorage {
@@ -183,7 +186,10 @@ pub fn required_initialized(terminator: &Terminator) -> Vec<Place> {
                     add_operand(value);
                 }
             }
-            Operation::Aggregate(values)
+            Operation::StorageView {
+                arguments: values, ..
+            }
+            | Operation::Aggregate(values)
             | Operation::Enum(_, values)
             | Operation::Call(_, values)
             | Operation::CallStorage {
@@ -330,7 +336,12 @@ pub fn consumed(function: &Function, operation: &Operation) -> Vec<Place> {
     };
     match operation {
         Operation::Move(source) => places.push(source.clone()),
-        Operation::Use(value) | Operation::CompleteClass(value) => operand(value),
+        Operation::Use(value)
+        | Operation::CompleteClass(value)
+        | Operation::Unary(
+            "raw_initialize" | "storage_initialize" | "storage_replace" | "storage_detach",
+            value,
+        ) => operand(value),
         Operation::Aggregate(values)
         | Operation::Enum(_, values)
         | Operation::Call(_, values)

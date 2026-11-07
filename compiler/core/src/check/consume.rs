@@ -64,8 +64,8 @@ impl Walk<'_> {
     fn expr(&mut self, value: &h::Expr) {
         use h::ExprKind as K;
         match &value.kind {
-            K::StoreView(v) => {
-                // A parameter root stored into an aggregate slot is consumed.
+            K::Unary("storage_detach", v) | K::StoreView(v) => {
+                // Aggregate storage and raw allocation detachment both consume O.
                 self.sink(v);
                 self.expr(v);
             }

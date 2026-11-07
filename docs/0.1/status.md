@@ -24,10 +24,10 @@
 - Scalar raw pointers: `*T`/`*var T`, `&`/`&var`, read/write, element offset
   и writable → readonly cast. Адреса невладеющие; raw доступ требует unsafe.
   [Контракт и ограничения](../unsafe.md).
-- Owned scalar/Unit RawStorage через `core/intrinsic`: allocation, initialize,
+- Owned scalar/Unit, struct/class/enum и их tuple/array композиции в RawStorage через `core/intrinsic`: allocation, initialize,
   take, replace, drop_slot, consuming release и safe layout/capacity queries.
   Closed fields, NMM cleanup, zero capacity/ZST sentinel, layout/OOM panic;
-  [границы storage](storage-contracts.md#6-реализованный-owned-scalar-subset).
+  [границы storage](storage-contracts.md#6-реализованный-owned-subset).
 - Statement `loop` с break/continue, cleanup и распознаванием diverging loop
   без выхода; `break value` пока не реализован.
 
@@ -35,11 +35,33 @@
   capability/ABI, provenance/effects, initialization и cleanup exits.
   [Область проверки](nmm-verification.md).
 
+Дополнение 2026-11-05: owned storage расширен на nominal payloads и range moves;
+raw read/write поддерживает plain tuple/array, Unit и Copy struct/enum без class payload.
+Добавлены slot_address/slot_address_mut, drop_in_place и разность указателей;
+арифметика и снятие W поддержаны для owned RawStorage pointee.
+Reinterpret между integer/f32/f64 поддерживает изменение размера, byte offsets
+и частичные записи с сохранением provenance и R/W. Padding-free scalar
+tuple/array/Copy struct/enum также поддержаны. Остальные object representations и
+ZST address casts пока не реализованы; ограничения alignment описаны в unsafe.md.
+MIR reachability больше не сохраняет устаревшие scalar constants после raw-write
+или cleanup деструктора; non-Copy enum refinement сохраняется.
+`into_raw_parts`/`from_raw_parts` передают allocation через unsafe boundary;
+consuming-effect запрещает передавать alias или использовать прежний owner. Вставка сохраняет
+consuming-effects, перенос диапазонов не вызывает Copy; `drop_slot` исполняет
+Nether cleanup, включая panic. Borrowed descriptors в owned payload отклоняются.
+Добавлены `drop_range` и safe `OwnedBuffer<T>` (`core/storage`): после первой
+panic очищаются оставшиеся элементы, повторная panic останавливает cleanup.
+`view`/`view_mut` и safe `at`/`at_mut` поддержаны для owned non-Copy class и plain Copy значений.
+Пункт памяти/unsafe в целом остаётся открытым: borrowed mode,
+inline resource views, внешние allocator adapters и остальные reinterpret representations ещё не реализованы.
+Pointer ↔ usize/isize casts для non-ZST pointees и raw compound assignment реализованы.
+`read_owned`/`write_owned` переносят O через raw pointer и проверяют whole-slot protocol в диагностическом runtime.
+
 ## Не завершено
 
 - Полная нормативная NMM acceptance matrix для будущих primitives;
   исчерпывающее доказательство soundness backend/runtime.
-- Non-scalar raw/storage operations, borrowed storage mode и FFI:
+- Остальные non-scalar raw/storage operations, borrowed storage mode и FFI:
   неподдержанная семантика отклоняется даже в unsafe.
 - Полное исполнение inheritance, upcast/dyn, пользовательские Vec/String.
 - Weak, capturing closures, channels/async. Их целевой контракт описан NMM;

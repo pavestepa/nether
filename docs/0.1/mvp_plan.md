@@ -37,8 +37,27 @@
   получение pointer разрешено, unsafe indirect call требует явного блока.
 - [x] Scalar raw pointers: address/read/write, element offset, writable → readonly cast; MIR/native проверки.
 - [x] Owned scalar/Unit storage в `core/intrinsic`: allocation/init/take/replace/drop_slot/release, layout queries и normal/panic/OOM приёмка.
-- [ ] Non-scalar raw/storage operations, borrowed storage mode, reinterpret/integer casts, range moves и safe storage views.
-- [ ] Raw ↔ safe/owned adapters: provenance, initialization, exactly-once drop,
+- [x] RawStorage для рекурсивных tuple/array композиций scalar/Unit; HIR/MIR и native O0/O3.
+- [x] Owned struct/class/enum storage, generated drop glue и overlap-safe range moves.
+- [x] Raw read/write/address для plain tuple/array, Unit и Copy struct/enum без class payload.
+- [x] `slot_address`/`slot_address_mut`, `drop_in_place`, арифметика owned pointers и разность адресов.
+- [x] `view`/`view_mut` для owned non-Copy class: lifetime/provenance и R/W admission; safe `OwnedBuffer.at`/`at_mut`.
+- [x] Padding-free tuple/array/Copy struct reinterpret: scalar payload, чтение/частичная запись и сохранение R/W.
+- [x] Bool/char и Copy enum reinterpret без padding: valid bit patterns и tag checks в диагностических интерпретаторах.
+- [x] Numeric pointer reinterpret: integer/f32/f64, byte offsets, частичная запись, alignment и границы исходной allocation.
+- [x] Pointer ↔ usize/isize для non-ZST pointees: exposed allocation, невладеющий address round-trip, диагностика dangling/bounds/R-W.
+- [x] Raw compound assignment: однократное вычисление адреса/старого значения и checked/wrapping arithmetic.
+- [x] Plain Copy storage views: scalar/Unit, tuple/array, Copy struct/enum; copy materialization и явные ref/ref var loans.
+- [ ] Borrowed RawStorage: выбор Owned/ReadonlyView до consuming-effect,
+  readonly descriptors и зависимости внешних targets при take/replace/results.
+- [ ] Inline resource storage views: стабильный per-slot drop-state при
+  replacement, panic, take и range moves; exactly-once cleanup.
+- [x] `read_owned`/`write_owned`: перенос O через raw pointer, whole-slot initialization, unsafe/W admission и exactly-once cleanup.
+- [ ] Остальные raw operations, reinterpret с padding/provenance
+  и ZST address casts.
+- [x] Safe fixed-capacity OwnedBuffer и drop_range: очистка оставшихся элементов после первой panic.
+- [x] `into_raw_parts`/`from_raw_parts`: передача allocation без копирования payload и без второго владельца в safe коде.
+- [ ] Остальные Raw ↔ safe/owned adapters: provenance, initialization, exactly-once drop,
   invalidation, bounds/alignment, ZST, OOM и panic safety.
 - [ ] FFI safety/ABI/resource contracts, callback и unwind boundaries.
 - [ ] Негативная и native O0/O3 приёмка всех unsafe operations.

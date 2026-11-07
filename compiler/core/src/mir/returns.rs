@@ -22,6 +22,10 @@ pub type StorageContract = Vec<Component>;
 
 pub(crate) fn call_view(op: &Operation) -> Option<(&[Operand], &Contract)> {
     match op {
+        Operation::StorageView {
+            arguments,
+            contract,
+        } => Some((arguments, contract)),
         Operation::CallView {
             arguments,
             contract,
@@ -234,7 +238,7 @@ pub fn infer(program: &Program) -> Result<Vec<Option<Contract>>, Error> {
                 .enumerate()
                 .map(|(id, fact)| {
                     let f = &program.functions[id];
-                    if f.result.copyable() || fact.origins.is_empty() {
+                    if fact.origins.is_empty() {
                         return Ok(None);
                     }
                     if fact.owned {
@@ -289,9 +293,6 @@ pub fn infer(program: &Program) -> Result<Vec<Option<Contract>>, Error> {
     })
 }
 fn analyze(f: &Function, summaries: &[Fact]) -> Fact {
-    if f.result.copyable() {
-        return Fact::owned();
-    }
     let provenance = borrow_check::provenance(f);
     let flow = reachability::analyze(f);
     let mut initial = BTreeMap::new();
@@ -356,6 +357,14 @@ fn analyze(f: &Function, summaries: &[Fact]) -> Fact {
                 ..
             } if destination.projections.is_empty() => {
                 let fact = match operation {
+                    Operation::StorageView {
+                        arguments,
+                        contract,
+                    } => {
+                        let mut result = operand(&arguments[0]);
+                        result.readonly = contract.access == loans::Access::Readonly;
+                        result
+                    }
                     Operation::Move(p) => read(p),
                     Operation::Use(v) | Operation::CompleteClass(v) => operand(v),
                     Operation::Call(callee, args)

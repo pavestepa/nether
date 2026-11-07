@@ -35,6 +35,29 @@ pub(super) fn candidates(p: &hir::Program, checks: OverflowChecks) -> BTreeSet<u
 }
 
 fn binary(op: &str, a: &str, b: &str, ty: &Type, rhs: Option<&Expr>) -> Option<String> {
+    // Compiler intrinsics may trap; never infer infallibility from scalar operands.
+    if !matches!(
+        op,
+        "+" | "-"
+            | "*"
+            | "/"
+            | "%"
+            | "<<"
+            | ">>"
+            | "&"
+            | "|"
+            | "^"
+            | "=="
+            | "!="
+            | "<"
+            | "<="
+            | ">"
+            | ">="
+            | "&&"
+            | "||"
+    ) {
+        return None;
+    }
     if matches!(ty, Type::Integer(_)) {
         let method = match op {
             "+" => Some("wrapping_add"),

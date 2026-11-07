@@ -3,6 +3,19 @@ pub const MODULE: &str = "core/intrinsic";
 pub const SOURCE: &str = include_str!("intrinsic.nr");
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Intrinsic {
+    WriteOwned,
+    ReadOwned,
+    Detach,
+    Adopt,
+    DropInPlace,
+    SlotAddress,
+    SlotAddressMut,
+    CheckIndex,
+    View,
+    ViewMut,
+    DropRange,
+    MoveSlots,
+    CheckRange,
     Allocate,
     Initialize,
     Take,
@@ -13,7 +26,20 @@ pub enum Intrinsic {
     Align,
 }
 impl Intrinsic {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 21] = [
+        Self::WriteOwned,
+        Self::ReadOwned,
+        Self::Detach,
+        Self::Adopt,
+        Self::DropInPlace,
+        Self::SlotAddress,
+        Self::SlotAddressMut,
+        Self::CheckIndex,
+        Self::View,
+        Self::ViewMut,
+        Self::DropRange,
+        Self::MoveSlots,
+        Self::CheckRange,
         Self::Allocate,
         Self::Initialize,
         Self::Take,
@@ -25,6 +51,19 @@ impl Intrinsic {
     ];
     pub fn name(self) -> &'static str {
         match self {
+            Self::WriteOwned => "pointer_initialize",
+            Self::ReadOwned => "pointer_take",
+            Self::Detach => "heap_detach",
+            Self::Adopt => "heap_adopt",
+            Self::DropInPlace => "pointer_drop",
+            Self::SlotAddress => "heap_address",
+            Self::SlotAddressMut => "heap_address_mut",
+            Self::CheckIndex => "bounds_index",
+            Self::View => "heap_view",
+            Self::ViewMut => "heap_view_mut",
+            Self::DropRange => "heap_drop_range",
+            Self::MoveSlots => "heap_move_slots",
+            Self::CheckRange => "heap_check_range",
             Self::Allocate => "heap_allocate",
             Self::Initialize => "heap_initialize",
             Self::Take => "heap_take",
@@ -37,6 +76,19 @@ impl Intrinsic {
     }
     pub fn symbol(self) -> &'static str {
         match self {
+            Self::WriteOwned => "$intrinsic.pointer_initialize",
+            Self::ReadOwned => "$intrinsic.pointer_take",
+            Self::Detach => "$intrinsic.heap_detach",
+            Self::Adopt => "$intrinsic.heap_adopt",
+            Self::DropInPlace => "$intrinsic.pointer_drop",
+            Self::SlotAddress => "$intrinsic.heap_address",
+            Self::SlotAddressMut => "$intrinsic.heap_address_mut",
+            Self::CheckIndex => "$intrinsic.bounds_index",
+            Self::View => "$intrinsic.heap_view",
+            Self::ViewMut => "$intrinsic.heap_view_mut",
+            Self::DropRange => "$intrinsic.heap_drop_range",
+            Self::MoveSlots => "$intrinsic.heap_move_slots",
+            Self::CheckRange => "$intrinsic.heap_check_range",
             Self::Allocate => "$intrinsic.heap_allocate",
             Self::Initialize => "$intrinsic.heap_initialize",
             Self::Take => "$intrinsic.heap_take",

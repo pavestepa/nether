@@ -8,6 +8,10 @@ impl Checker<'_> {
     pub(super) fn pending_result_place(&self, value: &h::Expr) -> bool {
         match &value.kind {
             h::ExprKind::Call(id, _) => self.mono.borrow().pending_results.contains(id),
+            h::ExprKind::CallIndirect(_, _, contract) => contract
+                .targets
+                .iter()
+                .any(|id| self.mono.borrow().pending_results.contains(id)),
             h::ExprKind::Field(base, _)
             | h::ExprKind::Index(base, _)
             | h::ExprKind::Payload(base, _) => self.pending_result_place(base),
@@ -95,6 +99,7 @@ impl Checker<'_> {
 }
 pub(super) fn place(value: &h::Expr) -> bool {
     match &value.kind {
+        h::ExprKind::Unary("storage_view" | "storage_view_mut", _) => true,
         h::ExprKind::Local(_)
         | h::ExprKind::View(_)
         | h::ExprKind::StoredView(_)
@@ -108,6 +113,7 @@ pub(super) fn place(value: &h::Expr) -> bool {
 }
 pub(super) fn view_root(value: &h::Expr) -> bool {
     match &value.kind {
+        h::ExprKind::Unary("storage_view" | "storage_view_mut", _) => true,
         h::ExprKind::View(_)
         | h::ExprKind::StoredView(_)
         | h::ExprKind::BorrowedCall { .. }

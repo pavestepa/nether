@@ -260,7 +260,7 @@ impl Builder {
                 } else {
                     value
                         .as_ref()
-                        .map_or(Operand::Constant(Value::Unit), |v| self.expr(v))
+                        .map_or(Operand::Constant(Value::Unit), |v| self.expr_mode(v, None))
                 };
                 if let Operand::Local(local) = &result {
                     self.function.cleanup.assign(*local, 0);
@@ -307,8 +307,9 @@ impl Builder {
                 }
             }
             ExprKind::BorrowedCall { .. }
+            | ExprKind::Unary("storage_view" | "storage_view_mut", _)
             | ExprKind::CallIndirect(_, _, h::CallContract { view: Some(_), .. }) => {
-                let Operand::Local(id) = self.expr(expr) else {
+                let Operand::Local(id) = self.expr_mode(expr, None) else {
                     unreachable!()
                 };
                 Place {
@@ -355,8 +356,25 @@ impl Builder {
             }
         }
     }
+    // Value contexts materialize Copy views. place() and direct returns keep
+    // their descriptor so explicit ref bindings and result provenance survive.
     fn expr(&mut self, expr: &Expr) -> Operand {
-        self.expr_mode(expr, None)
+        let result = self.expr_mode(expr, None);
+        if expr.ty.copyable() {
+            if let Operand::Local(local) = result {
+                if self.function.locals[local].view.is_some() {
+                    return self.evaluate(
+                        Operation::Copy(Place {
+                            local,
+                            projections: vec![Projection::Dereference],
+                        }),
+                        &expr.ty,
+                        expr.span,
+                    );
+                }
+            }
+        }
+        result
     }
     fn result_into(
         &mut self,
@@ -508,6 +526,35 @@ impl Builder {
                 Operation::Enum(*variant, self.aggregate_fields(fields))
             }
             ExprKind::Tag(value) => Operation::TagPlace(self.place(value)),
+            ExprKind::Unary(op @ ("storage_view" | "storage_view_mut"), values) => {
+                let ExprKind::Tuple(args) = &values.kind else {
+                    unreachable!()
+                };
+                let arguments = vec![Operand::Address(self.place(&args[0])), self.expr(&args[1])];
+                let access = if *op == "storage_view" {
+                    loans::Access::Readonly
+                } else {
+                    loans::Access::Mutable
+                };
+                let contract = returns::Contract {
+                    access,
+                    origins: std::collections::BTreeSet::from([returns::Origin {
+                        parameter: 0,
+                        path: vec![],
+                    }]),
+                };
+                let id = self.temp(&expr.ty, expr.span);
+                self.function.locals[id].view = Some(access);
+                self.evaluate_into(
+                    Operation::StorageView {
+                        arguments,
+                        contract,
+                    },
+                    Place::local(id),
+                    expr.span,
+                );
+                return Operand::Local(id);
+            }
             ExprKind::Unary(operator @ ("raw_addr" | "raw_addr_mut"), value) => {
                 Operation::Unary(operator, Operand::Address(self.place(value)))
             }

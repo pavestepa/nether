@@ -84,13 +84,23 @@ fn transfer(function: &Function, term: &Terminator, input: &State, next: BlockId
             next: success,
             ..
         } => {
-            // Calls may change any reachable target, including through aliases.
+            // Calls, raw writes and destructors may change any reachable target,
+            // including locals reached through escaped raw addresses.
             if matches!(
                 operation,
                 Operation::Call(..)
                     | Operation::CallIndirect(..)
                     | Operation::CallView { .. }
                     | Operation::CallStorage { .. }
+                    | Operation::Binary("raw_write", ..)
+                    | Operation::Unary(
+                        "raw_initialize"
+                            | "raw_take"
+                            | "raw_drop"
+                            | "storage_drop"
+                            | "storage_drop_range",
+                        _
+                    )
             ) {
                 state.clear();
             }
@@ -114,6 +124,18 @@ fn transfer(function: &Function, term: &Terminator, input: &State, next: BlockId
             }
         }
         Terminator::EndStorage { locals, .. } => {
+            // Cleanup may run user code with raw addresses to surviving locals.
+            if locals.iter().any(|local| {
+                !function.locals[*local].ty.copyable() && function.locals[*local].view.is_none()
+            }) {
+                // Non-Copy enum roots cannot be raw-addressed in the current
+                // subset; stored views are readonly. Preserve their tag facts
+                // needed for safe payload refinement across unrelated cleanup.
+                state.retain(|local, known| {
+                    matches!(known, Known::Variant(_))
+                        && !function.locals[*local].ty.raw_copy_value()
+                });
+            }
             for local in locals {
                 state.remove(local);
             }

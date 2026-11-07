@@ -254,6 +254,7 @@ impl Engine<'_> {
                             })?;
                         }
                     }
+                    let entered_panicking = self.active_panic;
                     match self.operation(
                         operation,
                         locals,
@@ -306,7 +307,19 @@ impl Engine<'_> {
                             }
                         }
                         Err(trap) => {
-                            let trap = if is_call { trap } else { self.new_panic(trap) };
+                            let raised_in_drop = matches!(
+                                operation,
+                                Operation::Unary(
+                                    "raw_drop" | "storage_drop" | "storage_drop_range",
+                                    _
+                                )
+                            ) && !entered_panicking
+                                && self.active_panic;
+                            let trap = if is_call || raised_in_drop {
+                                trap
+                            } else {
+                                self.new_panic(trap)
+                            };
                             if trap.kind == TrapKind::DoublePanic {
                                 return Err(trap);
                             }
@@ -386,6 +399,19 @@ impl Engine<'_> {
         let value = |value: &Operand| operand(value, locals).map_err(|kind| Trap { kind, span });
         let values = |values: &[Operand]| values.iter().map(value).collect::<Result<Vec<_>, _>>();
         let result = match operation {
+            Operation::StorageView { arguments, .. } => {
+                let Operand::Address(storage) = &arguments[0] else {
+                    return Err(Trap {
+                        kind: TrapKind::InvalidIr,
+                        span,
+                    });
+                };
+                let storage = resolve(storage, views, locals)
+                    .and_then(|p| p.read())
+                    .map_err(|kind| Trap { kind, span })?;
+                self.allocations
+                    .storage_view(storage, value(&arguments[1])?)
+            }
             Operation::StoreView(p) => resolve(p, views, locals)
                 .and_then(|p| p.captured())
                 .map(|p| Value::View(memory::ViewValue(p))),
@@ -416,6 +442,15 @@ impl Engine<'_> {
                 .and_then(|v| memory::copy_value(&v, self.clock.clone())),
             Operation::Move(place) => resolve(place, views, locals).and_then(|p| p.read()),
             Operation::Use(v) => return value(v),
+            Operation::Unary(op @ ("raw_expose" | "raw_expose_mut" | "raw_recover"), operand) => {
+                let operand = value(operand)?;
+                if *op == "raw_recover" {
+                    self.allocations.recover(operand, result_type)
+                } else {
+                    self.allocations
+                        .expose(operand, *op == "raw_expose_mut", result_type)
+                }
+            }
             Operation::Unary("storage_allocate", count) => {
                 let Value::Integer(count) = value(count)? else {
                     return Err(Trap {
@@ -429,13 +464,93 @@ impl Engine<'_> {
                         span,
                     });
                 };
-                self.allocations.allocate(pointee, count.bits() as u64)
+                self.allocations
+                    .allocate(pointee, count.bits() as u64, self.clock.clone())
             }
             Operation::Unary(
-                op @ ("storage_initialize" | "storage_replace" | "storage_take" | "storage_drop"
-                | "storage_release"),
+                op @ ("raw_initialize"
+                | "storage_initialize"
+                | "storage_replace"
+                | "storage_take"
+                | "raw_take"
+                | "raw_drop"
+                | "storage_drop"
+                | "storage_drop_range"
+                | "storage_detach"
+                | "storage_adopt"
+                | "storage_release"
+                | "storage_check_range"
+                | "storage_move_slots"
+                | "storage_address"
+                | "storage_address_mut"),
                 args,
-            ) => self.allocations.operation(op, value(args)?),
+            ) => {
+                if matches!(*op, "raw_drop" | "storage_drop" | "storage_drop_range") {
+                    let Operand::Local(local) = args else {
+                        return Err(Trap {
+                            kind: TrapKind::InvalidIr,
+                            span,
+                        });
+                    };
+                    let Type::Tuple(fields) = locals[*local].ty() else {
+                        return Err(Trap {
+                            kind: TrapKind::InvalidIr,
+                            span,
+                        });
+                    };
+                    let Type::Pointer { pointee, .. } = &fields[0] else {
+                        return Err(Trap {
+                            kind: TrapKind::InvalidIr,
+                            span,
+                        });
+                    };
+                    let argument = value(args)?;
+                    if *op == "storage_drop_range" {
+                        let (pointer, start, count) = self
+                            .allocations
+                            .drop_range_arguments(argument)
+                            .map_err(|kind| Trap { kind, span })?;
+                        let mut pending = None;
+                        for index in start..start + count {
+                            let argument = Value::Aggregate(vec![
+                                pointer.clone(),
+                                Value::Integer(Integer::from_bits(
+                                    IntegerType::Usize,
+                                    index as u128,
+                                )),
+                            ]);
+                            let payload = self
+                                .allocations
+                                .operation(
+                                    if *op == "raw_drop" {
+                                        "raw_take"
+                                    } else {
+                                        "storage_take"
+                                    },
+                                    argument,
+                                )
+                                .map_err(|kind| Trap { kind, span })?;
+                            self.drop_value(payload, pointee, &mut pending, span)?;
+                        }
+                        return pending.map_or(Ok(Value::Unit), Err);
+                    }
+                    let payload = self
+                        .allocations
+                        .operation(
+                            if *op == "raw_drop" {
+                                "raw_take"
+                            } else {
+                                "storage_take"
+                            },
+                            argument,
+                        )
+                        .map_err(|kind| Trap { kind, span })?;
+                    let mut pending = None;
+                    self.drop_value(payload, pointee, &mut pending, span)?;
+                    return pending.map_or(Ok(Value::Unit), Err);
+                }
+                self.allocations.operation(op, value(args)?)
+            }
             Operation::Unary("raw_addr" | "raw_addr_mut", Operand::Address(p)) => {
                 resolve(p, views, locals)
                     .and_then(memory::RawPointer::new)

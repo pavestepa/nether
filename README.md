@@ -90,9 +90,12 @@ fn main(): i32 {
 запрет `var` из readonly пути, borrowed-параметры по умолчанию, consuming требует O).
 Добавлены `unsafe fn` и явные statement `unsafe` blocks; обычные NMM checks сохраняются.
 Unsafe function values поддержаны как `unsafe (T) => R`; вызов требует unsafe block.
-Raw pointers поддерживают scalar address/read/write, element offset и writable → readonly cast.
-`core/intrinsic` предоставляет owned scalar/Unit storage: allocation, initialize/take/replace/drop_slot/release.
-Non-scalar storage и FFI ещё не реализованы. Statement `loop` поддерживает break/continue.
+Raw pointers поддерживают address/read/write для plain Copy значений, element offset, разность адресов, writable → readonly cast и reinterpret scalar pointee и padding-free Copy агрегатов с byte access. Поддержаны pointer ↔ usize/isize casts для non-ZST pointees и raw compound assignment.
+`core/intrinsic` предоставляет owned storage для scalar/Unit, struct/class/enum и их tuple/array композиций: allocation, initialize/take/replace/drop_slot/release, slot_address и drop_in_place.
+`core/storage` предоставляет safe fixed-capacity `OwnedBuffer<T>` с очисткой при panic.
+Class views доступны через `view`/`view_mut` и safe `OwnedBuffer.at`/`at_mut`.
+Copy storage views поддерживают явные `ref`/`ref var`; обычное связывание копирует значение.
+Borrowed storage, inline resource views и FFI ещё не реализованы. Statement `loop` поддерживает break/continue.
 MIR verifier проверяет синхронное ядро перед генерацией Rust.
 Weak, каналы, async и замыкания ещё не реализованы; статус и открытые вопросы —
 [NMM](docs/core-memory-managment.md), раздел 26.1. Производительность уровня Rust — цель,

@@ -364,13 +364,102 @@ fn operand_type(f: &Function, operand: &Operand) -> Option<Type> {
 fn verify_raw(f: &Function, op: &Operation, destination: &Place) -> Result<(), &'static str> {
     let result = place_type(f, destination);
     let valid = match op {
+        Operation::StorageView {
+            arguments,
+            contract,
+        } => {
+            let [Operand::Address(storage), index] = arguments.as_slice() else {
+                return Err("invalid MIR storage view arguments");
+            };
+            let Some(Type::Record { fields, .. }) = place_type(f, storage) else {
+                return Err("storage view requires a storage capability");
+            };
+            (matches!(&result, Some(Type::Class { copy: false, .. }))
+                || result.as_ref().is_some_and(Type::raw_copy_value))
+                && fields.len() == 2
+                && fields[0].name == "data"
+                && fields[0].private
+                && fields[1].name == "cap"
+                && fields[1].private
+                && fields[1].ty == Type::Integer(nether_semantics::IntegerType::Usize)
+                && matches!(&fields[0].ty,Type::Pointer {mutable:true,pointee} if result.as_ref()==Some(&**pointee))
+                && operand_type(f, index)
+                    == Some(Type::Integer(nether_semantics::IntegerType::Usize))
+                && contract.origins
+                    == BTreeSet::from([returns::Origin {
+                        parameter: 0,
+                        path: vec![],
+                    }])
+                && (contract.access == loans::Access::Readonly || writable(f, storage))
+        }
+        Operation::Unary(op @ ("storage_address" | "storage_address_mut"), args) => {
+            let Some(Type::Tuple(fields)) = operand_type(f, args) else {
+                return Err("invalid storage address arguments");
+            };
+            fields.len() == 3
+                && fields[1..]
+                    .iter()
+                    .all(|t| *t == Type::Integer(nether_semantics::IntegerType::Usize))
+                && matches!((&fields[0],&result), (Type::Pointer {mutable:true,pointee},Some(Type::Pointer {mutable,pointee:target})) if pointee.raw_storage_value() && pointee==target && *mutable==(*op=="storage_address_mut"))
+        }
+        Operation::Unary("storage_move_slots", args) => {
+            let Some(Type::Tuple(fields)) = operand_type(f, args) else {
+                return Err("invalid MIR range move");
+            };
+            fields.len() == 7
+                && fields[0] == fields[3]
+                && matches!(&fields[0],Type::Pointer {mutable:true,pointee} if pointee.raw_storage_value())
+                && [1, 2, 4, 5, 6]
+                    .iter()
+                    .all(|i| fields[*i] == Type::Integer(nether_semantics::IntegerType::Usize))
+                && result == Some(Type::Unit)
+        }
+        Operation::Unary("storage_detach", value) => {
+            let Some(Type::Record { fields, .. }) = operand_type(f, value) else {
+                return Err("detach requires RawStorage");
+            };
+            fields.len() == 2
+                && fields[0].private
+                && fields[0].name == "data"
+                && fields[1].private
+                && fields[1].name == "cap"
+                && matches!(&fields[0].ty,Type::Pointer {mutable:true,pointee} if pointee.raw_storage_value())
+                && fields[1].ty == Type::Integer(nether_semantics::IntegerType::Usize)
+                && result == Some(Type::Tuple(fields.iter().map(|f| f.ty.clone()).collect()))
+        }
+        Operation::Unary(op @ ("raw_expose" | "raw_expose_mut"), value) => {
+            matches!(operand_type(f,value),Some(Type::Pointer {mutable,pointee}) if mutable==(*op=="raw_expose_mut") && pointee.raw_storage_value() && crate::layout::layout(&pointee).is_ok_and(|l|l.size()!=0))
+                && matches!(
+                    result,
+                    Some(Type::Integer(
+                        nether_semantics::IntegerType::Usize | nether_semantics::IntegerType::Isize
+                    ))
+                )
+        }
+        Operation::Unary("raw_recover", value) => {
+            matches!(
+                operand_type(f, value),
+                Some(Type::Integer(
+                    nether_semantics::IntegerType::Usize | nether_semantics::IntegerType::Isize
+                ))
+            ) && matches!(&result,Some(Type::Pointer {pointee,..}) if pointee.raw_storage_value() && crate::layout::layout(pointee).is_ok_and(|l|l.size()!=0))
+        }
         Operation::Unary("storage_allocate", count) => {
             operand_type(f, count) == Some(Type::Integer(nether_semantics::IntegerType::Usize))
-                && matches!(&result, Some(Type::Pointer {mutable:true,pointee}) if pointee.raw_scalar() || **pointee==Type::Unit)
+                && matches!(&result, Some(Type::Pointer {mutable:true,pointee}) if pointee.raw_storage_value())
         }
         Operation::Unary(
-            op @ ("storage_initialize" | "storage_replace" | "storage_take" | "storage_drop"
-            | "storage_release"),
+            op @ ("raw_initialize"
+            | "storage_initialize"
+            | "storage_replace"
+            | "storage_take"
+            | "raw_take"
+            | "raw_drop"
+            | "storage_drop"
+            | "storage_drop_range"
+            | "storage_adopt"
+            | "storage_release"
+            | "storage_check_range"),
             args,
         ) => {
             let Some(Type::Tuple(fields)) = operand_type(f, args) else {
@@ -383,27 +472,40 @@ fn verify_raw(f: &Function, op: &Operation, destination: &Place) -> Result<(), &
             else {
                 return Err("invalid MIR storage capability");
             };
-            let count = if matches!(*op, "storage_initialize" | "storage_replace") {
+            let count = if matches!(*op, "storage_check_range" | "storage_drop_range") {
+                4
+            } else if matches!(
+                *op,
+                "raw_initialize" | "storage_initialize" | "storage_replace"
+            ) {
                 3
             } else {
                 2
             };
             fields.len() == count
                 && fields.get(1) == Some(&Type::Integer(nether_semantics::IntegerType::Usize))
-                && (pointee.raw_scalar() || **pointee == Type::Unit)
-                && (!matches!(*op, "storage_initialize" | "storage_replace")
-                    || fields.get(2) == Some(&**pointee))
+                && (!matches!(*op, "storage_check_range" | "storage_drop_range")
+                    || fields[2..]
+                        .iter()
+                        .all(|t| *t == Type::Integer(nether_semantics::IntegerType::Usize)))
+                && pointee.raw_storage_value()
+                && (!matches!(
+                    *op,
+                    "raw_initialize" | "storage_initialize" | "storage_replace"
+                ) || fields.get(2) == Some(&**pointee))
                 && result
-                    == Some(if matches!(*op, "storage_take" | "storage_replace") {
-                        (**pointee).clone()
-                    } else {
-                        Type::Unit
-                    })
+                    == Some(
+                        if matches!(*op, "raw_take" | "storage_take" | "storage_replace") {
+                            (**pointee).clone()
+                        } else {
+                            Type::Unit
+                        },
+                    )
         }
 
         Operation::Unary(name @ ("raw_addr" | "raw_addr_mut"), Operand::Address(p)) => {
             let source = place_type(f, p);
-            source.as_ref().is_some_and(Type::raw_scalar)
+            source.as_ref().is_some_and(Type::raw_copy_value)
                 && result
                     == source.map(|t| Type::Pointer {
                         mutable: *name == "raw_addr_mut",
@@ -413,13 +515,23 @@ fn verify_raw(f: &Function, op: &Operation, destination: &Place) -> Result<(), &
         }
         Operation::Unary("raw_addr" | "raw_addr_mut", _) => false,
         Operation::Unary("raw_read", p) => {
-            matches!(operand_type(f,p), Some(Type::Pointer { pointee, .. }) if pointee.raw_scalar() && result.as_ref() == Some(&*pointee))
+            matches!(operand_type(f,p), Some(Type::Pointer { pointee, .. }) if pointee.raw_copy_value() && result.as_ref() == Some(&*pointee))
         }
         Operation::Binary("raw_write", p, v) => {
-            matches!(operand_type(f,p), Some(Type::Pointer { mutable:true, pointee }) if pointee.raw_scalar() && operand_type(f,v).as_ref() == Some(&*pointee) && result == Some(Type::Unit))
+            matches!(operand_type(f,p), Some(Type::Pointer { mutable:true, pointee }) if pointee.raw_copy_value() && operand_type(f,v).as_ref() == Some(&*pointee) && result == Some(Type::Unit))
         }
-        Operation::Binary("raw_offset", p, n) => {
-            matches!(operand_type(f,p), Some(Type::Pointer { pointee, .. }) if pointee.raw_scalar())
+        Operation::Binary("checked_index", index, length) => {
+            let expected = Some(Type::Integer(nether_semantics::IntegerType::Usize));
+            result == expected
+                && operand_type(f, index) == expected
+                && operand_type(f, length) == expected
+        }
+        Operation::Binary("raw_difference", a, b) => {
+            matches!((operand_type(f,a),operand_type(f,b)),(Some(Type::Pointer {pointee:a,..}),Some(Type::Pointer {pointee:b,..})) if a==b && a.raw_storage_value() && crate::layout::layout(&a).is_ok_and(|layout|layout.size()!=0))
+                && result == Some(Type::Integer(nether_semantics::IntegerType::Isize))
+        }
+        Operation::Binary("raw_offset" | "raw_offset_sub", p, n) => {
+            matches!(operand_type(f,p), Some(Type::Pointer { pointee, .. }) if pointee.raw_storage_value())
                 && operand_type(f, p) == result
                 && operand_type(f, n) == Some(Type::Integer(nether_semantics::IntegerType::Isize))
         }
@@ -427,7 +539,7 @@ fn verify_raw(f: &Function, op: &Operation, destination: &Place) -> Result<(), &
             if matches!(target, Type::Pointer { .. })
                 || matches!(operand_type(f, p), Some(Type::Pointer { .. })) =>
         {
-            matches!((operand_type(f,p),target), (Some(Type::Pointer { mutable: a, pointee: x }), Type::Pointer { mutable: b, pointee: y }) if (!*b || a) && x == *y && x.raw_scalar() && result.as_ref() == Some(target))
+            matches!((operand_type(f,p),target), (Some(Type::Pointer { mutable: a, pointee: x }), Type::Pointer { mutable: b, pointee: y }) if (!*b || a) && (x == *y || x.raw_reinterpret_to(y)) && x.raw_storage_value() && result.as_ref() == Some(target))
         }
         _ => true,
     };

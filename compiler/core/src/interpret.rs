@@ -257,7 +257,15 @@ impl Engine<'_> {
         }
     }
     fn expr(&mut self, expr: &Expr, frame: &mut Frame) -> Result<Value> {
-        self.expr_mode(expr, frame, false)
+        let value = self.expr_mode(expr, frame, false)?;
+        if expr.ty.copyable() && !matches!(expr.ty, Type::StoredView(_)) {
+            if let Value::View(view) = value {
+                let value = view.0.read().map_err(|kind| trap(kind, expr.span))?;
+                return memory::copy_value(&value, self.clock.clone())
+                    .map_err(|kind| trap(kind, expr.span));
+            }
+        }
+        Ok(value)
     }
     fn expr_mode(&mut self, expr: &Expr, frame: &mut Frame, borrowed: bool) -> Result<Value> {
         let already_panicking = self.active_panic;
@@ -436,6 +444,29 @@ impl Engine<'_> {
             ExprKind::Tuple(values) | ExprKind::Array(values) => {
                 Ok(Value::Aggregate(self.aggregate(values, frame, span)?))
             }
+            ExprKind::Unary("storage_view" | "storage_view_mut", values) => {
+                let ExprKind::Tuple(args) = &values.kind else {
+                    return Err(trap(TrapKind::InvalidIr, span));
+                };
+                let storage = self
+                    .place(&args[0], frame)?
+                    .read()
+                    .map_err(|kind| trap(kind, span))?;
+                let index = self.expr(&args[1], frame)?;
+                self.allocations
+                    .storage_view(storage, index)
+                    .map_err(|kind| trap(kind, span))
+            }
+            ExprKind::Unary(op @ ("raw_expose" | "raw_expose_mut" | "raw_recover"), operand) => {
+                let value = self.expr(operand, frame)?;
+                if *op == "raw_recover" {
+                    self.allocations.recover(value, &expr.ty)
+                } else {
+                    self.allocations
+                        .expose(value, *op == "raw_expose_mut", &expr.ty)
+                }
+                .map_err(|kind| trap(kind, span))
+            }
             ExprKind::Unary("storage_allocate", count) => {
                 let Value::Integer(count) = self.expr(count, frame)? else {
                     return Err(trap(TrapKind::InvalidIr, span));
@@ -444,14 +475,81 @@ impl Engine<'_> {
                     return Err(trap(TrapKind::InvalidIr, span));
                 };
                 self.allocations
-                    .allocate(pointee, count.bits() as u64)
+                    .allocate(pointee, count.bits() as u64, self.clock.clone())
                     .map_err(|kind| trap(kind, span))
             }
             ExprKind::Unary(
-                op @ ("storage_initialize" | "storage_replace" | "storage_take" | "storage_drop"
-                | "storage_release"),
+                op @ ("raw_initialize"
+                | "storage_initialize"
+                | "storage_replace"
+                | "storage_take"
+                | "raw_take"
+                | "raw_drop"
+                | "storage_drop"
+                | "storage_drop_range"
+                | "storage_detach"
+                | "storage_adopt"
+                | "storage_release"
+                | "storage_check_range"
+                | "storage_move_slots"
+                | "storage_address"
+                | "storage_address_mut"),
                 args,
             ) => {
+                if matches!(*op, "raw_drop" | "storage_drop" | "storage_drop_range") {
+                    let Type::Tuple(fields) = &args.ty else {
+                        return Err(trap(TrapKind::InvalidIr, span));
+                    };
+                    let Type::Pointer { pointee, .. } = &fields[0] else {
+                        return Err(trap(TrapKind::InvalidIr, span));
+                    };
+                    let value = self.expr(args, frame)?;
+                    if *op == "storage_drop_range" {
+                        let (pointer, start, count) = self
+                            .allocations
+                            .drop_range_arguments(value)
+                            .map_err(|kind| trap(kind, span))?;
+                        let mut pending = None;
+                        for index in start..start + count {
+                            let argument = Value::Aggregate(vec![
+                                pointer.clone(),
+                                Value::Integer(Integer::from_bits(
+                                    nether_semantics::IntegerType::Usize,
+                                    index as u128,
+                                )),
+                            ]);
+                            let payload = self
+                                .allocations
+                                .operation(
+                                    if *op == "raw_drop" {
+                                        "raw_take"
+                                    } else {
+                                        "storage_take"
+                                    },
+                                    argument,
+                                )
+                                .map_err(|kind| trap(kind, span))?;
+                            self.drop_value(payload, pointee, &mut pending, span)
+                                .map_err(Signal::Trap)?;
+                        }
+                        return pending.map_or(Ok(Value::Unit), |e| Err(Signal::Trap(e)));
+                    }
+                    let value = self
+                        .allocations
+                        .operation(
+                            if *op == "raw_drop" {
+                                "raw_take"
+                            } else {
+                                "storage_take"
+                            },
+                            value,
+                        )
+                        .map_err(|kind| trap(kind, span))?;
+                    let mut pending = None;
+                    self.drop_value(value, pointee, &mut pending, span)
+                        .map_err(Signal::Trap)?;
+                    return pending.map_or(Ok(Value::Unit), |e| Err(Signal::Trap(e)));
+                }
                 let args = self.expr(args, frame)?;
                 self.allocations
                     .operation(op, args)
@@ -654,8 +752,9 @@ impl Engine<'_> {
                 value.0
             }
             ExprKind::BorrowedCall { .. }
+            | ExprKind::Unary("storage_view" | "storage_view_mut", _)
             | ExprKind::CallIndirect(_, _, crate::hir::CallContract { view: Some(_), .. }) => {
-                let Value::View(value) = self.expr(expr, frame)? else {
+                let Value::View(value) = self.expr_mode(expr, frame, false)? else {
                     return Err(trap(TrapKind::InvalidIr, expr.span));
                 };
                 value.0
@@ -725,11 +824,32 @@ pub fn binary(
     checks: OverflowChecks,
 ) -> std::result::Result<Value, TrapKind> {
     match (operator, &left, &right) {
+        ("checked_index", Value::Integer(index), Value::Integer(length)) => {
+            return if index.bits() < length.bits() {
+                Ok(left)
+            } else {
+                Err(TrapKind::Bounds)
+            };
+        }
         ("raw_write", Value::Pointer(p), value) => return p.write(value.clone()),
+        ("raw_difference", Value::Pointer(a), Value::Pointer(b)) => {
+            return a.difference(b).map(|n| {
+                Value::Integer(Integer::from_bits(
+                    nether_semantics::IntegerType::Isize,
+                    n as u128,
+                ))
+            });
+        }
+        ("raw_offset_sub", Value::Pointer(p), Value::Integer(n)) => {
+            return p
+                .clone()
+                .raw_offset(-n.signed_value().ok_or(TrapKind::InvalidIr)?)
+                .map(Value::Pointer);
+        }
         ("raw_offset", Value::Pointer(p), Value::Integer(n)) => {
             return p
                 .clone()
-                .offset(n.signed_value().ok_or(TrapKind::InvalidIr)?)
+                .raw_offset(n.signed_value().ok_or(TrapKind::InvalidIr)?)
                 .map(Value::Pointer)
         }
         _ => (),
@@ -802,13 +922,10 @@ fn comparison(operator: &str, ordering: Option<std::cmp::Ordering>) -> Option<bo
 }
 pub fn cast(value: Value, target: &Type) -> Option<Value> {
     match target {
-        Type::Pointer { .. } => {
-            if matches!(value, Value::Pointer(_)) {
-                Some(value)
-            } else {
-                None
-            }
-        }
+        Type::Pointer { pointee, .. } => match value {
+            Value::Pointer(pointer) => pointer.reinterpret(pointee).map(Value::Pointer),
+            _ => None,
+        },
         Type::Integer(ty) => Some(Value::Integer(match value {
             Value::Integer(value) => value.cast(*ty),
             Value::F32(value) => Integer::from_float(*ty, f64::from(value)),

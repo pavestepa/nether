@@ -882,11 +882,11 @@ impl Checker<'_> {
                 }
                 if ["&", "&var"].contains(operator) {
                     let value = self.expr(value, None, true)?;
-                    if !views::place(&value) || !value.ty.raw_scalar() {
+                    if !views::place(&value) || !value.ty.raw_copy_value() {
                         return Err(error(
                             span,
                             "E0502",
-                            "raw address requires an existing scalar place",
+                            "raw address requires an existing addressable plain-data place",
                         ));
                     }
                     if *operator == "&var" {
@@ -924,11 +924,11 @@ impl Checker<'_> {
                 if let Type::Pointer { pointee, .. } = &value.ty {
                     if *operator == "*" {
                         self.require_raw_unsafe(span)?;
-                        if !pointee.raw_scalar() {
+                        if !pointee.raw_copy_value() {
                             return Err(error(
                                 span,
                                 "E0900",
-                                "raw dereference currently requires a scalar pointee",
+                                "raw dereference currently requires a plain-data pointee",
                             ));
                         }
                         let ty = (**pointee).clone();
@@ -968,7 +968,11 @@ impl Checker<'_> {
                 let comparison = ["==", "!=", "<", ">", "<=", ">="].contains(operator);
                 let logical = ["&&", "||"].contains(operator);
                 let shift = ["<<", ">>"].contains(operator);
-                let hint = if logical {
+                let pointer_subtraction =
+                    *operator == "-" && matches!(self.known_type(left), Some(Type::Pointer { .. }));
+                let hint = if pointer_subtraction {
+                    None
+                } else if logical {
                     Some(&Type::Bool)
                 } else if comparison {
                     None
@@ -976,6 +980,7 @@ impl Checker<'_> {
                     expected
                 };
                 let inferred = if hint.is_none()
+                    && !pointer_subtraction
                     && !shift
                     && !matches!(self.known_type(left), Some(Type::Pointer { .. }))
                 {
@@ -985,22 +990,68 @@ impl Checker<'_> {
                 };
                 let hint = hint.or(inferred.as_ref());
                 let left = self.expr(left, hint, true)?;
-                if matches!(left.ty, Type::Pointer { .. }) && *operator == "+" {
+                if matches!(left.ty, Type::Pointer { .. }) && matches!(*operator, "+" | "-") {
                     self.require_raw_unsafe(span)?;
-                    if !matches!(&left.ty, Type::Pointer { pointee, .. } if pointee.raw_scalar()) {
+                    if !matches!(&left.ty, Type::Pointer { pointee, .. } if pointee.raw_storage_value())
+                    {
                         return Err(error(
                             span,
                             "E0900",
-                            "pointer arithmetic currently requires a scalar pointee",
+                            "pointer arithmetic requires a supported owned pointee",
                         ));
                     }
-                    let right = self.expr(right, Some(&Type::Integer(I::Isize)), true)?;
+                    let right_hint = if *operator == "-"
+                        && (matches!(self.known_type(right), Some(Type::Pointer { .. }))
+                            || matches!(right.kind, a::ExprKind::Call { .. }))
+                    {
+                        None
+                    } else {
+                        Some(Type::Integer(I::Isize))
+                    };
+                    let right = self.expr(right, right_hint.as_ref(), true)?;
+                    if *operator == "-" && matches!(right.ty, Type::Pointer { .. }) {
+                        let (Type::Pointer { pointee: a, .. }, Type::Pointer { pointee: b, .. }) =
+                            (&left.ty, &right.ty)
+                        else {
+                            unreachable!()
+                        };
+                        same(a, b, span)?;
+                        if crate::layout::layout(a).is_ok_and(|layout| layout.size() == 0) {
+                            return Err(error(
+                                span,
+                                "E0503",
+                                "pointer difference requires a non-zero-sized pointee",
+                            ));
+                        }
+                        let ty = Type::Integer(I::Isize);
+                        if let Some(expected) = expected {
+                            same(expected, &ty, span)?;
+                        }
+                        return Ok(h::Expr {
+                            kind: h::ExprKind::Binary(
+                                "raw_difference",
+                                Box::new(left),
+                                Box::new(right),
+                            ),
+                            ty,
+                            span,
+                        });
+                    }
+                    same(&Type::Integer(I::Isize), &right.ty, span)?;
                     let ty = left.ty.clone();
                     if let Some(expected) = expected {
                         same(expected, &ty, span)?;
                     }
                     return Ok(h::Expr {
-                        kind: h::ExprKind::Binary("raw_offset", Box::new(left), Box::new(right)),
+                        kind: h::ExprKind::Binary(
+                            if *operator == "+" {
+                                "raw_offset"
+                            } else {
+                                "raw_offset_sub"
+                            },
+                            Box::new(left),
+                            Box::new(right),
+                        ),
                         ty,
                         span,
                     });
@@ -1056,6 +1107,42 @@ impl Checker<'_> {
             a::ExprKind::Cast { value, ty } => {
                 let target = resolve_type_with(ty, self.constants, self.nominals)?;
                 let value = self.expr(value, None, true)?;
+                let address_cast = match (&value.ty, &target) {
+                    (Type::Pointer { mutable, pointee }, Type::Integer(I::Usize | I::Isize)) => {
+                        Some((
+                            if *mutable {
+                                "raw_expose_mut"
+                            } else {
+                                "raw_expose"
+                            },
+                            pointee,
+                        ))
+                    }
+                    (Type::Integer(I::Usize | I::Isize), Type::Pointer { pointee, .. }) => {
+                        Some(("raw_recover", pointee))
+                    }
+                    _ => None,
+                };
+                if let Some((opcode, pointee)) = address_cast {
+                    self.require_raw_unsafe(span)?;
+                    if !pointee.raw_storage_value()
+                        || !crate::layout::layout(pointee).is_ok_and(|l| l.size() != 0)
+                    {
+                        return Err(error(
+                            span,
+                            "E0503",
+                            "address casts require a non-zero-sized owned pointee",
+                        ));
+                    }
+                    if let Some(expected) = expected {
+                        same(expected, &target, span)?
+                    }
+                    return Ok(h::Expr {
+                        kind: h::ExprKind::Unary(opcode, Box::new(value)),
+                        ty: target,
+                        span,
+                    });
+                }
                 if let (
                     Type::Pointer {
                         mutable: from_mut,
@@ -1068,11 +1155,14 @@ impl Checker<'_> {
                 ) = (&value.ty, &target)
                 {
                     self.require_raw_unsafe(span)?;
-                    if from != to || (*to_mut && !*from_mut) || !from.raw_scalar() {
+                    if (from != to && !from.raw_reinterpret_to(to))
+                        || (*to_mut && !*from_mut)
+                        || !from.raw_storage_value()
+                    {
                         return Err(error(
                             span,
                             "E0503",
-                            "pointer cast cannot change pointee type or upgrade readonly access",
+                            "pointer cast requires identical pointees or scalar payloads without padding and cannot upgrade readonly access",
                         ));
                     }
                     if let Some(expected) = expected {
@@ -1293,16 +1383,84 @@ impl Checker<'_> {
                             "raw write requires a writable pointer",
                         ));
                     }
-                    if *operator != "=" {
-                        return Err(error(
-                            span,
-                            "E0900",
-                            "raw compound assignment is not implemented",
-                        ));
-                    }
-                    let value = self.expr(value, Some(&place.ty), true)?;
+                    let shift = ["<<=", ">>="].contains(operator);
+                    let value =
+                        self.expr(value, if shift { None } else { Some(&place.ty) }, true)?;
                     if let Some(expected) = expected {
                         same(expected, &Type::Unit, span)?;
+                    }
+                    if *operator != "=" {
+                        let integer_only = ["&=", "|=", "^=", "<<=", ">>="].contains(operator);
+                        if !place.ty.numeric()
+                            || integer_only && !matches!(place.ty, Type::Integer(_))
+                            || shift && !matches!(value.ty, Type::Integer(_))
+                        {
+                            return Err(error(span, "E0311", "invalid raw compound assignment"));
+                        }
+                        // Capture the address and old value exactly once, before
+                        // evaluating the RHS, just like ordinary compound assignment.
+                        let address = self.locals.len();
+                        let previous = address + 1;
+                        for (name, ty) in [
+                            ("<raw address>", pointer.ty.clone()),
+                            ("<raw previous>", place.ty.clone()),
+                        ] {
+                            self.locals.push(h::Local {
+                                name: name.into(),
+                                ty,
+                                mutable: false,
+                                view: None,
+                                span,
+                            });
+                        }
+                        let address_expr = h::Expr {
+                            kind: h::ExprKind::Local(address),
+                            ty: pointer.ty.clone(),
+                            span,
+                        };
+                        let old = h::Expr {
+                            kind: h::ExprKind::Unary("raw_read", Box::new(address_expr.clone())),
+                            ty: place.ty.clone(),
+                            span,
+                        };
+                        let computed = h::Expr {
+                            kind: h::ExprKind::Binary(
+                                operator.trim_end_matches('='),
+                                Box::new(h::Expr {
+                                    kind: h::ExprKind::Local(previous),
+                                    ty: place.ty.clone(),
+                                    span,
+                                }),
+                                Box::new(value),
+                            ),
+                            ty: place.ty.clone(),
+                            span,
+                        };
+                        let write = h::Expr {
+                            kind: h::ExprKind::Binary(
+                                "raw_write",
+                                Box::new(address_expr),
+                                Box::new(computed),
+                            ),
+                            ty: Type::Unit,
+                            span,
+                        };
+                        return Ok(h::Expr {
+                            kind: h::ExprKind::Block(h::Block {
+                                construction: vec![],
+                                storage: vec![address, previous],
+                                statements: vec![
+                                    h::Statement::Initialize(address, (**pointer).clone()),
+                                    h::Statement::Initialize(previous, old),
+                                    h::Statement::Evaluate(write),
+                                ],
+                                result: Type::Unit,
+                                diverges: false,
+                                span,
+                            }),
+                            ty: Type::Unit,
+                            span,
+                        });
                     }
                     return Ok(h::Expr {
                         kind: h::ExprKind::Binary("raw_write", pointer.clone(), Box::new(value)),
@@ -1582,13 +1740,22 @@ impl Checker<'_> {
             return Ok(());
         }
         match &place.kind {
+            h::ExprKind::Unary("storage_view_mut", _) => Ok(()),
             h::ExprKind::Local(id) if self.locals[*id].mutable => Ok(()),
             h::ExprKind::View(id)
                 if self.locals[*id].view == Some(crate::mir::loans::Access::Mutable) =>
             {
                 Ok(())
             }
-            h::ExprKind::BorrowedCall { contract, .. }
+            h::ExprKind::CallIndirect(
+                _,
+                _,
+                h::CallContract {
+                    view: Some(contract),
+                    ..
+                },
+            )
+            | h::ExprKind::BorrowedCall { contract, .. }
                 if contract.access == crate::mir::loans::Access::Mutable =>
             {
                 Ok(())

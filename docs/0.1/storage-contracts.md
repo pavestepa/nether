@@ -5,7 +5,7 @@
 
 Архитектура: [Nether → Rust](rust-backend.md). Правила памяти сохраняются; прямой LLVM backend удалён.
 
-Статус: нормативный контракт новой 0.1; реализован первый owned scalar subset (см. §6).
+Статус: нормативный контракт новой 0.1; реализован owned subset (см. §6).
 Основание — [утверждённые статические режимы](decisions/container-ownership.md).
 Реализованные сигнатуры предоставляются compiler-owned модулем `core/intrinsic` по symbol ID,
 а не по совпадению имени Vec/String/пользовательской функции.
@@ -176,49 +176,84 @@ Backend baseline не навешивает noalias/inbounds/alignment assumption
 unsafe source contract не разрешает вводить более сильные Rust aliasing/provenance assumptions.
 
 
-## 6. Реализованный owned scalar subset
+## 6. Реализованный owned subset
 
-`import {RawStorage, allocate, initialize, take, replace, drop_slot, release}
-from "core/intrinsic"` подключает встроенный модуль из compiler distribution,
-без поиска одноимённого файла в проекте. Private intrinsics получают закрытые
-symbol IDs при module linking. Пользовательские функции `allocate`,
-`heap_allocate` или тип `RawStorage` вне этого модуля остаются обычными именами.
-Reexports сохраняют привязку; private intrinsic нельзя импортировать напрямую.
+Compiler-owned модуль `core/intrinsic` предоставляет закрытый non-Copy
+`RawStorage<T>` с адресом allocation и capacity. Private intrinsics привязаны
+к symbol ID; одноимённые пользовательские функции не получают этих прав.
+Поддержаны owned scalars/Unit, tuple/array и owned struct/class/enum без
+borrowed полей. `initialize`/`replace` потребляют non-Copy значения;
+`take` передаёт владение caller. `drop_slot`, `drop_range` и `drop_in_place`
+используют generated Nether drop glue. `drop_range` продолжает cleanup после
+первой panic; вторая panic во время cleanup завершает процесс.
 
-Поддержаны T = integer, bool, char, f32, f64 и `()`:
+Поддержаны overlap-safe `move_within`, `move_slots` между allocations,
+`slot_address`/`slot_address_mut` с typed pointers и one-past индексом,
+`read_owned`/`write_owned` для явного переноса владельца через raw pointer,
+`into_raw_parts`/`from_raw_parts` для передачи allocation token без
+копирования payload. Adoption требует исходный allocator, T, capacity,
+base address и единственного владельца; преобразование адреса не доказывает
+эти условия. Диагностические интерпретаторы проверяют их отдельно.
 
-- `allocate`, `initialize`, `take`, `replace`, `drop_slot`, `release`;
-- safe queries `capacity`, `size_of`, `align_of`, `slot_size`, `slot_align`.
+`view`/`view_mut` поддерживают owned non-Copy class и plain Copy значения и сохраняют
+storage provenance и R/W права. Safe fixed-capacity `OwnedBuffer<T>` из
+`core/storage` предоставляет make/push/pop/clear/len/capacity; at/at_mut
+доступны для поддержанных class/Copy views. Для Copy значения обычное связывание
+копирует payload; `let ref` сохраняет readonly loan, `let ref var` — mutable loan.
+Возвращаемый view сохраняет зависимость от storage; возврат view локального
+буфера запрещён. Он очищает initialized prefix при
+обычном завершении и panic. Пример: `examples/owned_buffer/main.nr`.
 
-Layout queries работают и для остальных уже поддержанных layout типов.
-RawStorage реализован закрытым non-Copy record с allocation address и capacity,
-проверенным destructor и обычным NMM cleanup. Его поля недоступны caller;
-создать capability из произвольного pointer нельзя. `release` требует O:
-передача alias отклоняется даже внутри unsafe. Изменение slots требует W на
-storage. Функции записи/переноса пока ограничены scalar/Unit и не являются
-реализацией переноса произвольных non-Copy payloads.
+Native backend проверяет layout/object-size, использует aligned sentinel
+для ZST/нулевой capacity и превращает OOM в Nether panic. Универсальная
+initialization bitmap не добавляется. Диагностические интерпретаторы хранят
+разреженную карту initialized logical slots, обнаруживают повторный init,
+чтение пустого slot и release непустого storage. Default cleanup освобождает
+allocation; unsafe автор обязан отдельно завершить initialized payloads.
 
-Native backend проверяет layout/object-size до allocation, преобразует null/OOM
-в обычную Nether panic и использует aligned sentinel при zero capacity или ZST.
-Он не выделяет initialization bitmap. Диагностические интерпретаторы хранят
-разреженную карту initialized logical slots и отвергают повторный initialize,
-take/drop пустого slot, выход за capacity и release непустого storage.
-Native unsafe preconditions по-прежнему обеспечивает caller.
+Raw address/read/write поддержаны для plain Copy representations без class
+payload. Pointer arithmetic и difference сохраняют allocation boundary. Для ZST raw
+offset допускает только ноль; logical slot indexing доступен через storage API.
+Raw compound assignment фиксирует адрес и старое значение до вычисления RHS.
+Reinterpret поддерживает scalar и padding-free tuple/array/Copy struct
+representations, а также Copy enum с одинаковым полностью initialized размером
+payload всех вариантов и без padding между tag/payload. Bool/char/enum требуют
+допустимых битовых значений; диагностические интерпретаторы проверяют их.
+Owning и provenance-bearing representations не превращаются в bytes. Диагностическая модель требует alignment исходного
+representation не ниже alignment целевого; случайное дополнительное
+выравнивание native адреса не считается доказательством.
 
-Default cleanup освобождает allocation, не уничтожая её содержимое. Библиотечный
-владелец должен очистить initialized slots перед этим, в том числе при panic.
-[Пример безопасного fixed-capacity buffer](../../examples/scalar_buffer/main.nr)
-хранит initialized length, допускает только запись в свободный slot и очищает
-заполненный prefix в destructor; underlying storage освобождается после него.
-[Низкоуровневый пример](../../examples/raw_storage/main.nr) показывает явный release.
+Pointer ↔ usize/isize casts поддержаны для non-ZST owned pointees.
+Exposed address не удерживает allocation живой. Диагностическая модель
+сохраняет extent, исходный тип и разрешённые права; произвольное число можно
+хранить как pointer, но оно не даёт права чтения, записи или adoption.
+Native casts не несут runtime registry: исходные права, lifetime, alignment
+и provenance остаются unsafe обязанностями caller. Восстановление другого
+типа ограничено теми же representations, что и прямой reinterpret.
 
-Не реализованы: non-scalar/owning elements и их generated drop glue, readonly-view
-storage mode, safe `view`/`view_mut` с provenance, `slot_address`, range moves,
-raw `drop_in_place`, allocator adoption и FFI. Эти ограничения не закрывают
-приёмку полного Vec/String/storage контракта из §§1–5.
+Остаются открыты readonly-view storage mode, inline resource storage views,
+ZST address casts, остальные reinterpret representations, внешние allocator
+adapters и FFI. Полный нормативный контракт §§1–5 этим subset не закрыт.
 
-Проверки: `compiler/core/tests/raw_storage.rs` — HIR/MIR equivalence, негативная
-приёмка ownership/privacy/unsafe, reexports, MIR mutations; native O0/O3 с
-счётчиком allocations, проверкой normal/panic cleanup и отказом allocator
-до первой и после первой успешной allocation. Invalid unsafe protocols
-исполняются только диагностическими интерпретаторами.
+Проверки в `compiler/core/tests/raw_storage.rs` и `raw_pointers.rs`:
+HIR/MIR equivalence, unsafe/ownership/privacy admission, MIR mutations,
+native O0/O3 с checked/wrapping arithmetic, allocation counters, cleanup и
+allocator failures. Invalid unsafe protocols выполняются только в
+диагностических интерпретаторах, не как native undefined behavior.
+
+## 7. Явный перенос владельца через raw pointer
+
+`read_owned<T>(pointer:*var T):T` требует initialized whole slot с exclusive
+access. Он передаёт O результату и делает исходный slot uninitialized.
+`write_owned<T>(pointer:*var T,value:T):()` требует uninitialized whole slot,
+потребляет O аргумента и устанавливает значение без уничтожения старого payload.
+Обе функции unsafe. Для замены уже initialized Copy значения служит `*p=value`,
+для replacement owned storage — `replace`, возвращающий прежнего владельца.
+
+Операции сохраняют тип исходного slot либо используют допустимый reinterpret
+точно того же размера; частичный byte window не становится новым owned slot.
+Передача non-Copy record/class/enum не вызывает Copy. В диагностических интерпретаторах
+повторный read и write в занятый slot отвергаются. Native использует pointer
+read/write; initialization protocol и предотвращение двойного cleanup обеспечивает
+unsafe caller. При работе с обычным local надо восстановить его до последующего
+safe доступа или автоматического cleanup; cast не снимает compiler ownership.

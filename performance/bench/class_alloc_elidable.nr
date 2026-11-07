@@ -14,3 +14,9 @@ fn main(): i32 {
     }
     return (total % 251) as i32
 }
+
+
+let a: String
+let a: May String
+let a: Vec String
+let a: Box String

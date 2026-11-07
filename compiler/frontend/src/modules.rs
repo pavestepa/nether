@@ -42,6 +42,7 @@ pub fn load(entry: &Path, package: &str) -> Loaded {
     let root = entry.parent().unwrap().to_path_buf();
     // A virtual path is an internal module identity, never read from disk.
     let intrinsic_path = root.join("\0core-intrinsic");
+    let storage_path = root.join("\0core-storage");
     let mut pending = vec![entry.clone()];
     let mut modules = BTreeMap::new();
     let mut paths = BTreeSet::new();
@@ -51,6 +52,8 @@ pub fn load(entry: &Path, package: &str) -> Loaded {
         let id = SourceId(sources.len());
         let text = match if path == intrinsic_path {
             Ok(crate::intrinsics::SOURCE.to_owned())
+        } else if path == storage_path {
+            Ok(include_str!("../../../stdlib/storage.nr").to_owned())
         } else {
             fs::read_to_string(&path)
         } {
@@ -72,6 +75,8 @@ pub fn load(entry: &Path, package: &str) -> Loaded {
         let source = Source::new(
             if path == intrinsic_path {
                 crate::intrinsics::MODULE.to_owned()
+            } else if path == storage_path {
+                "core/storage".to_owned()
             } else {
                 path.to_string_lossy().into_owned()
             },
@@ -85,6 +90,13 @@ pub fn load(entry: &Path, package: &str) -> Loaded {
         };
         for item in &module.items {
             if let ItemKind::Import { from, .. } = &item.kind {
+                if from == "core/storage" {
+                    imports.insert((path.clone(), from.clone()), storage_path.clone());
+                    if paths.insert(storage_path.clone()) {
+                        pending.push(storage_path.clone());
+                    }
+                    continue;
+                }
                 if from == crate::intrinsics::MODULE {
                     imports.insert((path.clone(), from.clone()), intrinsic_path.clone());
                     if paths.insert(intrinsic_path.clone()) {

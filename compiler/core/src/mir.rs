@@ -68,6 +68,10 @@ pub enum Operand {
 }
 #[derive(Clone, Debug)]
 pub enum Operation {
+    StorageView {
+        arguments: Vec<Operand>,
+        contract: returns::Contract,
+    },
     StoreView(Place),
     LoadView(Place),
     CallStorage {
